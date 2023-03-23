@@ -4627,7 +4627,7 @@ impl<SP: Deref> Channel<SP> where
 					cltv_expiry: htlc.cltv_expiry,
 					onion_routing_packet: (**onion_packet).clone(),
 					skimmed_fee_msat: htlc.skimmed_fee_msat,
-					yuv_amount: htlc.yuv_amount,
+					blinding_point: None,
 				});
 			}
 		}
@@ -6421,7 +6421,7 @@ impl<SP: Deref> Channel<SP> where
 			cltv_expiry,
 			onion_routing_packet,
 			skimmed_fee_msat,
-			yuv_amount,
+			blinding_point: None,
 		};
 		self.context.next_holder_htlc_id += 1;
 
