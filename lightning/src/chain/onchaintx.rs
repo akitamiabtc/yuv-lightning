@@ -12,10 +12,10 @@
 //! OnchainTxHandler objects are fully-part of ChannelMonitor and encapsulates all
 //! building, tracking, bumping and notifications functions.
 
-use bitcoin::PackedLockTime;
+use bitcoin::blockdata::locktime::absolute::LockTime;
 use bitcoin::blockdata::transaction::Transaction;
 use bitcoin::blockdata::transaction::OutPoint as BitcoinOutPoint;
-use bitcoin::blockdata::script::Script;
+use bitcoin::blockdata::script::{Script, ScriptBuf};
 use bitcoin::hashes::{Hash, HashEngine};
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hash_types::{Txid, BlockHash};
@@ -198,7 +198,7 @@ pub(crate) enum ClaimEvent {
 	BumpHTLC {
 		target_feerate_sat_per_1000_weight: u32,
 		htlcs: Vec<ExternalHTLCClaim>,
-		tx_lock_time: PackedLockTime,
+		tx_lock_time: LockTime,
 	},
 }
 
@@ -230,7 +230,7 @@ pub(crate) enum OnchainClaim {
 pub struct OnchainTxHandler<ChannelSigner: WriteableEcdsaChannelSigner> {
 	channel_value_satoshis: u64,
 	channel_keys_id: [u8; 32],
-	destination_script: Script,
+	destination_script: ScriptBuf,
 	holder_commitment: HolderCommitmentTransaction,
 	prev_holder_commitment: Option<HolderCommitmentTransaction>,
 
@@ -468,7 +468,7 @@ impl<'a, 'b, ES: EntropySource, SP: SignerProvider> ReadableArgs<(&'a ES, &'b SP
 
 impl<ChannelSigner: WriteableEcdsaChannelSigner> OnchainTxHandler<ChannelSigner> {
 	pub(crate) fn new(
-		channel_value_satoshis: u64, channel_keys_id: [u8; 32], destination_script: Script,
+		channel_value_satoshis: u64, channel_keys_id: [u8; 32], destination_script: ScriptBuf,
 		signer: ChannelSigner, channel_parameters: ChannelTransactionParameters,
 		holder_commitment: HolderCommitmentTransaction, secp_ctx: Secp256k1<secp256k1::All>
 	) -> Self {
@@ -688,7 +688,7 @@ impl<ChannelSigner: WriteableEcdsaChannelSigner> OnchainTxHandler<ChannelSigner>
 						OnchainClaim::Event(ClaimEvent::BumpHTLC {
 							target_feerate_sat_per_1000_weight,
 							htlcs,
-							tx_lock_time: PackedLockTime(cached_request.package_locktime(cur_height)),
+							tx_lock_time: LockTime::from_consensus(cached_request.package_locktime(cur_height)),
 						}),
 					));
 				} else {
@@ -709,19 +709,8 @@ impl<ChannelSigner: WriteableEcdsaChannelSigner> OnchainTxHandler<ChannelSigner>
 				let transaction = transaction.unwrap();
 
 				log_trace!(logger, "...with timer {} and feerate {}", new_timer, new_feerate);
-				assert!(predicted_weight >= transaction.weight());
-
-				if let Some(yuv_pixel_proofs) = yuv_pixel_proofs {
-					return Some((new_timer, new_feerate, OnchainClaim::YuvTx(YuvOnchainClaim{
-						commitment_tx: cached_request.yuv_commitment_tx(),
-						spend_tx: YuvTransaction{
-							bitcoin_tx: transaction,
-							tx_type: yuv_pixel_proofs,
-						},
-					})));
-				}
-
-				return Some((new_timer, new_feerate, OnchainClaim::Tx(transaction)))
+				assert!(predicted_weight >= transaction.weight().to_wu());
+				return Some((new_timer, new_feerate, OnchainClaim::Tx(transaction)));
 			}
 		} else {
 			// Untractable packages cannot have their fees bumped through Replace-By-Fee. Some
@@ -760,7 +749,7 @@ impl<ChannelSigner: WriteableEcdsaChannelSigner> OnchainTxHandler<ChannelSigner>
 					if let Some(input_amount_sat) = output.funding_amount {
 						let fee_sat = input_amount_sat - tx.output.iter().map(|output| output.value).sum::<u64>();
 						let commitment_tx_feerate_sat_per_1000_weight =
-							compute_feerate_sat_per_1000_weight(fee_sat, tx.weight() as u64);
+							compute_feerate_sat_per_1000_weight(fee_sat, tx.weight().to_wu());
 						if commitment_tx_feerate_sat_per_1000_weight >= package_target_feerate_sat_per_1000_weight {
 							log_debug!(logger, "Pre-signed {} already has feerate {} sat/kW above required {} sat/kW",
 								log_tx!(tx), commitment_tx_feerate_sat_per_1000_weight,
@@ -893,7 +882,7 @@ impl<ChannelSigner: WriteableEcdsaChannelSigner> OnchainTxHandler<ChannelSigner>
 					OnchainClaim::Tx(tx) => {
 						log_info!(logger, "Broadcasting onchain {}", log_tx!(tx));
 						broadcaster.broadcast_transactions(&[&tx]);
-						ClaimId(tx.txid().into_inner())
+						ClaimId(tx.txid().to_byte_array())
 					},
 					OnchainClaim::YuvTx(onchain_claim) => {
 						log_info!(
@@ -915,7 +904,7 @@ impl<ChannelSigner: WriteableEcdsaChannelSigner> OnchainTxHandler<ChannelSigner>
 							ClaimEvent::BumpCommitment { ref commitment_tx, .. } =>
 								// For commitment claims, we can just use their txid as it should
 								// already be unique.
-								ClaimId(commitment_tx.txid().into_inner()),
+								ClaimId(commitment_tx.txid().to_byte_array()),
 							ClaimEvent::BumpHTLC { ref htlcs, .. } => {
 								// For HTLC claims, commit to the entire set of HTLC outputs to
 								// claim, which will always be unique per request. Once a claim ID
@@ -923,10 +912,10 @@ impl<ChannelSigner: WriteableEcdsaChannelSigner> OnchainTxHandler<ChannelSigner>
 								// underlying set of HTLCs changes.
 								let mut engine = Sha256::engine();
 								for htlc in htlcs {
-									engine.input(&htlc.commitment_txid.into_inner());
+									engine.input(&htlc.commitment_txid.to_byte_array());
 									engine.input(&htlc.htlc.transaction_output_index.unwrap().to_be_bytes());
 								}
-								ClaimId(Sha256::from_engine(engine).into_inner())
+								ClaimId(Sha256::from_engine(engine).to_byte_array())
 							},
 						};
 						debug_assert!(self.pending_claim_requests.get(&claim_id).is_none());

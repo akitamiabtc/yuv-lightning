@@ -927,7 +927,7 @@ impl<Descriptor: SocketDescriptor, CM: Deref, RM: Deref, OM: Deref, L: Deref, CM
 		ephemeral_key_midstate.input(ephemeral_random_data);
 
 		let mut secp_ctx = Secp256k1::signing_only();
-		let ephemeral_hash = Sha256::from_engine(ephemeral_key_midstate.clone()).into_inner();
+		let ephemeral_hash = Sha256::from_engine(ephemeral_key_midstate.clone()).to_byte_array();
 		secp_ctx.seeded_randomize(&ephemeral_hash);
 
 		PeerManager {
@@ -971,7 +971,7 @@ impl<Descriptor: SocketDescriptor, CM: Deref, RM: Deref, OM: Deref, L: Deref, CM
 		let mut ephemeral_hash = self.ephemeral_key_midstate.clone();
 		let counter = self.peer_counter.get_increment();
 		ephemeral_hash.input(&counter.to_le_bytes());
-		SecretKey::from_slice(&Sha256::from_engine(ephemeral_hash).into_inner()).expect("You broke SHA-256!")
+		SecretKey::from_slice(&Sha256::from_engine(ephemeral_hash).to_byte_array()).expect("You broke SHA-256!")
 	}
 
 	fn init_features(&self, their_node_id: &PublicKey) -> InitFeatures {
@@ -2689,7 +2689,7 @@ mod tests {
 		for i in 0..peer_count {
 			let node_secret = SecretKey::from_slice(&[42 + i as u8; 32]).unwrap();
 			let features = InitFeatures::from_le_bytes(vec![0u8; 33]);
-			let network = ChainHash::from(&[i as u8; 32][..]);
+			let network = ChainHash::from(&[i as u8; 32]);
 			cfgs.push(
 				PeerManagerCfg{
 					chan_handler: test_utils::TestChannelMessageHandler::new(network),
@@ -2802,8 +2802,7 @@ mod tests {
 								node_id: peers[1].node_signer.get_node_id(Recipient::Node).unwrap(),
 								msg: msgs::Shutdown {
 									channel_id: ChannelId::new_zero(),
-									scriptpubkey: bitcoin::Script::new(),
-									yuv_inner_key: None,
+									scriptpubkey: bitcoin::ScriptBuf::new(),
 								},
 							});
 						cfgs[1].chan_handler.pending_events.lock().unwrap()
@@ -2811,8 +2810,7 @@ mod tests {
 								node_id: peers[0].node_signer.get_node_id(Recipient::Node).unwrap(),
 								msg: msgs::Shutdown {
 									channel_id: ChannelId::new_zero(),
-									scriptpubkey: bitcoin::Script::new(),
-									yuv_inner_key: None,
+									scriptpubkey: bitcoin::ScriptBuf::new(),
 								},
 							});
 
@@ -2940,11 +2938,7 @@ mod tests {
 
 		let their_id = peers[1].node_signer.get_node_id(Recipient::Node).unwrap();
 
-		let msg = msgs::Shutdown {
-			channel_id: ChannelId::from_bytes([42; 32]),
-			scriptpubkey: bitcoin::Script::new(),
-			yuv_inner_key: None,
-		};
+		let msg = msgs::Shutdown { channel_id: ChannelId::from_bytes([42; 32]), scriptpubkey: bitcoin::ScriptBuf::new() };
 		a_chan_handler.pending_events.lock().unwrap().push(events::MessageSendEvent::SendShutdown {
 			node_id: their_id, msg: msg.clone()
 		});

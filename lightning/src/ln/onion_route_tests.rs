@@ -641,7 +641,7 @@ fn test_onion_failure() {
 			let um = onion_utils::gen_um_from_shared_secret(&onion_keys[1].shared_secret.as_ref());
 			let mut hmac = HmacEngine::<Sha256>::new(&um);
 			hmac.input(&decoded_err_packet.encode()[32..]);
-			decoded_err_packet.hmac = Hmac::from_engine(hmac).into_inner();
+			decoded_err_packet.hmac = Hmac::from_engine(hmac).to_byte_array();
 			msg.reason = onion_utils::encrypt_failure_packet(
 				&onion_keys[1].shared_secret.as_ref(), &decoded_err_packet.encode()[..])
 		}, || nodes[2].node.fail_htlc_backwards(&payment_hash), false, None,
@@ -664,7 +664,7 @@ fn test_onion_failure() {
 			let um = onion_utils::gen_um_from_shared_secret(&onion_keys[0].shared_secret.as_ref());
 			let mut hmac = HmacEngine::<Sha256>::new(&um);
 			hmac.input(&decoded_err_packet.encode()[32..]);
-			decoded_err_packet.hmac = Hmac::from_engine(hmac).into_inner();
+			decoded_err_packet.hmac = Hmac::from_engine(hmac).to_byte_array();
 			msg.reason = onion_utils::encrypt_failure_packet(
 				&onion_keys[0].shared_secret.as_ref(), &decoded_err_packet.encode()[..])
 		}, || {}, true, Some(0x1000|7),
@@ -688,7 +688,7 @@ fn test_onion_failure() {
 			let um = onion_utils::gen_um_from_shared_secret(&onion_keys[1].shared_secret.as_ref());
 			let mut hmac = HmacEngine::<Sha256>::new(&um);
 			hmac.input(&decoded_err_packet.encode()[32..]);
-			decoded_err_packet.hmac = Hmac::from_engine(hmac).into_inner();
+			decoded_err_packet.hmac = Hmac::from_engine(hmac).to_byte_array();
 			msg.reason = onion_utils::encrypt_failure_packet(
 				&onion_keys[1].shared_secret.as_ref(), &decoded_err_packet.encode()[..])
 		}, || nodes[2].node.fail_htlc_backwards(&payment_hash), true, Some(0x1000|7),
@@ -1124,7 +1124,7 @@ fn test_phantom_onion_hmac_failure() {
 				}, ..
 			}) => {
 				onion_packet.hmac[onion_packet.hmac.len() - 1] ^= 1;
-				Sha256::hash(&onion_packet.hop_data).into_inner().to_vec()
+				Sha256::hash(&onion_packet.hop_data).to_byte_array().to_vec()
 			},
 			_ => panic!("Unexpected forward"),
 		}

@@ -46,7 +46,7 @@ use std::time::SystemTime;
 
 use bech32::u5;
 use bitcoin::{Address, Network, PubkeyHash, ScriptHash};
-use bitcoin::util::address::{Payload, WitnessVersion};
+use bitcoin::address::{Payload, WitnessProgram, WitnessVersion};
 use bitcoin_hashes::{Hash, sha256};
 use lightning::ln::features::Bolt11InvoiceFeatures;
 use lightning::util::invoice::construct_invoice_preimage;
@@ -449,6 +449,7 @@ impl From<Network> for Currency {
 			Network::Testnet => Currency::BitcoinTestnet,
 			Network::Regtest => Currency::Regtest,
 			Network::Signet => Currency::Signet,
+			_ => unreachable!(),
 		}
 	}
 }
@@ -1478,10 +1479,13 @@ impl Bolt11Invoice {
 
 	/// Returns a list of all fallback addresses as [`Address`]es
 	pub fn fallback_addresses(&self) -> Vec<Address> {
-		self.fallbacks().iter().map(|fallback| {
+		self.fallbacks().iter().filter_map(|fallback| {
 			let payload = match fallback {
 				Fallback::SegWitProgram { version, program } => {
-					Payload::WitnessProgram { version: *version, program: program.to_vec() }
+					match WitnessProgram::new(*version, program.clone()) {
+						Ok(witness_program) => Payload::WitnessProgram(witness_program),
+						Err(_) => return None,
+					}
 				}
 				Fallback::PubKeyHash(pkh) => {
 					Payload::PubkeyHash(*pkh)
@@ -1491,7 +1495,7 @@ impl Bolt11Invoice {
 				}
 			};
 
-			Address { payload, network: self.network() }
+			Some(Address::new(self.network(), payload))
 		}).collect()
 	}
 
@@ -1811,10 +1815,9 @@ impl<'de> Deserialize<'de> for Bolt11Invoice {
 
 #[cfg(test)]
 mod test {
-	use bitcoin::Script;
-	use bitcoin_hashes::hex::FromHex;
+	use bitcoin::ScriptBuf;
 	use bitcoin_hashes::sha256;
-	use lightning::ln::functional_test_utils::new_test_pixel;
+	use std::str::FromStr;
 
 	#[test]
 	fn test_system_time_bounds_assumptions() {
@@ -1839,7 +1842,7 @@ mod test {
 			data: RawDataPart {
 				timestamp: PositiveTimestamp::from_unix_timestamp(1496314658).unwrap(),
 				tagged_fields: vec![
-					PaymentHash(crate::Sha256(sha256::Hash::from_hex(
+					PaymentHash(crate::Sha256(sha256::Hash::from_str(
 						"0001020304050607080900010203040506070809000102030405060708090102"
 					).unwrap())).into(),
 					Description(crate::Description::new(
@@ -1878,7 +1881,7 @@ mod test {
 				data: RawDataPart {
 					timestamp: PositiveTimestamp::from_unix_timestamp(1496314658).unwrap(),
 					tagged_fields: vec ! [
-						PaymentHash(Sha256(sha256::Hash::from_hex(
+						PaymentHash(Sha256(sha256::Hash::from_str(
 							"0001020304050607080900010203040506070809000102030405060708090102"
 						).unwrap())).into(),
 						Description(
@@ -1934,7 +1937,7 @@ mod test {
 		use lightning::ln::features::Bolt11InvoiceFeatures;
 		use secp256k1::Secp256k1;
 		use secp256k1::SecretKey;
-		use crate::{Bolt11Invoice, RawBolt11Invoice, RawHrp, RawDataPart, Currency, Sha256, PositiveTimestamp, 
+		use crate::{Bolt11Invoice, RawBolt11Invoice, RawHrp, RawDataPart, Currency, Sha256, PositiveTimestamp,
 			 Bolt11SemanticError};
 
 		let private_key = SecretKey::from_slice(&[42; 32]).unwrap();
@@ -1949,7 +1952,7 @@ mod test {
 			data: RawDataPart {
 				timestamp: PositiveTimestamp::from_unix_timestamp(1496314658).unwrap(),
 				tagged_fields: vec ! [
-					PaymentHash(Sha256(sha256::Hash::from_hex(
+					PaymentHash(Sha256(sha256::Hash::from_str(
 						"0001020304050607080900010203040506070809000102030405060708090102"
 					).unwrap())).into(),
 					Description(
@@ -2214,7 +2217,7 @@ mod test {
 		assert_eq!(invoice.expiry_time(), Duration::from_secs(54321));
 		assert_eq!(invoice.min_final_cltv_expiry_delta(), 144);
 		assert_eq!(invoice.fallbacks(), vec![&Fallback::PubKeyHash(PubkeyHash::from_slice(&[0;20]).unwrap())]);
-		let address = Address::from_script(&Script::new_p2pkh(&PubkeyHash::from_slice(&[0;20]).unwrap()), Network::Testnet).unwrap();
+		let address = Address::from_script(&ScriptBuf::new_p2pkh(&PubkeyHash::from_slice(&[0;20]).unwrap()), Network::Testnet).unwrap();
 		assert_eq!(invoice.fallback_addresses(), vec![address]);
 		assert_eq!(invoice.private_routes(), vec![&PrivateRoute(route_1), &PrivateRoute(route_2)]);
 		assert_eq!(
