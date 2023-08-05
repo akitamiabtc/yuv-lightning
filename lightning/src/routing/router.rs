@@ -3539,10 +3539,8 @@ use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, EffectiveCapac
 			config: None,
 			feerate_sat_per_1000_weight: None,
 			channel_shutdown_state: Some(channelmanager::ChannelShutdownState::NotShuttingDown),
-			yuv_holder_pixel: None,
-			yuv_counterparty_pixel: None,
-			pending_update_balance: None,
-			update_balance_amounts: None,
+			pending_inbound_htlcs: Vec::new(),
+			pending_outbound_htlcs: Vec::new(),
 		}
 	}
 
@@ -8868,8 +8866,8 @@ pub(crate) mod bench_utils {
 			config: None,
 			feerate_sat_per_1000_weight: None,
 			channel_shutdown_state: Some(channelmanager::ChannelShutdownState::NotShuttingDown),
-			pending_update_balance: None,
-			update_balance_amounts: None,
+			pending_inbound_htlcs: Vec::new(),
+			pending_outbound_htlcs: Vec::new(),
 		}
 	}
 
