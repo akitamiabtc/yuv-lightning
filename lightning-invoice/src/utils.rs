@@ -337,7 +337,7 @@ pub fn create_invoice_from_channelmanager<M: Deref, T: Deref, YT: Deref, ES: Der
 	min_final_cltv_expiry_delta: Option<u16>,
 ) -> Result<Bolt11Invoice, SignOrCreationError<()>>
 where
-	M::Target: chain::Watch<<SP::Target as SignerProvider>::Signer>,
+	M::Target: chain::Watch<<SP::Target as SignerProvider>::EcdsaSigner>,
 	T::Target: BroadcasterInterface,
 	YT::Target: YuvBroadcaster,
 	ES::Target: EntropySource,
@@ -408,7 +408,7 @@ pub fn create_invoice_from_channelmanager_with_description_hash<M: Deref, T: Der
 	invoice_expiry_delta_secs: u32, min_final_cltv_expiry_delta: Option<u16>,
 ) -> Result<Bolt11Invoice, SignOrCreationError<()>>
 where
-	M::Target: chain::Watch<<SP::Target as SignerProvider>::Signer>,
+	M::Target: chain::Watch<<SP::Target as SignerProvider>::EcdsaSigner>,
 	T::Target: BroadcasterInterface,
 	YT::Target: YuvBroadcaster,
 	ES::Target: EntropySource,
@@ -438,16 +438,15 @@ pub fn create_invoice_from_channelmanager_with_description_hash_and_duration_sin
 	network: Currency, amt_msat: Option<u64>, description_hash: Sha256,
 	duration_since_epoch: Duration, invoice_expiry_delta_secs: u32, min_final_cltv_expiry_delta: Option<u16>,
 ) -> Result<Bolt11Invoice, SignOrCreationError<()>>
-where
-	M::Target: chain::Watch<<SP::Target as SignerProvider>::Signer>,
-	T::Target: BroadcasterInterface,
-	YT::Target: YuvBroadcaster,
-	ES::Target: EntropySource,
-	NS::Target: NodeSigner,
-	SP::Target: SignerProvider,
-	F::Target: FeeEstimator,
-	R::Target: Router,
-	L::Target: Logger,
+		where
+			M::Target: chain::Watch<<SP::Target as SignerProvider>::EcdsaSigner>,
+			T::Target: BroadcasterInterface,
+			ES::Target: EntropySource,
+			NS::Target: NodeSigner,
+			SP::Target: SignerProvider,
+			F::Target: FeeEstimator,
+			R::Target: Router,
+			L::Target: Logger,
 {
 	_create_invoice_from_channelmanager_and_duration_since_epoch(
 		channelmanager, node_signer, logger, network, amt_msat,
@@ -465,7 +464,7 @@ pub fn create_invoice_from_channelmanager_and_duration_since_epoch<M: Deref, T: 
 	invoice_expiry_delta_secs: u32, min_final_cltv_expiry_delta: Option<u16>,
 ) -> Result<Bolt11Invoice, SignOrCreationError<()>>
 		where
-			M::Target: chain::Watch<<SP::Target as SignerProvider>::Signer>,
+			M::Target: chain::Watch<<SP::Target as SignerProvider>::EcdsaSigner>,
 			T::Target: BroadcasterInterface,
 			YT::Target: YuvBroadcaster,
 			ES::Target: EntropySource,
@@ -491,7 +490,7 @@ fn _create_invoice_from_channelmanager_and_duration_since_epoch<M: Deref, T: Der
 	yuv_pixel: Option<Pixel>,
 ) -> Result<Bolt11Invoice, SignOrCreationError<()>>
 		where
-			M::Target: chain::Watch<<SP::Target as SignerProvider>::Signer>,
+			M::Target: chain::Watch<<SP::Target as SignerProvider>::EcdsaSigner>,
 			T::Target: BroadcasterInterface,
 			YT::Target: YuvBroadcaster,
 			ES::Target: EntropySource,
@@ -525,7 +524,7 @@ pub fn create_invoice_from_channelmanager_and_duration_since_epoch_with_payment_
 	invoice_expiry_delta_secs: u32, payment_hash: PaymentHash, min_final_cltv_expiry_delta: Option<u16>,
 ) -> Result<Bolt11Invoice, SignOrCreationError<()>>
 	where
-		M::Target: chain::Watch<<SP::Target as SignerProvider>::Signer>,
+		M::Target: chain::Watch<<SP::Target as SignerProvider>::EcdsaSigner>,
 		T::Target: BroadcasterInterface,
 		YT::Target: YuvBroadcaster,
 		ES::Target: EntropySource,
@@ -556,7 +555,7 @@ fn _create_invoice_from_channelmanager_and_duration_since_epoch_with_payment_has
 	payment_secret: PaymentSecret, min_final_cltv_expiry_delta: Option<u16>, yuv_pixel: Option<Pixel>,
 ) -> Result<Bolt11Invoice, SignOrCreationError<()>>
 	where
-		M::Target: chain::Watch<<SP::Target as SignerProvider>::Signer>,
+		M::Target: chain::Watch<<SP::Target as SignerProvider>::EcdsaSigner>,
 		T::Target: BroadcasterInterface,
 		YT::Target: YuvBroadcaster,
 		ES::Target: EntropySource,

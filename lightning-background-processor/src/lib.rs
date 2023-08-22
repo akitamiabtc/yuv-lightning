@@ -601,8 +601,8 @@ pub async fn process_events_async<
 	EventHandlerFuture: core::future::Future<Output = ()>,
 	EventHandler: Fn(Event) -> EventHandlerFuture,
 	PS: 'static + Deref + Send,
-	M: 'static + Deref<Target = ChainMonitor<<SP::Target as SignerProvider>::Signer, CF, T, YT, F, L, P>> + Send + Sync,
-	CM: 'static + Deref<Target = ChannelManager<CW, T, YT, ES, NS, SP, F, R, L>> + Send + Sync,
+	M: 'static + Deref<Target = ChainMonitor<<SP::Target as SignerProvider>::EcdsaSigner, CF, T, F, L, P>> + Send + Sync,
+	CM: 'static + Deref<Target = ChannelManager<CW, T, ES, NS, SP, F, R, L>> + Send + Sync,
 	PGS: 'static + Deref<Target = P2PGossipSync<G, UL, L>> + Send + Sync,
 	RGS: 'static + Deref<Target = RapidGossipSync<G, L>> + Send,
 	APM: APeerManager + Send + Sync,
@@ -619,7 +619,7 @@ pub async fn process_events_async<
 where
 	UL::Target: 'static + UtxoLookup,
 	CF::Target: 'static + chain::Filter,
-	CW::Target: 'static + chain::Watch<<SP::Target as SignerProvider>::Signer>,
+	CW::Target: 'static + chain::Watch<<SP::Target as SignerProvider>::EcdsaSigner>,
 	T::Target: 'static + BroadcasterInterface,
 	YT::Target: 'static + YuvBroadcaster,
 	ES::Target: 'static + EntropySource,
@@ -628,8 +628,8 @@ where
 	F::Target: 'static + FeeEstimator,
 	R::Target: 'static + Router,
 	L::Target: 'static + Logger,
-	P::Target: 'static + Persist<<SP::Target as SignerProvider>::Signer>,
-	PS::Target: 'static + Persister<'a, CW, T, YT, ES, NS, SP, F, R, L, SC>,
+	P::Target: 'static + Persist<<SP::Target as SignerProvider>::EcdsaSigner>,
+	PS::Target: 'static + Persister<'a, CW, T, ES, NS, SP, F, R, L, SC>,
 {
 	let mut should_break = false;
 	let async_event_handler = |event| {
@@ -742,8 +742,8 @@ impl BackgroundProcessor {
 		P: 'static + Deref + Send + Sync,
 		EH: 'static + EventHandler + Send,
 		PS: 'static + Deref + Send,
-		M: 'static + Deref<Target = ChainMonitor<<SP::Target as SignerProvider>::Signer, CF, T, YT, F, L, P>> + Send + Sync,
-		CM: 'static + Deref<Target = ChannelManager<CW, T, YT, ES, NS, SP, F, R, L>> + Send + Sync,
+		M: 'static + Deref<Target = ChainMonitor<<SP::Target as SignerProvider>::EcdsaSigner, CF, T, F, L, P>> + Send + Sync,
+		CM: 'static + Deref<Target = ChannelManager<CW, T, ES, NS, SP, F, R, L>> + Send + Sync,
 		PGS: 'static + Deref<Target = P2PGossipSync<G, UL, L>> + Send + Sync,
 		RGS: 'static + Deref<Target = RapidGossipSync<G, L>> + Send,
 		APM: APeerManager + Send + Sync,
@@ -757,7 +757,7 @@ impl BackgroundProcessor {
 	where
 		UL::Target: 'static + UtxoLookup,
 		CF::Target: 'static + chain::Filter,
-		CW::Target: 'static + chain::Watch<<SP::Target as SignerProvider>::Signer>,
+		CW::Target: 'static + chain::Watch<<SP::Target as SignerProvider>::EcdsaSigner>,
 		T::Target: 'static + BroadcasterInterface,
 		YT::Target: 'static + YuvBroadcaster,
 		ES::Target: 'static + EntropySource,
@@ -766,8 +766,8 @@ impl BackgroundProcessor {
 		F::Target: 'static + FeeEstimator,
 		R::Target: 'static + Router,
 		L::Target: 'static + Logger,
-		P::Target: 'static + Persist<<SP::Target as SignerProvider>::Signer>,
-		PS::Target: 'static + Persister<'a, CW, T, YT, ES, NS, SP, F, R, L, SC>,
+		P::Target: 'static + Persist<<SP::Target as SignerProvider>::EcdsaSigner>,
+		PS::Target: 'static + Persister<'a, CW, T, ES, NS, SP, F, R, L, SC>,
 	{
 		let stop_thread = Arc::new(AtomicBool::new(false));
 		let stop_thread_clone = stop_thread.clone();

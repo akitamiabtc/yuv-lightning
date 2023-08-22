@@ -70,10 +70,10 @@ BlockSourceResult<ValidatedBlockHeader> where B::Target: BlockSource {
 /// 	R: Router,
 /// 	L: Logger,
 /// 	C: chain::Filter,
-/// 	P: chainmonitor::Persist<SP::Signer>,
+/// 	P: chainmonitor::Persist<SP::EcdsaSigner>,
 /// >(
 /// 	block_source: &B,
-/// 	chain_monitor: &ChainMonitor<SP::Signer, &C, &T, &YT, &F, &L, &P>,
+/// 	chain_monitor: &ChainMonitor<SP::EcdsaSigner, &C, &T, &F, &L, &P>,
 /// 	config: UserConfig,
 /// 	entropy_source: &ES,
 /// 	node_signer: &NS,
@@ -87,7 +87,7 @@ BlockSourceResult<ValidatedBlockHeader> where B::Target: BlockSource {
 /// ) {
 /// 	// Read a serialized channel monitor paired with the block hash when it was persisted.
 /// 	let serialized_monitor = "...";
-/// 	let (monitor_block_hash, mut monitor) = <(BlockHash, ChannelMonitor<SP::Signer>)>::read(
+/// 	let (monitor_block_hash, mut monitor) = <(BlockHash, ChannelMonitor<SP::EcdsaSigner>)>::read(
 /// 		&mut Cursor::new(&serialized_monitor), (entropy_source, signer_provider)).unwrap();
 ///
 /// 	// Read the channel manager paired with the block hash when it was persisted.
@@ -106,7 +106,7 @@ BlockSourceResult<ValidatedBlockHeader> where B::Target: BlockSource {
 /// 			config,
 /// 			vec![&mut monitor],
 /// 		);
-/// 		<(BlockHash, ChannelManager<&ChainMonitor<SP::Signer, &C, &T, &YT, &F, &L, &P>, &T, &YT, &ES, &NS, &SP, &F, &R, &L>)>::read(
+/// 		<(BlockHash, ChannelManager<&ChainMonitor<SP::EcdsaSigner, &C, &T, &F, &L, &P>, &T, &ES, &NS, &SP, &F, &R, &L>)>::read(
 /// 			&mut Cursor::new(&serialized_manager), read_args).unwrap()
 /// 	};
 ///
