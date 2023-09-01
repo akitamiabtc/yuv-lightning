@@ -2006,7 +2006,7 @@ macro_rules! get_route {
 macro_rules! get_route_and_payment_hash {
 	($send_node: expr, $recv_node: expr, $recv_value: expr) => {{
 		let payment_params = $crate::routing::router::PaymentParameters::from_node_id($recv_node.node.get_our_node_id(), TEST_FINAL_CLTV)
-			.with_bolt11_features($recv_node.node.invoice_features()).unwrap();
+			.with_bolt11_features($recv_node.node.bolt11_invoice_features()).unwrap();
 		$crate::get_route_and_payment_hash!($send_node, $recv_node, payment_params, $recv_value)
 	}};
 	($send_node: expr, $recv_node: expr, $payment_params: expr, $recv_value: expr) => {{
@@ -2629,16 +2629,8 @@ fn _route_payment<'a, 'b, 'c>(origin_node: &Node<'a, 'b, 'c>, expected_route: &[
 	};
 
 	let payment_params = PaymentParameters::from_node_id(expected_route.last().unwrap().node.get_our_node_id(), TEST_FINAL_CLTV)
-		.with_bolt11_features(invoice_features).unwrap();
-	let mut route_params = RouteParameters::from_payment_params_and_value(payment_params, recv_value);
-
-	if let Some(amount) = yuv_amount {
-		let secp_ctx = Secp256k1::new();
-		let pixel = new_test_pixel(Some(amount.into()), None, &secp_ctx);
-
-		route_params = route_params.with_yuv(pixel);
-	}
-
+		.with_bolt11_features(expected_route.last().unwrap().node.bolt11_invoice_features()).unwrap();
+	let route_params = RouteParameters::from_payment_params_and_value(payment_params, recv_value);
 	let route = get_route(origin_node, &route_params).unwrap();
 	assert_eq!(route.paths.len(), 1);
 	assert_eq!(route.paths[0].hops.len(), expected_route.len());
@@ -2657,7 +2649,7 @@ pub fn route_payment_with_yuv<'a, 'b, 'c>(origin_node: &Node<'a, 'b, 'c>, expect
 
 pub fn route_over_limit<'a, 'b, 'c>(origin_node: &Node<'a, 'b, 'c>, expected_route: &[&Node<'a, 'b, 'c>], recv_value: u64)  {
 	let payment_params = PaymentParameters::from_node_id(expected_route.last().unwrap().node.get_our_node_id(), TEST_FINAL_CLTV)
-		.with_bolt11_features(expected_route.last().unwrap().node.invoice_features()).unwrap();
+		.with_bolt11_features(expected_route.last().unwrap().node.bolt11_invoice_features()).unwrap();
 	let route_params = RouteParameters::from_payment_params_and_value(payment_params, recv_value);
 	let network_graph = origin_node.network_graph.read_only();
 	let scorer = test_utils::TestScorer::new();

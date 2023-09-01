@@ -69,7 +69,7 @@ fn test_priv_forwarding_rejection() {
 	}]);
 	let last_hops = vec![route_hint];
 	let payment_params = PaymentParameters::from_node_id(nodes[2].node.get_our_node_id(), TEST_FINAL_CLTV)
-		.with_bolt11_features(nodes[2].node.invoice_features()).unwrap()
+		.with_bolt11_features(nodes[2].node.bolt11_invoice_features()).unwrap()
 		.with_route_hints(last_hops).unwrap();
 	let (route, our_payment_hash, our_payment_preimage, our_payment_secret) = get_route_and_payment_hash!(nodes[0], nodes[2], payment_params, 10_000);
 
@@ -249,7 +249,7 @@ fn test_routed_scid_alias() {
 		htlc_maximum_yuv: None,
 	}])];
 	let payment_params = PaymentParameters::from_node_id(nodes[2].node.get_our_node_id(), 42)
-		.with_bolt11_features(nodes[2].node.invoice_features()).unwrap()
+		.with_bolt11_features(nodes[2].node.bolt11_invoice_features()).unwrap()
 		.with_route_hints(hop_hints).unwrap();
 	let (route, payment_hash, payment_preimage, payment_secret) = get_route_and_payment_hash!(nodes[0], nodes[2], payment_params, 100_000);
 	assert_eq!(route.paths[0].hops[1].short_channel_id, last_hop[0].inbound_scid_alias.unwrap());
@@ -416,7 +416,7 @@ fn test_inbound_scid_privacy() {
 		htlc_maximum_yuv: None,
 	}])];
 	let payment_params = PaymentParameters::from_node_id(nodes[2].node.get_our_node_id(), 42)
-		.with_bolt11_features(nodes[2].node.invoice_features()).unwrap()
+		.with_bolt11_features(nodes[2].node.bolt11_invoice_features()).unwrap()
 		.with_route_hints(hop_hints.clone()).unwrap();
 	let (route, payment_hash, payment_preimage, payment_secret) = get_route_and_payment_hash!(nodes[0], nodes[2], payment_params, 100_000);
 	assert_eq!(route.paths[0].hops[1].short_channel_id, last_hop[0].inbound_scid_alias.unwrap());
@@ -432,7 +432,7 @@ fn test_inbound_scid_privacy() {
 	hop_hints[0].0[0].short_channel_id = last_hop[0].short_channel_id.unwrap();
 
 	let payment_params_2 = PaymentParameters::from_node_id(nodes[2].node.get_our_node_id(), 42)
-		.with_bolt11_features(nodes[2].node.invoice_features()).unwrap()
+		.with_bolt11_features(nodes[2].node.bolt11_invoice_features()).unwrap()
 		.with_route_hints(hop_hints).unwrap();
 	let (route_2, payment_hash_2, _, payment_secret_2) = get_route_and_payment_hash!(nodes[0], nodes[2], payment_params_2, 100_000);
 	assert_eq!(route_2.paths[0].hops[1].short_channel_id, last_hop[0].short_channel_id.unwrap());
@@ -485,7 +485,7 @@ fn test_scid_alias_returned() {
 		htlc_maximum_yuv: None,
 	}])];
 	let payment_params = PaymentParameters::from_node_id(nodes[2].node.get_our_node_id(), 42)
-		.with_bolt11_features(nodes[2].node.invoice_features()).unwrap()
+		.with_bolt11_features(nodes[2].node.bolt11_invoice_features()).unwrap()
 		.with_route_hints(hop_hints).unwrap();
 	let (mut route, payment_hash, _, payment_secret) = get_route_and_payment_hash!(nodes[0], nodes[2], payment_params, 10_000);
 	assert_eq!(route.paths[0].hops[1].short_channel_id, nodes[2].node.list_usable_channels()[0].inbound_scid_alias.unwrap());

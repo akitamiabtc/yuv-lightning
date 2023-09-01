@@ -3436,7 +3436,9 @@ use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, EffectiveCapac
 		let (secp_ctx, network_graph, gossip_sync, _, logger) = build_graph();
 		let (our_privkey, our_id, privkeys, nodes) = get_nodes(&secp_ctx);
 		let config = UserConfig::default();
-		let payment_params = PaymentParameters::from_node_id(nodes[2], 42).with_bolt11_features(channelmanager::provided_invoice_features(&config)).unwrap();
+		let payment_params = PaymentParameters::from_node_id(nodes[2], 42)
+			.with_bolt11_features(channelmanager::provided_bolt11_invoice_features(&config))
+			.unwrap();
 		let scorer = ln_test_utils::TestScorer::new();
 		let keys_manager = ln_test_utils::TestKeysInterface::new(&[0u8; 32], Network::Testnet);
 		let random_seed_bytes = keys_manager.get_secure_random_bytes();
@@ -3590,7 +3592,7 @@ use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, EffectiveCapac
 		let (secp_ctx, network_graph, gossip_sync, _, logger) = build_graph();
 		let (_, our_id, privkeys, nodes) = get_nodes(&secp_ctx);
 		let config = UserConfig::default();
-		let payment_params = PaymentParameters::from_node_id(nodes[2], 42).with_bolt11_features(channelmanager::provided_invoice_features(&config)).unwrap();
+		let payment_params = PaymentParameters::from_node_id(nodes[2], 42).with_bolt11_features(channelmanager::provided_bolt11_invoice_features(&config)).unwrap();
 		let scorer = ln_test_utils::TestScorer::new();
 		let keys_manager = ln_test_utils::TestKeysInterface::new(&[0u8; 32], Network::Testnet);
 		let random_seed_bytes = keys_manager.get_secure_random_bytes();
@@ -4554,7 +4556,9 @@ use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, EffectiveCapac
 		let keys_manager = ln_test_utils::TestKeysInterface::new(&[0u8; 32], Network::Testnet);
 		let random_seed_bytes = keys_manager.get_secure_random_bytes();
 		let config = UserConfig::default();
-		let payment_params = PaymentParameters::from_node_id(nodes[2], 42).with_bolt11_features(channelmanager::provided_invoice_features(&config)).unwrap();
+		let payment_params = PaymentParameters::from_node_id(nodes[2], 42)
+			.with_bolt11_features(channelmanager::provided_bolt11_invoice_features(&config))
+			.unwrap();
 
 		// We will use a simple single-path route from
 		// our node to node2 via node0: channels {1, 3}.
@@ -4873,7 +4877,9 @@ use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, EffectiveCapac
 		let keys_manager = ln_test_utils::TestKeysInterface::new(&[0u8; 32], Network::Testnet);
 		let random_seed_bytes = keys_manager.get_secure_random_bytes();
 		let config = UserConfig::default();
-		let payment_params = PaymentParameters::from_node_id(nodes[3], 42).with_bolt11_features(channelmanager::provided_invoice_features(&config)).unwrap();
+		let payment_params = PaymentParameters::from_node_id(nodes[3], 42)
+			.with_bolt11_features(channelmanager::provided_bolt11_invoice_features(&config))
+			.unwrap();
 
 		// Path via {node7, node2, node4} is channels {12, 13, 6, 11}.
 		// {12, 13, 11} have the capacities of 100, {6} has a capacity of 50.
@@ -5065,11 +5071,12 @@ use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, EffectiveCapac
 		let (_, _, _, nodes) = get_nodes(&secp_ctx);
 		let config = UserConfig::default();
 		let clear_payment_params = PaymentParameters::from_node_id(nodes[2], 42)
-			.with_bolt11_features(channelmanager::provided_invoice_features(&config)).unwrap();
+			.with_bolt11_features(channelmanager::provided_bolt11_invoice_features(&config))
+			.unwrap();
 		do_simple_mpp_route_test(clear_payment_params);
 
 		// MPP to a 1-hop blinded path for nodes[2]
-		let bolt12_features: Bolt12InvoiceFeatures = channelmanager::provided_invoice_features(&config).to_context();
+		let bolt12_features: Bolt12InvoiceFeatures = channelmanager::provided_bolt11_invoice_features(&config).to_context();
 		let blinded_path = BlindedPath {
 			introduction_node_id: nodes[2],
 			blinding_point: ln_test_utils::pubkey(42),
@@ -5314,7 +5321,8 @@ use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, EffectiveCapac
 		let random_seed_bytes = keys_manager.get_secure_random_bytes();
 		let config = UserConfig::default();
 		let payment_params = PaymentParameters::from_node_id(nodes[3], 42)
-			.with_bolt11_features(channelmanager::provided_invoice_features(&config)).unwrap();
+			.with_bolt11_features(channelmanager::provided_bolt11_invoice_features(&config))
+			.unwrap();
 
 		// We need a route consisting of 3 paths:
 		// From our node to node3 via {node0, node2}, {node7, node2, node4} and {node7, node2}.
@@ -5494,7 +5502,9 @@ use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, EffectiveCapac
 		let keys_manager = ln_test_utils::TestKeysInterface::new(&[0u8; 32], Network::Testnet);
 		let random_seed_bytes = keys_manager.get_secure_random_bytes();
 		let config = UserConfig::default();
-		let payment_params = PaymentParameters::from_node_id(nodes[3], 42).with_bolt11_features(channelmanager::provided_invoice_features(&config)).unwrap();
+		let payment_params = PaymentParameters::from_node_id(nodes[3], 42)
+			.with_bolt11_features(channelmanager::provided_bolt11_invoice_features(&config))
+			.unwrap();
 
 		// This test checks that if we have two cheaper paths and one more expensive path,
 		// so that liquidity-wise any 2 of 3 combination is sufficient,
@@ -5676,7 +5686,9 @@ use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, EffectiveCapac
 		let keys_manager = ln_test_utils::TestKeysInterface::new(&[0u8; 32], Network::Testnet);
 		let random_seed_bytes = keys_manager.get_secure_random_bytes();
 		let config = UserConfig::default();
-		let payment_params = PaymentParameters::from_node_id(nodes[3], 42).with_bolt11_features(channelmanager::provided_invoice_features(&config)).unwrap();
+		let payment_params = PaymentParameters::from_node_id(nodes[3], 42)
+			.with_bolt11_features(channelmanager::provided_bolt11_invoice_features(&config))
+			.unwrap();
 
 		// We need a route consisting of 2 paths:
 		// From our node to node3 via {node0, node2} and {node7, node2, node4}.
@@ -5892,7 +5904,8 @@ use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, EffectiveCapac
 		let keys_manager = ln_test_utils::TestKeysInterface::new(&[0u8; 32], Network::Testnet);
 		let random_seed_bytes = keys_manager.get_secure_random_bytes();
 		let config = UserConfig::default();
-		let payment_params = PaymentParameters::from_node_id(PublicKey::from_slice(&[02; 33]).unwrap(), 42).with_bolt11_features(channelmanager::provided_invoice_features(&config)).unwrap()
+		let payment_params = PaymentParameters::from_node_id(PublicKey::from_slice(&[02; 33]).unwrap(), 42)
+			.with_bolt11_features(channelmanager::provided_bolt11_invoice_features(&config)).unwrap()
 			.with_route_hints(vec![RouteHint(vec![RouteHintHop {
 				src_node_id: nodes[2],
 				short_channel_id: 42,
@@ -5992,7 +6005,9 @@ use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, EffectiveCapac
 		let keys_manager = ln_test_utils::TestKeysInterface::new(&[0u8; 32], Network::Testnet);
 		let random_seed_bytes = keys_manager.get_secure_random_bytes();
 		let config = UserConfig::default();
-		let payment_params = PaymentParameters::from_node_id(nodes[2], 42).with_bolt11_features(channelmanager::provided_invoice_features(&config)).unwrap()
+		let payment_params = PaymentParameters::from_node_id(nodes[2], 42)
+			.with_bolt11_features(channelmanager::provided_bolt11_invoice_features(&config))
+			.unwrap()
 			.with_max_channel_saturation_power_of_half(0);
 
 		// We need a route consisting of 3 paths:
@@ -6378,7 +6393,9 @@ use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, EffectiveCapac
 		let keys_manager = ln_test_utils::TestKeysInterface::new(&[0u8; 32], Network::Testnet);
 		let random_seed_bytes = keys_manager.get_secure_random_bytes();
 		let config = UserConfig::default();
-		let payment_params = PaymentParameters::from_node_id(nodes[2], 42).with_bolt11_features(channelmanager::provided_invoice_features(&config)).unwrap();
+		let payment_params = PaymentParameters::from_node_id(nodes[2], 42)
+			.with_bolt11_features(channelmanager::provided_bolt11_invoice_features(&config))
+			.unwrap();
 
 		// We modify the graph to set the htlc_minimum of channel 2 and 4 as needed - channel 2
 		// gets an htlc_maximum_msat of 80_000 and channel 4 an htlc_minimum_msat of 90_000. We
@@ -6433,7 +6450,7 @@ use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, EffectiveCapac
 			assert_eq!(route.paths[0].hops[1].short_channel_id, 13);
 			assert_eq!(route.paths[0].hops[1].fee_msat, 90_000);
 			assert_eq!(route.paths[0].hops[1].cltv_expiry_delta, 42);
-			assert_eq!(route.paths[0].hops[1].node_features.le_flags(), channelmanager::provided_invoice_features(&config).le_flags());
+			assert_eq!(route.paths[0].hops[1].node_features.le_flags(), channelmanager::provided_bolt11_invoice_features(&config).le_flags());
 			assert_eq!(route.paths[0].hops[1].channel_features.le_flags(), &id_to_feature_flags(13));
 		}
 	}
@@ -6452,7 +6469,9 @@ use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, EffectiveCapac
 		let network_graph = NetworkGraph::new(Network::Testnet, Arc::clone(&logger));
 		let scorer = ln_test_utils::TestScorer::new();
 		let config = UserConfig::default();
-		let payment_params = PaymentParameters::from_node_id(nodes[0], 42).with_bolt11_features(channelmanager::provided_invoice_features(&config)).unwrap();
+		let payment_params = PaymentParameters::from_node_id(nodes[0], 42)
+			.with_bolt11_features(channelmanager::provided_bolt11_invoice_features(&config))
+			.unwrap();
 		let keys_manager = ln_test_utils::TestKeysInterface::new(&[0u8; 32], Network::Testnet);
 		let random_seed_bytes = keys_manager.get_secure_random_bytes();
 
@@ -6966,7 +6985,9 @@ use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, EffectiveCapac
 		});
 
 		let config = UserConfig::default();
-		let payment_params = PaymentParameters::from_node_id(nodes[2], 42).with_bolt11_features(channelmanager::provided_invoice_features(&config)).unwrap();
+		let payment_params = PaymentParameters::from_node_id(nodes[2], 42)
+			.with_bolt11_features(channelmanager::provided_bolt11_invoice_features(&config))
+			.unwrap();
 		let keys_manager = ln_test_utils::TestKeysInterface::new(&[0u8; 32], Network::Testnet);
 		let random_seed_bytes = keys_manager.get_secure_random_bytes();
 		// 100,000 sats is less than the available liquidity on each channel, set above.
@@ -7025,7 +7046,7 @@ use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, EffectiveCapac
 
 		let params = ProbabilisticScoringFeeParameters::default();
 		let mut scorer = ProbabilisticScorer::new(ProbabilisticScoringDecayParameters::default(), &graph, &logger);
-		let features = channelmanager::provided_invoice_features(&UserConfig::default());
+		let features = channelmanager::provided_bolt11_invoice_features(&UserConfig::default());
 
 		super::bench_utils::generate_test_routes(&graph, &mut scorer, &params, features, random_init_seed(), 0, 2);
 	}
@@ -7046,7 +7067,7 @@ use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, EffectiveCapac
 
 		let params = ProbabilisticScoringFeeParameters::default();
 		let mut scorer = ProbabilisticScorer::new(ProbabilisticScoringDecayParameters::default(), &graph, &logger);
-		let features = channelmanager::provided_invoice_features(&UserConfig::default());
+		let features = channelmanager::provided_bolt11_invoice_features(&UserConfig::default());
 
 		super::bench_utils::generate_test_routes(&graph, &mut scorer, &params, features, random_init_seed(), 1_000_000, 2);
 	}
@@ -7128,7 +7149,8 @@ use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, EffectiveCapac
 		let dest_node_id = ln_test_utils::pubkey(42);
 		let payment_params = PaymentParameters::from_node_id(dest_node_id, 42)
 			.with_route_hints(vec![route_hint_1.clone()]).unwrap()
-			.with_bolt11_features(channelmanager::provided_invoice_features(&config)).unwrap();
+			.with_bolt11_features(channelmanager::provided_bolt11_invoice_features(&config))
+			.unwrap();
 
 		// Make sure we'll error if our route hints don't have enough liquidity according to their
 		// htlc_maximum_msat.
@@ -7147,7 +7169,8 @@ use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, EffectiveCapac
 		route_hint_2.0[0].short_channel_id = 43;
 		let payment_params = PaymentParameters::from_node_id(dest_node_id, 42)
 			.with_route_hints(vec![route_hint_1, route_hint_2]).unwrap()
-			.with_bolt11_features(channelmanager::provided_invoice_features(&config)).unwrap();
+			.with_bolt11_features(channelmanager::provided_bolt11_invoice_features(&config))
+			.unwrap();
 		let mut route_params = RouteParameters::from_payment_params_and_value(
 			payment_params, max_htlc_msat + 1);
 		route_params.max_total_routing_fee_msat = Some(max_htlc_msat * 2);
@@ -7205,7 +7228,8 @@ use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, EffectiveCapac
 		let dest_node_id = ln_test_utils::pubkey(44);
 		let payment_params = PaymentParameters::from_node_id(dest_node_id, 42)
 			.with_route_hints(vec![route_hint_1, route_hint_2]).unwrap()
-			.with_bolt11_features(channelmanager::provided_invoice_features(&config)).unwrap();
+			.with_bolt11_features(channelmanager::provided_bolt11_invoice_features(&config))
+			.unwrap();
 
 		let route_params = RouteParameters::from_payment_params_and_value(
 			payment_params, amt_msat);
@@ -7248,7 +7272,7 @@ use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, EffectiveCapac
 			cltv_expiry_delta: 10,
 			features: BlindedHopFeatures::empty(),
 		};
-		let bolt12_features: Bolt12InvoiceFeatures = channelmanager::provided_invoice_features(&config).to_context();
+		let bolt12_features: Bolt12InvoiceFeatures = channelmanager::provided_bolt11_invoice_features(&config).to_context();
 		let payment_params = PaymentParameters::blinded(vec![
 			(blinded_payinfo.clone(), blinded_path.clone()),
 			(blinded_payinfo.clone(), blinded_path.clone())])
@@ -7568,7 +7592,7 @@ use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, EffectiveCapac
 		let random_seed_bytes = keys_manager.get_secure_random_bytes();
 		let config = UserConfig::default();
 
-		let bolt12_features: Bolt12InvoiceFeatures = channelmanager::provided_invoice_features(&config).to_context();
+		let bolt12_features: Bolt12InvoiceFeatures = channelmanager::provided_bolt11_invoice_features(&config).to_context();
 		let blinded_path_1 = BlindedPath {
 			introduction_node_id: nodes[2],
 			blinding_point: ln_test_utils::pubkey(42),
@@ -7763,7 +7787,7 @@ use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, EffectiveCapac
 		blinded_hints[1].0.htlc_maximum_msat = 2_8089_0861_1584_0000;
 		blinded_hints[1].0.cltv_expiry_delta = 0;
 
-		let bolt12_features: Bolt12InvoiceFeatures = channelmanager::provided_invoice_features(&config).to_context();
+		let bolt12_features: Bolt12InvoiceFeatures = channelmanager::provided_bolt11_invoice_features(&config).to_context();
 		let payment_params = PaymentParameters::blinded(blinded_hints.clone())
 			.with_bolt12_features(bolt12_features.clone()).unwrap();
 
@@ -7815,7 +7839,7 @@ use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, EffectiveCapac
 		];
 		blinded_hints[1].1.introduction_node_id = nodes[6];
 
-		let bolt12_features: Bolt12InvoiceFeatures = channelmanager::provided_invoice_features(&config).to_context();
+		let bolt12_features: Bolt12InvoiceFeatures = channelmanager::provided_bolt11_invoice_features(&config).to_context();
 		let payment_params = PaymentParameters::blinded(blinded_hints.clone())
 			.with_bolt12_features(bolt12_features.clone()).unwrap();
 
@@ -7872,7 +7896,7 @@ use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, EffectiveCapac
 
 		blinded_hints[2].1.introduction_node_id = nodes[6];
 
-		let bolt12_features: Bolt12InvoiceFeatures = channelmanager::provided_invoice_features(&config).to_context();
+		let bolt12_features: Bolt12InvoiceFeatures = channelmanager::provided_bolt11_invoice_features(&config).to_context();
 		let payment_params = PaymentParameters::blinded(blinded_hints.clone())
 			.with_bolt12_features(bolt12_features.clone()).unwrap();
 
@@ -7932,7 +7956,7 @@ use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, EffectiveCapac
 				cltv_expiry_delta: 0,
 				features: BlindedHopFeatures::empty(),
 			};
-			let bolt12_features: Bolt12InvoiceFeatures = channelmanager::provided_invoice_features(&config).to_context();
+			let bolt12_features: Bolt12InvoiceFeatures = channelmanager::provided_bolt11_invoice_features(&config).to_context();
 			PaymentParameters::blinded(vec![(blinded_payinfo, blinded_path)])
 				.with_bolt12_features(bolt12_features.clone()).unwrap()
 		} else {
@@ -7951,7 +7975,7 @@ use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, EffectiveCapac
 
 			PaymentParameters::from_node_id(nodes[1], 42)
 				.with_route_hints(vec![route_hint]).unwrap()
-				.with_bolt11_features(channelmanager::provided_invoice_features(&config)).unwrap()
+				.with_bolt11_features(channelmanager::provided_bolt11_invoice_features(&config)).unwrap()
 		};
 
 		let netgraph = network_graph.read_only();
@@ -8016,7 +8040,7 @@ use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, EffectiveCapac
 					features: BlindedHopFeatures::empty(),
 				}, blinded_path.clone()));
 			}
-			let bolt12_features: Bolt12InvoiceFeatures = channelmanager::provided_invoice_features(&config).to_context();
+			let bolt12_features: Bolt12InvoiceFeatures = channelmanager::provided_bolt11_invoice_features(&config).to_context();
 			PaymentParameters::blinded(blinded_hints.clone())
 				.with_bolt12_features(bolt12_features.clone()).unwrap()
 		} else {
@@ -8037,7 +8061,7 @@ use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, EffectiveCapac
 			}
 			PaymentParameters::from_node_id(nodes[1], 42)
 				.with_route_hints(route_hints).unwrap()
-				.with_bolt11_features(channelmanager::provided_invoice_features(&config)).unwrap()
+				.with_bolt11_features(channelmanager::provided_bolt11_invoice_features(&config)).unwrap()
 		};
 
 		let netgraph = network_graph.read_only();
@@ -8109,7 +8133,7 @@ use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, EffectiveCapac
 				],
 			})
 		];
-		let bolt12_features: Bolt12InvoiceFeatures = channelmanager::provided_invoice_features(&config).to_context();
+		let bolt12_features: Bolt12InvoiceFeatures = channelmanager::provided_bolt11_invoice_features(&config).to_context();
 		let payment_params = PaymentParameters::blinded(blinded_hints.clone())
 			.with_bolt12_features(bolt12_features.clone()).unwrap();
 		let route_params = RouteParameters::from_payment_params_and_value(
@@ -8169,7 +8193,7 @@ use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, EffectiveCapac
 					features: BlindedHopFeatures::empty(),
 				}, blinded_path.clone()));
 			}
-			let bolt12_features: Bolt12InvoiceFeatures = channelmanager::provided_invoice_features(&config).to_context();
+			let bolt12_features: Bolt12InvoiceFeatures = channelmanager::provided_bolt11_invoice_features(&config).to_context();
 			PaymentParameters::blinded(blinded_hints.clone())
 				.with_bolt12_features(bolt12_features.clone()).unwrap()
 		};
@@ -8283,7 +8307,7 @@ use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, EffectiveCapac
 
 		let payment_params = PaymentParameters::from_node_id(dest_node_id, 42)
 			.with_route_hints(vec![route_hint]).unwrap()
-			.with_bolt11_features(channelmanager::provided_invoice_features(&config)).unwrap();
+			.with_bolt11_features(channelmanager::provided_bolt11_invoice_features(&config)).unwrap();
 		let route_params = RouteParameters::from_payment_params_and_value(
 			payment_params, amt_msat);
 
@@ -8365,7 +8389,7 @@ use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, EffectiveCapac
 
 		let payment_params = PaymentParameters::from_node_id(dest_node_id, 42)
 			.with_route_hints(vec![route_hint]).unwrap()
-			.with_bolt11_features(channelmanager::provided_invoice_features(&config)).unwrap();
+			.with_bolt11_features(channelmanager::provided_bolt11_invoice_features(&config)).unwrap();
 
 		let route_params = RouteParameters::from_payment_params_and_value(
 			payment_params, amt_msat);
@@ -8529,7 +8553,7 @@ pub(crate) mod bench_utils {
 						// Generate fail/success paths for a wider range of potential amounts with
 						// MPP enabled to give us a chance to apply penalties for more potential
 						// routes.
-						let mpp_features = channelmanager::provided_invoice_features(&UserConfig::default());
+						let mpp_features = channelmanager::provided_bolt11_invoice_features(&UserConfig::default());
 						let params = PaymentParameters::from_node_id(dst, 42)
 							.with_bolt11_features(mpp_features).unwrap();
 						let route_params = RouteParameters::from_payment_params_and_value(
@@ -8607,7 +8631,7 @@ pub mod benches {
 		let network_graph = bench_utils::read_network_graph(&logger).unwrap();
 		let scorer = FixedPenaltyScorer::with_penalty(0);
 		generate_routes(bench, &network_graph, scorer, &Default::default(),
-			channelmanager::provided_invoice_features(&UserConfig::default()), 0,
+			channelmanager::provided_bolt11_invoice_features(&UserConfig::default()), 0,
 			"generate_mpp_routes_with_zero_penalty_scorer");
 	}
 
@@ -8626,7 +8650,7 @@ pub mod benches {
 		let params = ProbabilisticScoringFeeParameters::default();
 		let scorer = ProbabilisticScorer::new(ProbabilisticScoringDecayParameters::default(), &network_graph, &logger);
 		generate_routes(bench, &network_graph, scorer, &params,
-			channelmanager::provided_invoice_features(&UserConfig::default()), 0,
+			channelmanager::provided_bolt11_invoice_features(&UserConfig::default()), 0,
 			"generate_mpp_routes_with_probabilistic_scorer");
 	}
 
@@ -8636,7 +8660,7 @@ pub mod benches {
 		let params = ProbabilisticScoringFeeParameters::default();
 		let scorer = ProbabilisticScorer::new(ProbabilisticScoringDecayParameters::default(), &network_graph, &logger);
 		generate_routes(bench, &network_graph, scorer, &params,
-			channelmanager::provided_invoice_features(&UserConfig::default()), 100_000_000,
+			channelmanager::provided_bolt11_invoice_features(&UserConfig::default()), 100_000_000,
 			"generate_large_mpp_routes_with_probabilistic_scorer");
 	}
 
@@ -8648,7 +8672,7 @@ pub mod benches {
 		let scorer = ProbabilisticScorer::new(
 			ProbabilisticScoringDecayParameters::default(), &network_graph, &logger);
 		generate_routes(bench, &network_graph, scorer, &params,
-			channelmanager::provided_invoice_features(&UserConfig::default()), 0,
+			channelmanager::provided_bolt11_invoice_features(&UserConfig::default()), 0,
 			"generate_routes_with_nonlinear_probabilistic_scorer");
 	}
 
@@ -8660,7 +8684,7 @@ pub mod benches {
 		let scorer = ProbabilisticScorer::new(
 			ProbabilisticScoringDecayParameters::default(), &network_graph, &logger);
 		generate_routes(bench, &network_graph, scorer, &params,
-			channelmanager::provided_invoice_features(&UserConfig::default()), 0,
+			channelmanager::provided_bolt11_invoice_features(&UserConfig::default()), 0,
 			"generate_mpp_routes_with_nonlinear_probabilistic_scorer");
 	}
 
@@ -8672,7 +8696,7 @@ pub mod benches {
 		let scorer = ProbabilisticScorer::new(
 			ProbabilisticScoringDecayParameters::default(), &network_graph, &logger);
 		generate_routes(bench, &network_graph, scorer, &params,
-			channelmanager::provided_invoice_features(&UserConfig::default()), 100_000_000,
+			channelmanager::provided_bolt11_invoice_features(&UserConfig::default()), 100_000_000,
 			"generate_large_mpp_routes_with_nonlinear_probabilistic_scorer");
 	}
 
