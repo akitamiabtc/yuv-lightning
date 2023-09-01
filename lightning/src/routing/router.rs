@@ -3122,7 +3122,7 @@ use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, EffectiveCapac
 	use crate::chain::transaction::OutPoint;
 	use crate::sign::EntropySource;
 	use crate::ln::ChannelId;
-	use crate::ln::features::{BlindedHopFeatures, Bolt12InvoiceFeatures, ChannelFeatures, InitFeatures, NodeFeatures};
+	use crate::ln::features::{BlindedHopFeatures, ChannelFeatures, InitFeatures, NodeFeatures};
 	use crate::ln::msgs::{ErrorAction, LightningError, UnsignedChannelUpdate, MAX_VALUE_MSAT};
 	use crate::ln::channelmanager;
 	use crate::offers::invoice::BlindedPayInfo;
@@ -5076,7 +5076,7 @@ use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, EffectiveCapac
 		do_simple_mpp_route_test(clear_payment_params);
 
 		// MPP to a 1-hop blinded path for nodes[2]
-		let bolt12_features: Bolt12InvoiceFeatures = channelmanager::provided_bolt11_invoice_features(&config).to_context();
+		let bolt12_features = channelmanager::provided_bolt12_invoice_features(&config);
 		let blinded_path = BlindedPath {
 			introduction_node_id: nodes[2],
 			blinding_point: ln_test_utils::pubkey(42),
@@ -7272,7 +7272,7 @@ use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, EffectiveCapac
 			cltv_expiry_delta: 10,
 			features: BlindedHopFeatures::empty(),
 		};
-		let bolt12_features: Bolt12InvoiceFeatures = channelmanager::provided_bolt11_invoice_features(&config).to_context();
+		let bolt12_features = channelmanager::provided_bolt12_invoice_features(&config);
 		let payment_params = PaymentParameters::blinded(vec![
 			(blinded_payinfo.clone(), blinded_path.clone()),
 			(blinded_payinfo.clone(), blinded_path.clone())])
@@ -7592,7 +7592,7 @@ use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, EffectiveCapac
 		let random_seed_bytes = keys_manager.get_secure_random_bytes();
 		let config = UserConfig::default();
 
-		let bolt12_features: Bolt12InvoiceFeatures = channelmanager::provided_bolt11_invoice_features(&config).to_context();
+		let bolt12_features = channelmanager::provided_bolt12_invoice_features(&config);
 		let blinded_path_1 = BlindedPath {
 			introduction_node_id: nodes[2],
 			blinding_point: ln_test_utils::pubkey(42),
@@ -7620,7 +7620,7 @@ use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, EffectiveCapac
 			(blinded_payinfo_2.clone(), blinded_path_2.clone()),
 		];
 		let payment_params = PaymentParameters::blinded(blinded_hints.clone())
-			.with_bolt12_features(bolt12_features.clone()).unwrap();
+			.with_bolt12_features(bolt12_features).unwrap();
 
 		let mut route_params = RouteParameters::from_payment_params_and_value(payment_params, 100_000);
 		route_params.max_total_routing_fee_msat = Some(100_000);
@@ -7787,9 +7787,9 @@ use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, EffectiveCapac
 		blinded_hints[1].0.htlc_maximum_msat = 2_8089_0861_1584_0000;
 		blinded_hints[1].0.cltv_expiry_delta = 0;
 
-		let bolt12_features: Bolt12InvoiceFeatures = channelmanager::provided_bolt11_invoice_features(&config).to_context();
+		let bolt12_features = channelmanager::provided_bolt12_invoice_features(&config);
 		let payment_params = PaymentParameters::blinded(blinded_hints.clone())
-			.with_bolt12_features(bolt12_features.clone()).unwrap();
+			.with_bolt12_features(bolt12_features).unwrap();
 
 		let netgraph = network_graph.read_only();
 		let route_params = RouteParameters::from_payment_params_and_value(
@@ -7839,7 +7839,7 @@ use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, EffectiveCapac
 		];
 		blinded_hints[1].1.introduction_node_id = nodes[6];
 
-		let bolt12_features: Bolt12InvoiceFeatures = channelmanager::provided_bolt11_invoice_features(&config).to_context();
+		let bolt12_features = channelmanager::provided_bolt12_invoice_features(&config);
 		let payment_params = PaymentParameters::blinded(blinded_hints.clone())
 			.with_bolt12_features(bolt12_features.clone()).unwrap();
 
@@ -7896,7 +7896,7 @@ use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, EffectiveCapac
 
 		blinded_hints[2].1.introduction_node_id = nodes[6];
 
-		let bolt12_features: Bolt12InvoiceFeatures = channelmanager::provided_bolt11_invoice_features(&config).to_context();
+		let bolt12_features = channelmanager::provided_bolt12_invoice_features(&config);
 		let payment_params = PaymentParameters::blinded(blinded_hints.clone())
 			.with_bolt12_features(bolt12_features.clone()).unwrap();
 
@@ -7956,7 +7956,7 @@ use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, EffectiveCapac
 				cltv_expiry_delta: 0,
 				features: BlindedHopFeatures::empty(),
 			};
-			let bolt12_features: Bolt12InvoiceFeatures = channelmanager::provided_bolt11_invoice_features(&config).to_context();
+			let bolt12_features = channelmanager::provided_bolt12_invoice_features(&config);
 			PaymentParameters::blinded(vec![(blinded_payinfo, blinded_path)])
 				.with_bolt12_features(bolt12_features.clone()).unwrap()
 		} else {
@@ -8040,7 +8040,7 @@ use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, EffectiveCapac
 					features: BlindedHopFeatures::empty(),
 				}, blinded_path.clone()));
 			}
-			let bolt12_features: Bolt12InvoiceFeatures = channelmanager::provided_bolt11_invoice_features(&config).to_context();
+			let bolt12_features = channelmanager::provided_bolt12_invoice_features(&config);
 			PaymentParameters::blinded(blinded_hints.clone())
 				.with_bolt12_features(bolt12_features.clone()).unwrap()
 		} else {
@@ -8133,7 +8133,7 @@ use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, EffectiveCapac
 				],
 			})
 		];
-		let bolt12_features: Bolt12InvoiceFeatures = channelmanager::provided_bolt11_invoice_features(&config).to_context();
+		let bolt12_features = channelmanager::provided_bolt12_invoice_features(&config);
 		let payment_params = PaymentParameters::blinded(blinded_hints.clone())
 			.with_bolt12_features(bolt12_features.clone()).unwrap();
 		let route_params = RouteParameters::from_payment_params_and_value(
@@ -8193,7 +8193,7 @@ use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, EffectiveCapac
 					features: BlindedHopFeatures::empty(),
 				}, blinded_path.clone()));
 			}
-			let bolt12_features: Bolt12InvoiceFeatures = channelmanager::provided_bolt11_invoice_features(&config).to_context();
+			let bolt12_features = channelmanager::provided_bolt12_invoice_features(&config);
 			PaymentParameters::blinded(blinded_hints.clone())
 				.with_bolt12_features(bolt12_features.clone()).unwrap()
 		};

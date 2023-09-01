@@ -42,8 +42,8 @@ use crate::events::{Event, EventHandler, EventsProvider, MessageSendEvent, Messa
 // Since this struct is returned in `list_channels` methods, expose it here in case users want to
 // construct one themselves.
 use crate::ln::{inbound_payment, ChannelId, PaymentHash, PaymentPreimage, PaymentSecret};
-use crate::ln::channel::{Channel, ChannelPhase, ChannelContext, ChannelError, ChannelUpdateStatus, ShutdownResult, UnfundedChannelContext, UpdateFulfillCommitFetch, OutboundV1Channel, InboundV1Channel, UpdateBalanceRequest, UpdateBalanceInfo};
-use crate::ln::features::{ChannelFeatures, ChannelTypeFeatures, InitFeatures, NodeFeatures};
+use crate::ln::channel::{Channel, ChannelPhase, ChannelContext, ChannelError, ChannelUpdateStatus, ShutdownResult, UnfundedChannelContext, UpdateFulfillCommitFetch, OutboundV1Channel, InboundV1Channel};
+use crate::ln::features::{Bolt12InvoiceFeatures, ChannelFeatures, ChannelTypeFeatures, InitFeatures, NodeFeatures};
 #[cfg(any(feature = "_test_utils", test))]
 use crate::ln::features::Bolt11InvoiceFeatures;
 use crate::routing::gossip::NetworkGraph;
@@ -8834,6 +8834,12 @@ where
 		provided_bolt11_invoice_features(&self.default_configuration)
 	}
 
+	/// Fetches the set of [`Bolt12InvoiceFeatures`] flags that are provided by or required by
+	/// [`ChannelManager`].
+	fn bolt12_invoice_features(&self) -> Bolt12InvoiceFeatures {
+		provided_bolt12_invoice_features(&self.default_configuration)
+	}
+
 	/// Fetches the set of [`ChannelFeatures`] flags which are provided by or required by
 	/// [`ChannelManager`].
 	pub fn channel_features(&self) -> ChannelFeatures {
@@ -9476,6 +9482,12 @@ pub(crate) fn provided_node_features(config: &UserConfig) -> NodeFeatures {
 /// or not. Thus, this method is not public.
 #[cfg(any(feature = "_test_utils", test))]
 pub(crate) fn provided_bolt11_invoice_features(config: &UserConfig) -> Bolt11InvoiceFeatures {
+	provided_init_features(config).to_context()
+}
+
+/// Fetches the set of [`Bolt12InvoiceFeatures`] flags that are provided by or required by
+/// [`ChannelManager`].
+pub(crate) fn provided_bolt12_invoice_features(config: &UserConfig) -> Bolt12InvoiceFeatures {
 	provided_init_features(config).to_context()
 }
 
