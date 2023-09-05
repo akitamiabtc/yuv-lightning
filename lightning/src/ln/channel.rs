@@ -950,6 +950,10 @@ pub(super) struct ChannelContext<SP: Deref> where SP::Target: SignerProvider {
 	/// This flag is set in such a case. Note that we don't need to persist this as we'll end up
 	/// setting it again as a side-effect of [`Channel::channel_reestablish`].
 	signer_pending_commitment_update: bool,
+	/// Similar to [`Self::signer_pending_commitment_update`] but we're waiting to send either a
+	/// [`msgs::FundingCreated`] or [`msgs::FundingSigned`] depending on if this channel is
+	/// outbound or inbound.
+	signer_pending_funding: bool,
 
 	// pending_update_fee is filled when sending and receiving update_fee.
 	//
@@ -5504,10 +5508,10 @@ impl<SP: Deref> Channel<SP> where
 			return None;
 		}
 
-		if let Some(yuv_payment) = self.context.yuv_payment.as_ref() {
-			if !yuv_payment.is_funding_yuv_transaction_confirmed {
-				return None;
-			}
+		// If we're still pending the signature on a funding transaction, then we're not ready to send a
+		// channel_ready yet.
+		if self.context.signer_pending_funding {
+			return None;
 		}
 
 		// Note that we don't include ChannelState::WaitingForBatch as we don't want to send
@@ -7044,6 +7048,7 @@ impl<SP: Deref> OutboundV1Channel<SP> where SP::Target: SignerProvider {
 				monitor_pending_finalized_fulfills: Vec::new(),
 
 				signer_pending_commitment_update: false,
+				signer_pending_funding: false,
 
 				#[cfg(debug_assertions)]
 				holder_max_commitment_tx_output: Mutex::new((channel_value_satoshis * 1000 - push_msat, push_msat)),
@@ -7132,31 +7137,14 @@ impl<SP: Deref> OutboundV1Channel<SP> where SP::Target: SignerProvider {
 		})
 	}
 
-	/// If an Err is returned, it is a ChannelError::Close (for get_funding_created)
-	fn get_funding_created_signature<L: Deref>(&mut self, logger: &L) -> Result<Signature, ChannelError> where L::Target: Logger {
-		let counterparty_keys = self.context.build_remote_transaction_keys(
-			&self.context.counterparty_cur_commitment_point.unwrap(),
-		);
-		let counterparty_initial_commitment_tx = self.context.build_commitment_transaction(
-			self.context.cur_counterparty_commitment_transaction_number,
-			&counterparty_keys,
-			false,
-			false,
-			logger,
-		).tx;
+	fn get_funding_created_signature<L: Deref>(&mut self, logger: &L) -> Result<Signature, ()> where L::Target: Logger {
+		let counterparty_keys = self.context.build_remote_transaction_keys();
+		let counterparty_initial_commitment_tx = self.context.build_commitment_transaction(self.context.cur_counterparty_commitment_transaction_number, &counterparty_keys, false, false, logger).tx;
 		match &self.context.holder_signer {
 			// TODO (taproot|arik): move match into calling method for Taproot
 			ChannelSignerType::Ecdsa(ecdsa) => {
-				let funding_pixel = self.context.yuv_payment
-					.as_ref()
-					.map(|v| &v.funding_pixel);
-
-				Ok(ecdsa.sign_counterparty_commitment(
-					&counterparty_initial_commitment_tx,
-					Vec::new(),
-					funding_pixel,
-					&self.context.secp_ctx,
-				).map_err(|_| ChannelError::Close("Failed to get signatures for new commitment_signed".to_owned()))?.0)
+				ecdsa.sign_counterparty_commitment(&counterparty_initial_commitment_tx, Vec::new(), &self.context.secp_ctx)
+					.map(|(sig, _)| sig)
 			}
 		}
 	}
@@ -7168,14 +7156,8 @@ impl<SP: Deref> OutboundV1Channel<SP> where SP::Target: SignerProvider {
 	/// Note that channel_id changes during this call!
 	/// Do NOT broadcast the funding transaction until after a successful funding_signed call!
 	/// If an Err is returned, it is a ChannelError::Close.
-	pub fn get_funding_created<L: Deref>(
-		mut self,
-		funding_transaction: Transaction,
-		funding_txo: OutPoint,
-		is_batch_funding: bool,
-		funding_yuv_pixel_proof: Option<YuvTxType>,
-		logger: &L,
-	) -> Result<(Channel<SP>, msgs::FundingCreated), (Self, ChannelError)> where L::Target: Logger {
+	pub fn get_funding_created<L: Deref>(mut self, funding_transaction: Transaction, funding_txo: OutPoint, is_batch_funding: bool, logger: &L)
+	-> Result<(Channel<SP>, Option<msgs::FundingCreated>), (Self, ChannelError)> where L::Target: Logger {
 		if !self.context.is_outbound() {
 			panic!("Tried to create outbound funding_created message on an inbound channel!");
 		}
@@ -7198,15 +7180,6 @@ impl<SP: Deref> OutboundV1Channel<SP> where SP::Target: SignerProvider {
 		self.context.channel_transaction_parameters.funding_outpoint = Some(funding_txo);
 		self.context.holder_signer.as_mut().provide_channel_parameters(&self.context.channel_transaction_parameters);
 
-		let signature = match self.get_funding_created_signature(logger) {
-			Ok(res) => res,
-			Err(e) => {
-				log_error!(logger, "Got bad signatures: {:?}!", e);
-				self.context.channel_transaction_parameters.funding_outpoint = None;
-				return Err((self, e));
-			}
-		};
-
 		let temporary_channel_id = self.context.channel_id;
 
 		// Now that we're past error-generating stuff, update our local state:
@@ -7225,21 +7198,27 @@ impl<SP: Deref> OutboundV1Channel<SP> where SP::Target: SignerProvider {
 		self.context.funding_transaction = Some(funding_transaction);
 		self.context.is_batch_funding = Some(()).filter(|_| is_batch_funding);
 
+		let funding_created = if let Ok(signature) = self.get_funding_created_signature(logger) {
+			Some(msgs::FundingCreated {
+				temporary_channel_id,
+				funding_txid: funding_txo.txid,
+				funding_output_index: funding_txo.index,
+				signature,
+				#[cfg(taproot)]
+				partial_signature_with_nonce: None,
+				#[cfg(taproot)]
+				next_local_nonce: None,
+			})
+		} else {
+			self.context.signer_pending_funding = true;
+			None
+		};
+
 		let channel = Channel {
 			context: self.context,
 		};
 
-		Ok((channel, msgs::FundingCreated {
-			temporary_channel_id,
-			funding_txid: funding_txo.txid,
-			funding_output_index: funding_txo.index,
-			signature,
-			#[cfg(taproot)]
-			partial_signature_with_nonce: None,
-			#[cfg(taproot)]
-			next_local_nonce: None,
-			yuv_funding_proofs: funding_yuv_pixel_proof,
-		}))
+		Ok((channel, funding_created))
 	}
 
 	fn get_initial_channel_type(config: &UserConfig, their_features: &InitFeatures) -> ChannelTypeFeatures {
@@ -7788,6 +7767,7 @@ impl<SP: Deref> InboundV1Channel<SP> where SP::Target: SignerProvider {
 				monitor_pending_finalized_fulfills: Vec::new(),
 
 				signer_pending_commitment_update: false,
+				signer_pending_funding: false,
 
 				#[cfg(debug_assertions)]
 				holder_max_commitment_tx_output: Mutex::new((msg.push_msat, msg.funding_satoshis * 1000 - msg.push_msat)),
@@ -9014,6 +8994,7 @@ impl<'a, 'b, 'c, ES: Deref, SP: Deref> ReadableArgs<(&'a ES, &'b SP, u32, &'c Ch
 				monitor_pending_finalized_fulfills: monitor_pending_finalized_fulfills.unwrap(),
 
 				signer_pending_commitment_update: false,
+				signer_pending_funding: false,
 
 				pending_update_fee,
 				holding_cell_update_fee,
@@ -9299,8 +9280,8 @@ mod tests {
 			value: 10000000, script_pubkey: output_script.clone(),
 		}]};
 		let funding_outpoint = OutPoint{ txid: tx.txid(), index: 0 };
-		let (mut node_a_chan, funding_created_msg) = node_a_chan.get_funding_created(tx.clone(), funding_outpoint, false, None, &&logger).map_err(|_| ()).unwrap();
-		let (_, funding_signed_msg, _) = node_b_chan.funding_created(&funding_created_msg, best_block, &&keys_provider, &&logger).map_err(|_| ()).unwrap();
+		let (mut node_a_chan, funding_created_msg) = node_a_chan.get_funding_created(tx.clone(), funding_outpoint, false, &&logger).map_err(|_| ()).unwrap();
+		let (_, funding_signed_msg, _) = node_b_chan.funding_created(&funding_created_msg.unwrap(), best_block, &&keys_provider, &&logger).map_err(|_| ()).unwrap();
 
 		// Node B --> Node A: funding signed
 		let _ = node_a_chan.funding_signed(&funding_signed_msg, best_block, &&keys_provider, &&logger).unwrap();
@@ -9428,8 +9409,8 @@ mod tests {
 			value: 10000000, script_pubkey: output_script.clone(),
 		}]};
 		let funding_outpoint = OutPoint{ txid: tx.txid(), index: 0 };
-		let (mut node_a_chan, funding_created_msg) = node_a_chan.get_funding_created(tx.clone(), funding_outpoint, false, None, &&logger).map_err(|_| ()).unwrap();
-		let (mut node_b_chan, funding_signed_msg, _) = node_b_chan.funding_created(&funding_created_msg, best_block, &&keys_provider, &&logger).map_err(|_| ()).unwrap();
+		let (mut node_a_chan, funding_created_msg) = node_a_chan.get_funding_created(tx.clone(), funding_outpoint, false, &&logger).map_err(|_| ()).unwrap();
+		let (mut node_b_chan, funding_signed_msg, _) = node_b_chan.funding_created(&funding_created_msg.unwrap(), best_block, &&keys_provider, &&logger).map_err(|_| ()).unwrap();
 
 		// Node B --> Node A: funding signed
 		let _ = node_a_chan.funding_signed(&funding_signed_msg, best_block, &&keys_provider, &&logger).unwrap();
@@ -9616,8 +9597,8 @@ mod tests {
 			value: 10000000, script_pubkey: output_script.clone(),
 		}]};
 		let funding_outpoint = OutPoint{ txid: tx.txid(), index: 0 };
-		let (mut node_a_chan, funding_created_msg) = node_a_chan.get_funding_created(tx.clone(), funding_outpoint, false, None, &&logger).map_err(|_| ()).unwrap();
-		let (_, funding_signed_msg, _) = node_b_chan.funding_created(&funding_created_msg, best_block, &&keys_provider, &&logger).map_err(|_| ()).unwrap();
+		let (mut node_a_chan, funding_created_msg) = node_a_chan.get_funding_created(tx.clone(), funding_outpoint, false, &&logger).map_err(|_| ()).unwrap();
+		let (_, funding_signed_msg, _) = node_b_chan.funding_created(&funding_created_msg.unwrap(), best_block, &&keys_provider, &&logger).map_err(|_| ()).unwrap();
 
 		// Node B --> Node A: funding signed
 		let _ = node_a_chan.funding_signed(&funding_signed_msg, best_block, &&keys_provider, &&logger).unwrap();
@@ -10695,7 +10676,7 @@ mod tests {
 			&&logger,
 		).map_err(|_| ()).unwrap();
 		let (mut node_b_chan, funding_signed_msg, _) = node_b_chan.funding_created(
-			&funding_created_msg,
+			&funding_created_msg.unwrap(),
 			best_block,
 			&&keys_provider,
 			&&logger,
