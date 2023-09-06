@@ -35,7 +35,7 @@ use crate::ln::chan_utils;
 use crate::ln::onion_utils::HTLCFailReason;
 use crate::chain::BestBlock;
 use crate::chain::chaininterface::{FeeEstimator, ConfirmationTarget, LowerBoundedFeeEstimator};
-use crate::chain::channelmonitor::{ChannelMonitor, ChannelMonitorUpdate, ChannelMonitorUpdateStep, LATENCY_GRACE_PERIOD_BLOCKS, CLOSED_CHANNEL_UPDATE_ID};
+use crate::chain::channelmonitor::{ChannelMonitor, ChannelMonitorUpdate, ChannelMonitorUpdateStep, WithChannelMonitor, LATENCY_GRACE_PERIOD_BLOCKS, CLOSED_CHANNEL_UPDATE_ID};
 use crate::chain::transaction::{OutPoint, TransactionData};
 use crate::sign::ecdsa::{EcdsaChannelSigner, WriteableEcdsaChannelSigner};
 use crate::sign::{EntropySource, ChannelSigner, SignerProvider, NodeSigner, Recipient};
@@ -3294,27 +3294,21 @@ impl<SP: Deref> Channel<SP> where
 		let shutdown_script = self.context.shutdown_scriptpubkey.clone().map(|script| script.into_inner());
 		let mut monitor_signer = signer_provider.derive_channel_signer(self.context.channel_value_satoshis, self.context.channel_keys_id);
 		monitor_signer.provide_channel_parameters(&self.context.channel_transaction_parameters);
-		let channel_monitor = ChannelMonitor::new(
-			self.context.secp_ctx.clone(), monitor_signer,
-			shutdown_script, self.context.get_holder_selected_contest_delay(),
-			&self.context.destination_script, (funding_txo, funding_txo_script),
-			&self.context.channel_transaction_parameters,
-			funding_redeemscript.clone(), self.context.channel_value_satoshis,
-			obscure_factor,
-			holder_commitment_tx, best_block, self.context.counterparty_node_id,
-			self.context.get_funding_yuv_pixel(), self.context.get_holder_yuv_pixel(),
-		);
-
+		let channel_monitor = ChannelMonitor::new(self.context.secp_ctx.clone(), monitor_signer,
+		                                          shutdown_script, self.context.get_holder_selected_contest_delay(),
+		                                          &self.context.destination_script, (funding_txo, funding_txo_script),
+		                                          &self.context.channel_transaction_parameters,
+		                                          funding_redeemscript.clone(), self.context.channel_value_satoshis,
+		                                          obscure_factor,
+		                                          holder_commitment_tx, best_block, self.context.counterparty_node_id);
+		let logger_with_chan_monitor = WithChannelMonitor::from(logger, &channel_monitor);
 		channel_monitor.provide_initial_counterparty_commitment_tx(
 			counterparty_initial_bitcoin_tx.txid, Vec::new(),
 			self.context.cur_counterparty_commitment_transaction_number,
 			self.context.counterparty_cur_commitment_point.unwrap(),
 			counterparty_initial_commitment_tx.feerate_per_kw(),
 			counterparty_initial_commitment_tx.to_broadcaster_value_sat(),
-			counterparty_initial_commitment_tx.to_countersignatory_value_sat(),
-			self.context.get_counterparty_yuv_pixel(),
-			logger,
-		);
+			counterparty_initial_commitment_tx.to_countersignatory_value_sat(), &&logger_with_chan_monitor);
 
 		assert_eq!(self.context.channel_state & (ChannelState::MonitorUpdateInProgress as u32), 0); // We have no had any monitor(s) yet to fail update!
 		if self.context.is_batch_funding() {
@@ -8193,25 +8187,20 @@ impl<SP: Deref> InboundV1Channel<SP> where SP::Target: SignerProvider {
 		let shutdown_script = self.context.shutdown_scriptpubkey.clone().map(|script| script.into_inner());
 		let mut monitor_signer = signer_provider.derive_channel_signer(self.context.channel_value_satoshis, self.context.channel_keys_id);
 		monitor_signer.provide_channel_parameters(&self.context.channel_transaction_parameters);
-		let channel_monitor = ChannelMonitor::new(
-			self.context.secp_ctx.clone(), monitor_signer,
-			shutdown_script, self.context.get_holder_selected_contest_delay(),
-			&self.context.destination_script, (funding_txo, funding_txo_script.clone()),
-			&self.context.channel_transaction_parameters, funding_redeemscript.clone(),
-			self.context.channel_value_satoshis, obscure_factor, holder_commitment_tx,
-			best_block, self.context.counterparty_node_id, self.context.get_funding_yuv_pixel(),
-			self.context.get_holder_yuv_pixel(),
-		);
-
+		let channel_monitor = ChannelMonitor::new(self.context.secp_ctx.clone(), monitor_signer,
+		                                          shutdown_script, self.context.get_holder_selected_contest_delay(),
+		                                          &self.context.destination_script, (funding_txo, funding_txo_script.clone()),
+		                                          &self.context.channel_transaction_parameters,
+		                                          funding_redeemscript.clone(), self.context.channel_value_satoshis,
+		                                          obscure_factor,
+		                                          holder_commitment_tx, best_block, self.context.counterparty_node_id);
+		let logger_with_chan_monitor = WithChannelMonitor::from(logger, &channel_monitor);
 		channel_monitor.provide_initial_counterparty_commitment_tx(
 			counterparty_initial_commitment_tx.trust().txid(), Vec::new(),
 			self.context.cur_counterparty_commitment_transaction_number + 1,
 			self.context.counterparty_cur_commitment_point.unwrap(), self.context.feerate_per_kw,
 			counterparty_initial_commitment_tx.to_broadcaster_value_sat(),
-			counterparty_initial_commitment_tx.to_countersignatory_value_sat(),
-			self.context.get_counterparty_yuv_pixel(),
-			logger,
-		);
+			counterparty_initial_commitment_tx.to_countersignatory_value_sat(), &&logger_with_chan_monitor);
 
 		log_info!(logger, "{} funding_signed for peer for channel {}",
 			if funding_signed.is_some() { "Generated" } else { "Waiting for signature on" }, &self.context.channel_id());
