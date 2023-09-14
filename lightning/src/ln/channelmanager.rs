@@ -59,6 +59,7 @@ use crate::ln::wire::Encode;
 use crate::offers::offer::{DerivedMetadata, OfferBuilder};
 use crate::offers::parse::Bolt12SemanticError;
 use crate::offers::refund::RefundBuilder;
+use crate::onion_message::{OffersMessage, PendingOnionMessage};
 use crate::sign::{EntropySource, KeysManager, NodeSigner, Recipient, SignerProvider, WriteableEcdsaChannelSigner};
 use crate::util::config::{UserConfig, ChannelConfig, ChannelConfigUpdate};
 use crate::util::wakers::{Future, Notifier};
@@ -1062,6 +1063,8 @@ where
 //
 // Lock order tree:
 //
+// `pending_offers_messages`
+//
 // `total_consistency_lock`
 //  |
 //  |__`forward_htlcs`
@@ -1069,26 +1072,26 @@ where
 //  |   |__`pending_intercepted_htlcs`
 //  |
 //  |__`per_peer_state`
-//  |   |
-//  |   |__`pending_inbound_payments`
-//  |       |
-//  |       |__`claimable_payments`
-//  |       |
-//  |       |__`pending_outbound_payments` // This field's struct contains a map of pending outbounds
-//  |           |
-//  |           |__`peer_state`
-//  |               |
-//  |               |__`id_to_peer`
-//  |               |
-//  |               |__`short_to_chan_info`
-//  |               |
-//  |               |__`outbound_scid_aliases`
-//  |               |
-//  |               |__`best_block`
-//  |               |
-//  |               |__`pending_events`
-//  |                   |
-//  |                   |__`pending_background_events`
+//      |
+//      |__`pending_inbound_payments`
+//          |
+//          |__`claimable_payments`
+//          |
+//          |__`pending_outbound_payments` // This field's struct contains a map of pending outbounds
+//              |
+//              |__`peer_state`
+//                  |
+//                  |__`id_to_peer`
+//                  |
+//                  |__`short_to_chan_info`
+//                  |
+//                  |__`outbound_scid_aliases`
+//                  |
+//                  |__`best_block`
+//                  |
+//                  |__`pending_events`
+//                      |
+//                      |__`pending_background_events`
 //
 pub struct ChannelManager<M: Deref, T: Deref, YT: Deref, ES: Deref, NS: Deref, SP: Deref, F: Deref, R: Deref, L: Deref>
 where
@@ -1308,6 +1311,8 @@ where
 
 	event_persist_notifier: Notifier,
 	needs_persist_flag: AtomicBool,
+
+	pending_offers_messages: Mutex<Vec<PendingOnionMessage<OffersMessage>>>,
 
 	entropy_source: ES,
 	node_signer: NS,
@@ -2450,6 +2455,8 @@ where
 			event_persist_notifier: Notifier::new(),
 			needs_persist_flag: AtomicBool::new(false),
 			funding_batch_states: Mutex::new(BTreeMap::new()),
+
+			pending_offers_messages: Mutex::new(Vec::new()),
 
 			entropy_source,
 			node_signer,
@@ -11039,6 +11046,8 @@ where
 			needs_persist_flag: AtomicBool::new(false),
 
 			funding_batch_states: Mutex::new(BTreeMap::new()),
+
+			pending_offers_messages: Mutex::new(Vec::new()),
 
 			entropy_source: args.entropy_source,
 			node_signer: args.node_signer,
