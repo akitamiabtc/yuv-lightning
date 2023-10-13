@@ -1930,6 +1930,11 @@ impl CommitmentTransaction {
 		self.commitment_number
 	}
 
+	/// The per commitment point used by the broadcaster.
+	pub fn per_commitment_point(&self) -> PublicKey {
+		self.keys.per_commitment_point
+	}
+
 	/// The value to be sent to the broadcaster
 	pub fn to_broadcaster_value_sat(&self) -> u64 {
 		self.to_broadcaster_value_sat
@@ -2195,71 +2200,40 @@ impl<'a> TrustedCommitmentTransaction<'a> {
 		Ok(ret)
 	}
 
-	/// Gets a signed HTLC transaction given a preimage (for !htlc.offered) and the holder HTLC transaction signature.
-	pub(crate) fn get_signed_htlc_tx(
-		&self,
-		channel_parameters: &DirectedChannelTransactionParameters,
-		htlc_index: usize,
-		counterparty_signature: &Signature,
-		signature: &Signature,
+	/// Builds the second-level holder HTLC transaction for the HTLC with index `htlc_index`.
+	pub(crate) fn build_unsigned_htlc_tx(
+		&self, channel_parameters: &DirectedChannelTransactionParameters, htlc_index: usize,
 		preimage: &Option<PaymentPreimage>,
-	) -> (Transaction, Option<YuvTxType>) {
-		let inner = self.inner;
-		let keys = &inner.keys;
-		let txid = inner.built.txid;
-		let this_htlc = &inner.htlcs[htlc_index];
+	) -> Transaction {
+		let keys = &self.inner.keys;
+		let this_htlc = &self.inner.htlcs[htlc_index];
 		assert!(this_htlc.transaction_output_index.is_some());
 		// if we don't have preimage for an HTLC-Success, we can't generate an HTLC transaction.
 		if !this_htlc.offered && preimage.is_none() { unreachable!(); }
 		// Further, we should never be provided the preimage for an HTLC-Timeout transaction.
 		if  this_htlc.offered && preimage.is_some() { unreachable!(); }
 
-		let (htlc_yuv_pixel_opt, pixel_proofs) = inner.yuv_proofs.as_ref()
-			.and_then(|yuv_proofs| yuv_proofs.output_proofs())
-			.and_then(|output_proofs| output_proofs.get(&(htlc_index as u32)).cloned())
-			.map_or((None, None), |input_proof| {
-				let yuv_pixel = input_proof.pixel();
+		build_htlc_transaction(
+			&self.inner.built.txid, self.inner.feerate_per_kw, channel_parameters.contest_delay(), &this_htlc,
+			&self.channel_type_features, &keys.broadcaster_delayed_payment_key, &keys.revocation_key
+		)
+	}
 
-				let (output_proof_opt, _) = get_lightning_yuv_proof(
-					channel_parameters.contest_delay(), Some(yuv_pixel), keys,
-				);
 
-				let output_proof = output_proof_opt
-					.expect("yuv_pixel is presented, so it must be valid");
-				let pixel_proofs = YuvTxType::Transfer {
-					input_proofs: BTreeMap::from([(0, input_proof.clone())]),
-					output_proofs: BTreeMap::from([(0, output_proof)]),
-				};
-
-				(Some(yuv_pixel), Some(pixel_proofs))
-			});
-
-		let counterparty_htlc_key = keys.countersignatory_htlc_key.maybe_tweak(htlc_yuv_pixel_opt);
-		let revocation_key = keys.revocation_key.maybe_tweak(htlc_yuv_pixel_opt);
-
-		let mut htlc_tx = build_htlc_transaction(
-			&txid,
-			inner.feerate_per_kw,
-			channel_parameters.contest_delay(),
-			&this_htlc,
-			&self.channel_type_features,
-			&keys.broadcaster_delayed_payment_key,
-			&revocation_key,
-		);
-
+	/// Builds the witness required to spend the input for the HTLC with index `htlc_index` in a
+	/// second-level holder HTLC transaction.
+	pub(crate) fn build_htlc_input_witness(
+		&self, htlc_index: usize, counterparty_signature: &Signature, signature: &Signature,
+		preimage: &Option<PaymentPreimage>
+	) -> Witness {
+		let keys = &self.inner.keys;
 		let htlc_redeemscript = get_htlc_redeemscript_with_explicit_keys(
-			&this_htlc,
-			&self.channel_type_features,
-			&keys.broadcaster_htlc_key,
-			&counterparty_htlc_key,
-			&keys.revocation_key,
+			&self.inner.htlcs[htlc_index], &self.channel_type_features, &keys.broadcaster_htlc_key,
+			&keys.countersignatory_htlc_key, &keys.revocation_key
 		);
-
-		htlc_tx.input[0].witness = build_htlc_input_witness(
+		chan_utils::build_htlc_input_witness(
 			signature, counterparty_signature, preimage, &htlc_redeemscript, &self.channel_type_features,
-		);
-
-		(htlc_tx, pixel_proofs)
+		)
 	}
 
 	/// Returns the index of the revokeable output, i.e. the `to_local` output sending funds to
