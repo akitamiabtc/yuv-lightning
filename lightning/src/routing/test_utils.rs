@@ -13,10 +13,10 @@ use crate::ln::msgs::{ChannelAnnouncement, ChannelUpdate, NodeAnnouncement, Rout
 use crate::util::test_utils;
 use crate::util::ser::Writeable;
 
+use bitcoin::blockdata::constants::ChainHash;
 use bitcoin::hashes::sha256d::Hash as Sha256dHash;
 use bitcoin::hashes::Hash;
 use bitcoin::network::constants::Network;
-use bitcoin::blockdata::constants::genesis_block;
 
 use hex;
 
@@ -65,7 +65,7 @@ pub(super) fn add_channel_internal(
 
 	let unsigned_announcement = UnsignedChannelAnnouncement {
 		features,
-		chain_hash: genesis_block(Network::Testnet).header.block_hash(),
+		chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 		short_channel_id,
 		node_id_1,
 		node_id_2,
@@ -180,7 +180,7 @@ pub(super) fn build_line_graph() -> (
 			add_channel(&gossip_sync, &secp_ctx, &cur_privkey, &next_privkey,
 				ChannelFeatures::from_le_bytes(id_to_feature_flags(1)), cur_short_channel_id);
 			update_channel(&gossip_sync, &secp_ctx, &cur_privkey, UnsignedChannelUpdate {
-				chain_hash: genesis_block(Network::Testnet).header.block_hash(),
+				chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 				short_channel_id: cur_short_channel_id,
 				timestamp: idx as u32,
 				flags: 0,
@@ -193,7 +193,7 @@ pub(super) fn build_line_graph() -> (
 				htlc_maximum_yuv: None,
 			});
 			update_channel(&gossip_sync, &secp_ctx, &next_privkey, UnsignedChannelUpdate {
-				chain_hash: genesis_block(Network::Testnet).header.block_hash(),
+				chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 				short_channel_id: cur_short_channel_id,
 				timestamp: (idx as u32)+1,
 				flags: 1,
@@ -320,7 +320,7 @@ pub(super) fn build_graph_internal(chroma: Option<Chroma>, use_chain_source: boo
 
 	add_channel_internal(&gossip_sync, &secp_ctx, &our_privkey, &privkeys[0], ChannelFeatures::from_le_bytes(id_to_feature_flags(1)), 1, yuv_pixel, Some(chain_monitor.clone()));
 	update_channel(&gossip_sync, &secp_ctx, &privkeys[0], UnsignedChannelUpdate {
-		chain_hash: genesis_block(Network::Testnet).header.block_hash(),
+		chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 		short_channel_id: 1,
 		timestamp: 1,
 		flags: 1,
@@ -337,7 +337,7 @@ pub(super) fn build_graph_internal(chroma: Option<Chroma>, use_chain_source: boo
 
 	add_channel_internal(&gossip_sync, &secp_ctx, &our_privkey, &privkeys[1], ChannelFeatures::from_le_bytes(id_to_feature_flags(2)), 2, yuv_pixel, Some(chain_monitor.clone()));
 	update_channel(&gossip_sync, &secp_ctx, &our_privkey, UnsignedChannelUpdate {
-		chain_hash: genesis_block(Network::Testnet).header.block_hash(),
+		chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 		short_channel_id: 2,
 		timestamp: 1,
 		flags: 0,
@@ -350,7 +350,7 @@ pub(super) fn build_graph_internal(chroma: Option<Chroma>, use_chain_source: boo
 		htlc_maximum_yuv: Some(HTLC_MAXIMUM_YUV),
 	});
 	update_channel(&gossip_sync, &secp_ctx, &privkeys[1], UnsignedChannelUpdate {
-		chain_hash: genesis_block(Network::Testnet).header.block_hash(),
+		chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 		short_channel_id: 2,
 		timestamp: 1,
 		flags: 1,
@@ -367,7 +367,7 @@ pub(super) fn build_graph_internal(chroma: Option<Chroma>, use_chain_source: boo
 
 	add_channel_internal(&gossip_sync, &secp_ctx, &our_privkey, &privkeys[7], ChannelFeatures::from_le_bytes(id_to_feature_flags(12)), 12, yuv_pixel, Some(chain_monitor.clone()));
 	update_channel(&gossip_sync, &secp_ctx, &our_privkey, UnsignedChannelUpdate {
-		chain_hash: genesis_block(Network::Testnet).header.block_hash(),
+		chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 		short_channel_id: 12,
 		timestamp: 1,
 		flags: 0,
@@ -380,7 +380,7 @@ pub(super) fn build_graph_internal(chroma: Option<Chroma>, use_chain_source: boo
 		htlc_maximum_yuv: Some(HTLC_MAXIMUM_YUV),
 	});
 	update_channel(&gossip_sync, &secp_ctx, &privkeys[7], UnsignedChannelUpdate {
-		chain_hash: genesis_block(Network::Testnet).header.block_hash(),
+		chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 		short_channel_id: 12,
 		timestamp: 1,
 		flags: 1,
@@ -397,7 +397,7 @@ pub(super) fn build_graph_internal(chroma: Option<Chroma>, use_chain_source: boo
 
 	add_channel_internal(&gossip_sync, &secp_ctx, &privkeys[0], &privkeys[2], ChannelFeatures::from_le_bytes(id_to_feature_flags(3)), 3, yuv_pixel, Some(chain_monitor.clone()));
 	update_channel(&gossip_sync, &secp_ctx, &privkeys[0], UnsignedChannelUpdate {
-		chain_hash: genesis_block(Network::Testnet).header.block_hash(),
+		chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 		short_channel_id: 3,
 		timestamp: 1,
 		flags: 0,
@@ -410,7 +410,7 @@ pub(super) fn build_graph_internal(chroma: Option<Chroma>, use_chain_source: boo
 		htlc_maximum_yuv: Some(HTLC_MAXIMUM_YUV),
 	});
 	update_channel(&gossip_sync, &secp_ctx, &privkeys[2], UnsignedChannelUpdate {
-		chain_hash: genesis_block(Network::Testnet).header.block_hash(),
+		chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 		short_channel_id: 3,
 		timestamp: 1,
 		flags: 1,
@@ -425,7 +425,7 @@ pub(super) fn build_graph_internal(chroma: Option<Chroma>, use_chain_source: boo
 
 	add_channel_internal(&gossip_sync, &secp_ctx, &privkeys[1], &privkeys[2], ChannelFeatures::from_le_bytes(id_to_feature_flags(4)), 4, yuv_pixel, Some(chain_monitor.clone()));
 	update_channel(&gossip_sync, &secp_ctx, &privkeys[1], UnsignedChannelUpdate {
-		chain_hash: genesis_block(Network::Testnet).header.block_hash(),
+		chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 		short_channel_id: 4,
 		timestamp: 1,
 		flags: 0,
@@ -438,7 +438,7 @@ pub(super) fn build_graph_internal(chroma: Option<Chroma>, use_chain_source: boo
 		htlc_maximum_yuv: Some(HTLC_MAXIMUM_YUV),
 	});
 	update_channel(&gossip_sync, &secp_ctx, &privkeys[2], UnsignedChannelUpdate {
-		chain_hash: genesis_block(Network::Testnet).header.block_hash(),
+		chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 		short_channel_id: 4,
 		timestamp: 1,
 		flags: 1,
@@ -453,7 +453,7 @@ pub(super) fn build_graph_internal(chroma: Option<Chroma>, use_chain_source: boo
 
 	add_channel_internal(&gossip_sync, &secp_ctx, &privkeys[7], &privkeys[2], ChannelFeatures::from_le_bytes(id_to_feature_flags(13)), 13, yuv_pixel, Some(chain_monitor.clone()));
 	update_channel(&gossip_sync, &secp_ctx, &privkeys[7], UnsignedChannelUpdate {
-		chain_hash: genesis_block(Network::Testnet).header.block_hash(),
+		chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 		short_channel_id: 13,
 		timestamp: 1,
 		flags: 0,
@@ -466,7 +466,7 @@ pub(super) fn build_graph_internal(chroma: Option<Chroma>, use_chain_source: boo
 		htlc_maximum_yuv: Some(HTLC_MAXIMUM_YUV),
 	});
 	update_channel(&gossip_sync, &secp_ctx, &privkeys[2], UnsignedChannelUpdate {
-		chain_hash: genesis_block(Network::Testnet).header.block_hash(),
+		chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 		short_channel_id: 13,
 		timestamp: 1,
 		flags: 1,
@@ -483,7 +483,7 @@ pub(super) fn build_graph_internal(chroma: Option<Chroma>, use_chain_source: boo
 
 	add_channel_internal(&gossip_sync, &secp_ctx, &privkeys[2], &privkeys[4], ChannelFeatures::from_le_bytes(id_to_feature_flags(6)), 6, yuv_pixel, Some(chain_monitor.clone()));
 	update_channel(&gossip_sync, &secp_ctx, &privkeys[2], UnsignedChannelUpdate {
-		chain_hash: genesis_block(Network::Testnet).header.block_hash(),
+		chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 		short_channel_id: 6,
 		timestamp: 1,
 		flags: 0,
@@ -496,7 +496,7 @@ pub(super) fn build_graph_internal(chroma: Option<Chroma>, use_chain_source: boo
 		htlc_maximum_yuv: Some(HTLC_MAXIMUM_YUV),
 	});
 	update_channel(&gossip_sync, &secp_ctx, &privkeys[4], UnsignedChannelUpdate {
-		chain_hash: genesis_block(Network::Testnet).header.block_hash(),
+		chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 		short_channel_id: 6,
 		timestamp: 1,
 		flags: 1,
@@ -511,7 +511,7 @@ pub(super) fn build_graph_internal(chroma: Option<Chroma>, use_chain_source: boo
 
 	add_channel_internal(&gossip_sync, &secp_ctx, &privkeys[4], &privkeys[3], ChannelFeatures::from_le_bytes(id_to_feature_flags(11)), 11, yuv_pixel, Some(chain_monitor.clone()));
 	update_channel(&gossip_sync, &secp_ctx, &privkeys[4], UnsignedChannelUpdate {
-		chain_hash: genesis_block(Network::Testnet).header.block_hash(),
+		chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 		short_channel_id: 11,
 		timestamp: 1,
 		flags: 0,
@@ -524,7 +524,7 @@ pub(super) fn build_graph_internal(chroma: Option<Chroma>, use_chain_source: boo
 		htlc_maximum_yuv: Some(HTLC_MAXIMUM_YUV),
 	});
 	update_channel(&gossip_sync, &secp_ctx, &privkeys[3], UnsignedChannelUpdate {
-		chain_hash: genesis_block(Network::Testnet).header.block_hash(),
+		chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 		short_channel_id: 11,
 		timestamp: 1,
 		flags: 1,
@@ -543,7 +543,7 @@ pub(super) fn build_graph_internal(chroma: Option<Chroma>, use_chain_source: boo
 
 	add_channel_internal(&gossip_sync, &secp_ctx, &privkeys[2], &privkeys[5], ChannelFeatures::from_le_bytes(id_to_feature_flags(7)), 7, yuv_pixel, Some(chain_monitor.clone()));
 	update_channel(&gossip_sync, &secp_ctx, &privkeys[2], UnsignedChannelUpdate {
-		chain_hash: genesis_block(Network::Testnet).header.block_hash(),
+		chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 		short_channel_id: 7,
 		timestamp: 1,
 		flags: 0,
@@ -556,7 +556,7 @@ pub(super) fn build_graph_internal(chroma: Option<Chroma>, use_chain_source: boo
 		htlc_maximum_yuv: Some(HTLC_MAXIMUM_YUV),
 	});
 	update_channel(&gossip_sync, &secp_ctx, &privkeys[5], UnsignedChannelUpdate {
-		chain_hash: genesis_block(Network::Testnet).header.block_hash(),
+		chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 		short_channel_id: 7,
 		timestamp: 1,
 		flags: 1,

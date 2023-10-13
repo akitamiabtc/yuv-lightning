@@ -5,6 +5,7 @@
 use crate::{AsyncBlockSourceResult, AsyncYuvSourceResult, BlockData, BlockSource, BlockSourceError};
 
 use bitcoin::blockdata::block::Block;
+use bitcoin::blockdata::constants::ChainHash;
 use bitcoin::blockdata::transaction::{TxOut, OutPoint};
 use bitcoin::hash_types::BlockHash;
 
@@ -401,7 +402,7 @@ impl<S: FutureSpawner,
 	NS::Target: NodeSigner,
 	YS::Target: YuvTransactionSource,
 {
-	fn get_utxo(&self, _genesis_hash: &BlockHash, short_channel_id: u64) -> UtxoResult {
+	fn get_utxo(&self, _chain_hash: &ChainHash, short_channel_id: u64) -> UtxoResult {
 		let res = UtxoFuture::new();
 		let fut = res.clone();
 		let source = self.source.clone();

@@ -19,7 +19,7 @@
 
 use bitcoin::blockdata::block::BlockHeader;
 use bitcoin::blockdata::transaction::Transaction;
-use bitcoin::blockdata::constants::{genesis_block, ChainHash};
+use bitcoin::blockdata::constants::ChainHash;
 use bitcoin::network::constants::Network;
 
 use bitcoin::hashes::Hash;
@@ -1073,7 +1073,7 @@ where
 	L::Target: Logger,
 {
 	default_configuration: UserConfig,
-	genesis_hash: BlockHash,
+	chain_hash: ChainHash,
 	fee_estimator: LowerBoundedFeeEstimator<F>,
 	chain_monitor: M,
 	tx_broadcaster: T,
@@ -2124,7 +2124,7 @@ macro_rules! emit_channel_ready_event {
 macro_rules! handle_monitor_update_completion {
 	($self: ident, $peer_state_lock: expr, $peer_state: expr, $per_peer_state_lock: expr, $chan: expr) => { {
 		let mut updates = $chan.monitor_updating_restored(&$self.logger,
-			&$self.node_signer, $self.genesis_hash, &$self.default_configuration,
+			&$self.node_signer, $self.chain_hash, &$self.default_configuration,
 			$self.best_block.read().unwrap().height());
 		let counterparty_node_id = $chan.context.get_counterparty_node_id();
 		let channel_update = if updates.channel_ready.is_some() && $chan.context.is_usable() {
@@ -2381,7 +2381,7 @@ where
 
 		Self {
 			default_configuration: config.clone(),
-			genesis_hash: genesis_block(params.network).header.block_hash(),
+			chain_hash: ChainHash::using_genesis_block(params.network),
 			fee_estimator: LowerBoundedFeeEstimator::new(fee_est),
 			chain_monitor,
 			tx_broadcaster,
@@ -2442,7 +2442,7 @@ where
 			if cfg!(fuzzing) { // fuzzing chacha20 doesn't use the key at all so we always get the same alias
 				outbound_scid_alias += 1;
 			} else {
-				outbound_scid_alias = fake_scid::Namespace::OutboundAlias.get_fake_scid(height, &self.genesis_hash, &self.fake_scid_rand_bytes, &self.entropy_source);
+				outbound_scid_alias = fake_scid::Namespace::OutboundAlias.get_fake_scid(height, &self.chain_hash, &self.fake_scid_rand_bytes, &self.entropy_source);
 			}
 			if outbound_scid_alias != 0 && self.outbound_scid_aliases.lock().unwrap().insert(outbound_scid_alias) {
 				break;
@@ -2513,7 +2513,7 @@ where
 				},
 			}
 		};
-		let res = channel.get_open_channel(self.genesis_hash.clone());
+		let res = channel.get_open_channel(self.chain_hash);
 
 		let temporary_channel_id = channel.context.channel_id();
 		match peer_state.channel_by_id.entry(temporary_channel_id) {
@@ -3255,8 +3255,8 @@ where
 					// Note that this is likely a timing oracle for detecting whether an scid is a
 					// phantom or an intercept.
 					if (self.default_configuration.accept_intercept_htlcs &&
-						fake_scid::is_valid_intercept(&self.fake_scid_rand_bytes, outgoing_scid, &self.genesis_hash)) ||
-						fake_scid::is_valid_phantom(&self.fake_scid_rand_bytes, outgoing_scid, &self.genesis_hash)
+						fake_scid::is_valid_intercept(&self.fake_scid_rand_bytes, outgoing_scid, &self.chain_hash)) ||
+						fake_scid::is_valid_phantom(&self.fake_scid_rand_bytes, outgoing_scid, &self.chain_hash)
 					{
 						None
 					} else {
@@ -3484,7 +3484,7 @@ where
 		};
 
 		let unsigned = msgs::UnsignedChannelUpdate {
-			chain_hash: self.genesis_hash,
+			chain_hash: self.chain_hash,
 			short_channel_id,
 			timestamp: chan.context.get_update_time_counter(),
 			flags: (!were_node_one) as u8 | ((!enabled as u8) << 1),
@@ -4410,7 +4410,7 @@ where
 										}
 										if let PendingHTLCRouting::Forward { onion_packet, .. } = routing {
 											let phantom_pubkey_res = self.node_signer.get_node_id(Recipient::PhantomNode);
-											if phantom_pubkey_res.is_ok() && fake_scid::is_valid_phantom(&self.fake_scid_rand_bytes, short_chan_id, &self.genesis_hash) {
+											if phantom_pubkey_res.is_ok() && fake_scid::is_valid_phantom(&self.fake_scid_rand_bytes, short_chan_id, &self.chain_hash) {
 												let phantom_shared_secret = self.node_signer.ecdh(Recipient::PhantomNode, &onion_packet.public_key.unwrap(), None).unwrap().secret_bytes();
 												let next_hop = match onion_utils::decode_next_payment_hop(
 													phantom_shared_secret, &onion_packet.hop_data, onion_packet.hmac,
@@ -6134,7 +6134,7 @@ where
 	fn internal_open_channel(&self, counterparty_node_id: &PublicKey, msg: &msgs::OpenChannel) -> Result<(), MsgHandleErrInternal> {
 		// Note that the ChannelManager is NOT re-persisted on disk after this, so any changes are
 		// likely to be lost on restart!
-		if msg.chain_hash != self.genesis_hash {
+		if msg.chain_hash != self.chain_hash {
 			return Err(MsgHandleErrInternal::send_err_msg_no_close("Unknown genesis block hash".to_owned(), msg.temporary_channel_id.clone()));
 		}
 
@@ -6401,7 +6401,7 @@ where
 			hash_map::Entry::Occupied(mut chan_phase_entry) => {
 				if let ChannelPhase::Funded(chan) = chan_phase_entry.get_mut() {
 					let announcement_sigs_opt = try_chan_phase_entry!(self, chan.channel_ready(&msg, &self.node_signer,
-						self.genesis_hash.clone(), &self.default_configuration, &self.best_block.read().unwrap(), &self.logger), chan_phase_entry);
+						self.chain_hash, &self.default_configuration, &self.best_block.read().unwrap(), &self.logger), chan_phase_entry);
 					if let Some(announcement_sigs) = announcement_sigs_opt {
 						log_trace!(self.logger, "Sending announcement_signatures for channel {}", chan.context.channel_id());
 						peer_state.pending_msg_events.push(events::MessageSendEvent::SendAnnouncementSignatures {
@@ -6786,7 +6786,7 @@ where
 						},
 						hash_map::Entry::Vacant(entry) => {
 							if !is_our_scid && forward_info.incoming_amt_msat.is_some() &&
-							   fake_scid::is_valid_intercept(&self.fake_scid_rand_bytes, scid, &self.genesis_hash)
+							   fake_scid::is_valid_intercept(&self.fake_scid_rand_bytes, scid, &self.chain_hash)
 							{
 								let intercept_id = InterceptId(Sha256::hash(&forward_info.incoming_shared_secret).into_inner());
 								let mut pending_intercepts = self.pending_intercepted_htlcs.lock().unwrap();
@@ -6983,7 +6983,7 @@ where
 
 					peer_state.pending_msg_events.push(events::MessageSendEvent::BroadcastChannelAnnouncement {
 						msg: try_chan_phase_entry!(self, chan.announcement_signatures(
-							&self.node_signer, self.genesis_hash.clone(), self.best_block.read().unwrap().height(),
+							&self.node_signer, self.chain_hash, self.best_block.read().unwrap().height(),
 							msg, &self.default_configuration
 						), chan_phase_entry),
 						// Note that announcement_signatures fails if the channel cannot be announced,
@@ -7071,7 +7071,7 @@ where
 						// freed HTLCs to fail backwards. If in the future we no longer drop pending
 						// add-HTLCs on disconnect, we may be handed HTLCs to fail backwards here.
 						let responses = try_chan_phase_entry!(self, chan.channel_reestablish(
-							msg, &self.logger, &self.node_signer, self.genesis_hash,
+							msg, &self.logger, &self.node_signer, self.chain_hash,
 							&self.default_configuration, &*self.best_block.read().unwrap()), chan_phase_entry);
 						let mut channel_update = None;
 						if let Some(msg) = responses.shutdown_msg {
@@ -7451,7 +7451,7 @@ where
 		let best_block_height = self.best_block.read().unwrap().height();
 		let short_to_chan_info = self.short_to_chan_info.read().unwrap();
 		loop {
-			let scid_candidate = fake_scid::Namespace::Phantom.get_fake_scid(best_block_height, &self.genesis_hash, &self.fake_scid_rand_bytes, &self.entropy_source);
+			let scid_candidate = fake_scid::Namespace::Phantom.get_fake_scid(best_block_height, &self.chain_hash, &self.fake_scid_rand_bytes, &self.entropy_source);
 			// Ensure the generated scid doesn't conflict with a real channel.
 			match short_to_chan_info.get(&scid_candidate) {
 				Some(_) => continue,
@@ -7481,7 +7481,7 @@ where
 		let best_block_height = self.best_block.read().unwrap().height();
 		let short_to_chan_info = self.short_to_chan_info.read().unwrap();
 		loop {
-			let scid_candidate = fake_scid::Namespace::Intercept.get_fake_scid(best_block_height, &self.genesis_hash, &self.fake_scid_rand_bytes, &self.entropy_source);
+			let scid_candidate = fake_scid::Namespace::Intercept.get_fake_scid(best_block_height, &self.chain_hash, &self.fake_scid_rand_bytes, &self.entropy_source);
 			// Ensure the generated scid doesn't conflict with a real channel.
 			if short_to_chan_info.contains_key(&scid_candidate) { continue }
 			return scid_candidate
@@ -7928,7 +7928,7 @@ where
 			*best_block = BestBlock::new(header.prev_blockhash, new_height)
 		}
 
-		self.do_chain_event(Some(new_height), |channel| channel.best_block_updated(new_height, header.time, self.genesis_hash.clone(), &self.node_signer, &self.default_configuration, &self.logger));
+		self.do_chain_event(Some(new_height), |channel| channel.best_block_updated(new_height, header.time, self.chain_hash, &self.node_signer, &self.default_configuration, &self.logger));
 	}
 }
 
@@ -7955,12 +7955,13 @@ where
 		let _persistence_guard =
 			PersistenceNotifierGuard::optionally_notify_skipping_background_events(
 				self, || -> NotifyOption { NotifyOption::DoPersist });
-		self.do_chain_event(Some(height), |channel| channel.transactions_confirmed(&block_hash, height, txdata, self.genesis_hash.clone(), &self.node_signer, &self.default_configuration, &self.logger));
+		self.do_chain_event(Some(height), |channel| channel.transactions_confirmed(&block_hash, height, txdata, self.chain_hash, &self.node_signer, &self.default_configuration, &self.logger)
+			.map(|(a, b)| (a, Vec::new(), b)));
 
 		let last_best_block_height = self.best_block.read().unwrap().height();
 		if height < last_best_block_height {
 			let timestamp = self.highest_seen_timestamp.load(Ordering::Acquire);
-			self.do_chain_event(Some(last_best_block_height), |channel| channel.best_block_updated(last_best_block_height, timestamp as u32, self.genesis_hash.clone(), &self.node_signer, &self.default_configuration, &self.logger));
+			self.do_chain_event(Some(last_best_block_height), |channel| channel.best_block_updated(last_best_block_height, timestamp as u32, self.chain_hash, &self.node_signer, &self.default_configuration, &self.logger));
 		}
 	}
 
@@ -7977,7 +7978,7 @@ where
 				self, || -> NotifyOption { NotifyOption::DoPersist });
 		*self.best_block.write().unwrap() = BestBlock::new(block_hash, height);
 
-		self.do_chain_event(Some(height), |channel| channel.best_block_updated(height, header.time, self.genesis_hash.clone(), &self.node_signer, &self.default_configuration, &self.logger));
+		self.do_chain_event(Some(height), |channel| channel.best_block_updated(height, header.time, self.chain_hash, &self.node_signer, &self.default_configuration, &self.logger));
 
 		macro_rules! max_time {
 			($timestamp: expr) => {
@@ -8202,18 +8203,40 @@ where
 										});
 									}
 								}
-							}
-							if channel.is_our_channel_ready() {
-								if let Some(real_scid) = channel.context.get_short_channel_id() {
-									// If we sent a 0conf channel_ready, and now have an SCID, we add it
-									// to the short_to_chan_info map here. Note that we check whether we
-									// can relay using the real SCID at relay-time (i.e.
-									// enforce option_scid_alias then), and if the funding tx is ever
-									// un-confirmed we force-close the channel, ensuring short_to_chan_info
-									// is always consistent.
-									let mut short_to_chan_info = self.short_to_chan_info.write().unwrap();
-									let scid_insert = short_to_chan_info.insert(real_scid, (channel.context.get_counterparty_node_id(), channel.context.channel_id()));
-									assert!(scid_insert.is_none() || scid_insert.unwrap() == (channel.context.get_counterparty_node_id(), channel.context.channel_id()),
+
+								{
+									let mut pending_events = self.pending_events.lock().unwrap();
+									emit_channel_ready_event!(pending_events, channel);
+								}
+
+								if let Some(announcement_sigs) = announcement_sigs {
+									log_trace!(self.logger, "Sending announcement_signatures for channel {}", channel.context.channel_id());
+									pending_msg_events.push(events::MessageSendEvent::SendAnnouncementSignatures {
+										node_id: channel.context.get_counterparty_node_id(),
+										msg: announcement_sigs,
+									});
+									if let Some(height) = height_opt {
+										if let Some(announcement) = channel.get_signed_channel_announcement(&self.node_signer, self.chain_hash, height, &self.default_configuration) {
+											pending_msg_events.push(events::MessageSendEvent::BroadcastChannelAnnouncement {
+												msg: announcement,
+												// Note that announcement_signatures fails if the channel cannot be announced,
+												// so get_channel_update_for_broadcast will never fail by the time we get here.
+												update_msg: Some(self.get_channel_update_for_broadcast(channel).unwrap()),
+											});
+										}
+									}
+								}
+								if channel.is_our_channel_ready() {
+									if let Some(real_scid) = channel.context.get_short_channel_id() {
+										// If we sent a 0conf channel_ready, and now have an SCID, we add it
+										// to the short_to_chan_info map here. Note that we check whether we
+										// can relay using the real SCID at relay-time (i.e.
+										// enforce option_scid_alias then), and if the funding tx is ever
+										// un-confirmed we force-close the channel, ensuring short_to_chan_info
+										// is always consistent.
+										let mut short_to_chan_info = self.short_to_chan_info.write().unwrap();
+										let scid_insert = short_to_chan_info.insert(real_scid, (channel.context.get_counterparty_node_id(), channel.context.channel_id()));
+										assert!(scid_insert.is_none() || scid_insert.unwrap() == (channel.context.get_counterparty_node_id(), channel.context.channel_id()),
 											"SCIDs should never collide - ensure you weren't behind by a full {} blocks when creating channels",
 											fake_scid::MAX_SCID_BLOCKS_FROM_NOW);
 								}
@@ -8891,7 +8914,7 @@ where
 				let mut peer_state_lock = peer_state_mutex_opt.unwrap().lock().unwrap();
 				let peer_state = &mut *peer_state_lock;
 				if let Some(ChannelPhase::UnfundedOutboundV1(chan)) = peer_state.channel_by_id.get_mut(&msg.channel_id) {
-					if let Ok(msg) = chan.maybe_handle_error_without_close(self.genesis_hash, &self.fee_estimator) {
+					if let Ok(msg) = chan.maybe_handle_error_without_close(self.chain_hash, &self.fee_estimator) {
 						peer_state.pending_msg_events.push(events::MessageSendEvent::SendOpenChannel {
 							node_id: *counterparty_node_id,
 							msg,
@@ -8914,8 +8937,8 @@ where
 		provided_init_features(&self.default_configuration)
 	}
 
-	fn get_genesis_hashes(&self) -> Option<Vec<ChainHash>> {
-		Some(vec![ChainHash::from(&self.genesis_hash[..])])
+	fn get_chain_hashes(&self) -> Option<Vec<ChainHash>> {
+		Some(vec![self.chain_hash])
 	}
 
 	fn handle_tx_add_input(&self, counterparty_node_id: &PublicKey, msg: &msgs::TxAddInput) {
@@ -9489,7 +9512,7 @@ where
 
 		write_ver_prefix!(writer, SERIALIZATION_VERSION, MIN_SERIALIZATION_VERSION);
 
-		self.genesis_hash.write(writer)?;
+		self.chain_hash.write(writer)?;
 		{
 			let best_block = self.best_block.read().unwrap();
 			best_block.height().write(writer)?;
@@ -9909,7 +9932,7 @@ where
 	fn read<Reader: io::Read>(reader: &mut Reader, mut args: ChannelManagerReadArgs<'a, M, T, YT, ES, NS, SP, F, R, L>) -> Result<Self, DecodeError> {
 		let _ver = read_ver_prefix!(reader, SERIALIZATION_VERSION);
 
-		let genesis_hash: BlockHash = Readable::read(reader)?;
+		let chain_hash: ChainHash = Readable::read(reader)?;
 		let best_block_height: u32 = Readable::read(reader)?;
 		let best_block_hash: BlockHash = Readable::read(reader)?;
 
@@ -10569,7 +10592,7 @@ where
 						let mut outbound_scid_alias;
 						loop {
 							outbound_scid_alias = fake_scid::Namespace::OutboundAlias
-								.get_fake_scid(best_block_height, &genesis_hash, fake_scid_rand_bytes.as_ref().unwrap(), &args.entropy_source);
+								.get_fake_scid(best_block_height, &chain_hash, fake_scid_rand_bytes.as_ref().unwrap(), &args.entropy_source);
 							if outbound_scid_aliases.insert(outbound_scid_alias) { break; }
 						}
 						chan.context.set_outbound_scid_alias(outbound_scid_alias);
@@ -10684,7 +10707,7 @@ where
 		}
 
 		let channel_manager = ChannelManager {
-			genesis_hash,
+			chain_hash,
 			fee_estimator: bounded_fee_estimator,
 			chain_monitor: args.chain_monitor,
 			tx_broadcaster: args.tx_broadcaster,
