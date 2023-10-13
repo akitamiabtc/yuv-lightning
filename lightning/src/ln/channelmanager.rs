@@ -456,16 +456,17 @@ impl MsgHandleErrInternal {
 	}
 	#[inline]
 	fn from_finish_shutdown(err: String, channel_id: ChannelId, user_channel_id: u128, shutdown_res: ShutdownResult, channel_update: Option<msgs::ChannelUpdate>, channel_capacity: u64) -> Self {
+		let err_msg = msgs::ErrorMessage { channel_id, data: err.clone() };
+		let action = if let (Some(_), ..) = &shutdown_res {
+			// We have a closing `ChannelMonitorUpdate`, which means the channel was funded and we
+			// should disconnect our peer such that we force them to broadcast their latest
+			// commitment upon reconnecting.
+			msgs::ErrorAction::DisconnectPeer { msg: Some(err_msg) }
+		} else {
+			msgs::ErrorAction::SendErrorMessage { msg: err_msg }
+		};
 		Self {
-			err: LightningError {
-				err: err.clone(),
-				action: msgs::ErrorAction::SendErrorMessage {
-					msg: msgs::ErrorMessage {
-						channel_id,
-						data: err
-					},
-				},
-			},
+			err: LightningError { err, action },
 			chan_id: Some((channel_id, user_channel_id)),
 			shutdown_finish: Some((shutdown_res, channel_update)),
 			channel_capacity: Some(channel_capacity)
@@ -2964,8 +2965,8 @@ where
 					peer_state.pending_msg_events.push(
 						events::MessageSendEvent::HandleError {
 							node_id: counterparty_node_id,
-							action: msgs::ErrorAction::SendErrorMessage {
-								msg: msgs::ErrorMessage { channel_id: *channel_id, data: "Channel force-closed".to_owned() }
+							action: msgs::ErrorAction::DisconnectPeer {
+								msg: Some(msgs::ErrorMessage { channel_id: *channel_id, data: "Channel force-closed".to_owned() })
 							},
 						}
 					);
@@ -7202,8 +7203,8 @@ where
 										self.issue_channel_close_events(&chan.context, ClosureReason::HolderForceClosed);
 										pending_msg_events.push(events::MessageSendEvent::HandleError {
 											node_id: chan.context.get_counterparty_node_id(),
-											action: msgs::ErrorAction::SendErrorMessage {
-												msg: msgs::ErrorMessage { channel_id: chan.context.channel_id(), data: "Channel force-closed".to_owned() }
+											action: msgs::ErrorAction::DisconnectPeer {
+												msg: Some(msgs::ErrorMessage { channel_id: chan.context.channel_id(), data: "Channel force-closed".to_owned() })
 											},
 										});
 									}
@@ -8275,33 +8276,30 @@ where
 											"SCIDs should never collide - ensure you weren't behind by a full {} blocks when creating channels",
 											fake_scid::MAX_SCID_BLOCKS_FROM_NOW);
 								}
-							}
-
-							true
-						},
-						Err(reason) => {
-							update_maps_on_chan_removal!(self, &channel.context);
-							// It looks like our counterparty went on-chain or funding transaction was
-							// reorged out of the main chain. Close the channel.
-							failed_channels.push(channel.context.force_shutdown(true));
-							if let Ok(update) = self.get_channel_update_for_broadcast(&channel) {
-								pending_msg_events.push(events::MessageSendEvent::BroadcastChannelUpdate {
-									msg: update
+							} else if let Err(reason) = res {
+								update_maps_on_chan_removal!(self, &channel.context);
+								// It looks like our counterparty went on-chain or funding transaction was
+								// reorged out of the main chain. Close the channel.
+								failed_channels.push(channel.context.force_shutdown(true));
+								if let Ok(update) = self.get_channel_update_for_broadcast(&channel) {
+									pending_msg_events.push(events::MessageSendEvent::BroadcastChannelUpdate {
+										msg: update
+									});
+								}
+								let reason_message = format!("{}", reason);
+								self.issue_channel_close_events(&channel.context, reason);
+								pending_msg_events.push(events::MessageSendEvent::HandleError {
+									node_id: channel.context.get_counterparty_node_id(),
+									action: msgs::ErrorAction::DisconnectPeer {
+										msg: Some(msgs::ErrorMessage {
+											channel_id: channel.context.channel_id(),
+											data: reason_message,
+										})
+									},
 								});
+								return false;
 							}
-							let reason_message = format!("{}", reason);
-							self.issue_channel_close_events(&channel.context, reason);
-							pending_msg_events.push(events::MessageSendEvent::HandleError {
-								node_id: channel.context.get_counterparty_node_id(),
-								action: msgs::ErrorAction::SendErrorMessage {
-									msg: msgs::ErrorMessage {
-										channel_id: channel.context.channel_id(),
-										data: reason_message,
-									}
-								},
-							});
-
-							false
+							true
 						}
 					}
 				});
