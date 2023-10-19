@@ -2833,6 +2833,7 @@ mod tests {
 
 	#[cfg(feature = "std")]
 	use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6, ToSocketAddrs};
+	#[cfg(feature = "std")]
 	use crate::ln::msgs::SocketAddressParseError;
 
 	#[test]
