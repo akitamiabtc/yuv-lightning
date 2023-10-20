@@ -154,8 +154,7 @@ impl PaymentRelay {
 /// [`BlindedHop`]: crate::blinded_path::BlindedHop
 #[derive(Clone, Debug)]
 pub struct PaymentConstraints {
-	/// The maximum total CLTV delta that is acceptable when relaying a payment over this
-	/// [`BlindedHop`].
+	/// The maximum total CLTV that is acceptable when relaying a payment over this [`BlindedHop`].
 	pub max_cltv_expiry: u32,
 	/// The minimum value, in msat, that may be accepted by the node corresponding to this
 	/// [`BlindedHop`].
