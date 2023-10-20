@@ -5856,7 +5856,7 @@ use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, EffectiveCapac
 			};
 			if let Err(LightningError{err, action: ErrorAction::IgnoreError}) = get_route(
 				&our_id, &route_params, &network_graph.read_only(), None, Arc::clone(&logger),
-				&scorer, &(), &random_seed_bytes) {
+				&scorer, &Default::default(), &random_seed_bytes) {
 					assert_eq!(err, "Failed to find a sufficient route to the given destination");
 			} else { panic!(); }
 		}
@@ -7847,7 +7847,7 @@ use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, EffectiveCapac
 		let route_params = RouteParameters::from_payment_params_and_value(
 			payment_params, amt_msat);
 		if let Err(LightningError { err, .. }) = get_route(
-			&our_id, &route_params, &netgraph, None, Arc::clone(&logger), &scorer, &(), &random_seed_bytes
+			&our_id, &route_params, &netgraph, None, Arc::clone(&logger), &scorer, &Default::default(), &random_seed_bytes
 		) {
 			assert_eq!(err, "Failed to find a path to the given destination");
 		} else { panic!() }
@@ -7904,7 +7904,7 @@ use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, EffectiveCapac
 		let route_params = RouteParameters::from_payment_params_and_value(
 			payment_params, amt_msat);
 		if let Err(LightningError { err, .. }) = get_route(
-			&our_id, &route_params, &netgraph, None, Arc::clone(&logger), &scorer, &(), &random_seed_bytes
+			&our_id, &route_params, &netgraph, None, Arc::clone(&logger), &scorer, &Default::default(), &random_seed_bytes
 		) {
 			assert_eq!(err, "Failed to find a path to the given destination");
 		} else { panic!() }
@@ -7983,7 +7983,7 @@ use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, EffectiveCapac
 			payment_params, amt_msat);
 		if let Err(LightningError { err, .. }) = get_route(
 			&our_id, &route_params, &netgraph, Some(&first_hops.iter().collect::<Vec<_>>()),
-			Arc::clone(&logger), &scorer, &(), &random_seed_bytes
+			Arc::clone(&logger), &scorer, &Default::default(), &random_seed_bytes
 		) {
 			assert_eq!(err, "Failed to find a path to the given destination");
 		} else { panic!() }
@@ -8070,7 +8070,7 @@ use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, EffectiveCapac
 
 		let route = get_route(
 			&our_id, &route_params, &netgraph, Some(&first_hops.iter().collect::<Vec<_>>()),
-			Arc::clone(&logger), &scorer, &(), &random_seed_bytes
+			Arc::clone(&logger), &scorer, &Default::default(), &random_seed_bytes
 		).unwrap();
 		assert_eq!(route.paths.len(), 1);
 		assert_eq!(route.get_total_amount(), amt_msat);
