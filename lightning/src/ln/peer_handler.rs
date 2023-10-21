@@ -24,12 +24,15 @@ use crate::ln::ChannelId;
 use crate::ln::features::{InitFeatures, NodeFeatures};
 use crate::ln::msgs;
 use crate::ln::msgs::{ChannelMessageHandler, LightningError, SocketAddress, OnionMessageHandler, RoutingMessageHandler};
+#[cfg(not(c_bindings))]
 use crate::ln::channelmanager::{SimpleArcChannelManager, SimpleRefChannelManager};
 use crate::util::ser::{VecWriter, Writeable, Writer};
 use crate::ln::peer_channel_encryptor::{PeerChannelEncryptor,NextNoiseStep};
 use crate::ln::wire;
 use crate::ln::wire::{Encode, Type};
-use crate::onion_message::{CustomOnionMessageHandler, OffersMessage, OffersMessageHandler, OnionMessageContents, PendingOnionMessage, SimpleArcOnionMessenger, SimpleRefOnionMessenger};
+#[cfg(not(c_bindings))]
+use crate::onion_message::{SimpleArcOnionMessenger, SimpleRefOnionMessenger};
+use crate::onion_message::{CustomOnionMessageHandler, OffersMessage, OffersMessageHandler, OnionMessageContents, PendingOnionMessage};
 use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, NodeAlias};
 use crate::util::atomic_counter::AtomicCounter;
 use crate::util::logger::Logger;
@@ -613,8 +616,9 @@ impl Peer {
 /// SimpleRefPeerManager is the more appropriate type. Defining these type aliases prevents
 /// issues such as overly long function definitions.
 ///
-/// This is not exported to bindings users as `Arc`s don't make sense in bindings.
-pub type SimpleArcPeerManager<SD, M, T, YT, F, C, L> = PeerManager<
+/// This is not exported to bindings users as type aliases aren't supported in most languages.
+#[cfg(not(c_bindings))]
+pub type SimpleArcPeerManager<SD, M, T, F, C, L> = PeerManager<
 	SD,
 	Arc<SimpleArcChannelManager<M, T, YT, F, L>>,
 	Arc<P2PGossipSync<Arc<NetworkGraph<Arc<L>>>, C, Arc<L>>>,
@@ -631,7 +635,8 @@ pub type SimpleArcPeerManager<SD, M, T, YT, F, C, L> = PeerManager<
 /// But if this is not necessary, using a reference is more efficient. Defining these type aliases
 /// helps with issues such as long function definitions.
 ///
-/// This is not exported to bindings users as general type aliases don't make sense in bindings.
+/// This is not exported to bindings users as type aliases aren't supported in most languages.
+#[cfg(not(c_bindings))]
 pub type SimpleRefPeerManager<
 	'a, 'b, 'c, 'd, 'e, 'f, 'logger, 'h, 'i, 'j, 'graph, 'k, SD, M, T, F, C, L
 > = PeerManager<
