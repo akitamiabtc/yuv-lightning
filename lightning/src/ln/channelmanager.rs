@@ -4417,7 +4417,7 @@ where
 									});
 									if let Err(e) = chan.queue_add_htlc(outgoing_amt_msat, outgoing_yuv_amount,
 										payment_hash, outgoing_cltv_value, htlc_source.clone(),
-										onion_packet, skimmed_fee_msat, &self.fee_estimator,
+										onion_packet, skimmed_fee_msat, None, &self.fee_estimator,
 										&self.logger)
 									{
 										if let ChannelError::Ignore(msg) = e {
