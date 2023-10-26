@@ -296,7 +296,7 @@ pub(super) enum HTLCForwardInfo {
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 enum BlindedFailure {
 	FromIntroductionNode,
-	// Another variant will be added here for non-intro nodes.
+	FromBlindedNode,
 }
 
 /// Tracks the inbound corresponding to an outbound HTLC
@@ -5394,6 +5394,7 @@ where
 							incoming_packet_shared_secret, phantom_shared_secret
 						)
 					},
+					Some(BlindedFailure::FromBlindedNode) => todo!(),
 					None => {
 						onion_error.get_encrypted_failure_packet(incoming_packet_shared_secret, phantom_shared_secret)
 					}
@@ -10110,7 +10111,8 @@ impl_writeable_tlv_based_enum!(PendingHTLCStatus, ;
 );
 
 impl_writeable_tlv_based_enum!(BlindedFailure,
-	(0, FromIntroductionNode) => {}, ;
+	(0, FromIntroductionNode) => {},
+	(2, FromBlindedNode) => {}, ;
 );
 
 impl_writeable_tlv_based!(HTLCPreviousHopData, {
