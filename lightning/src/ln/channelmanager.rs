@@ -229,6 +229,13 @@ pub(super) enum HTLCForwardInfo {
 	},
 }
 
+// Used for failing blinded HTLCs backwards correctly.
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+enum BlindedFailure {
+	FromIntroductionNode,
+	// Another variant will be added here for non-intro nodes.
+}
+
 /// Tracks the inbound corresponding to an outbound HTLC
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub(crate) struct HTLCPreviousHopData {
@@ -238,6 +245,7 @@ pub(crate) struct HTLCPreviousHopData {
 	htlc_id: u64,
 	incoming_packet_shared_secret: [u8; 32],
 	phantom_shared_secret: Option<[u8; 32]>,
+	blinded_failure: Option<BlindedFailure>,
 
 	// This field is consumed by `claim_funds_from_hop()` when updating a force-closed backwards
 	// channel with a preimage provided by the forward channel.
@@ -4225,6 +4233,7 @@ where
 				htlc_id: payment.prev_htlc_id,
 				incoming_packet_shared_secret: payment.forward_info.incoming_shared_secret,
 				phantom_shared_secret: None,
+				blinded_failure: None,
 			});
 
 			let failure_reason = HTLCFailReason::from_failure_code(0x4000 | 10);
@@ -4273,6 +4282,7 @@ where
 													htlc_id: prev_htlc_id,
 													incoming_packet_shared_secret: incoming_shared_secret,
 													phantom_shared_secret: $phantom_ss,
+													blinded_failure: None,
 												});
 
 												let reason = if $next_hop_unknown {
@@ -4389,6 +4399,7 @@ where
 										incoming_packet_shared_secret: incoming_shared_secret,
 										// Phantom payments are only PendingHTLCRouting::Receive.
 										phantom_shared_secret: None,
+										blinded_failure: None,
 									});
 									if let Err(e) = chan.queue_add_htlc(outgoing_amt_msat, outgoing_yuv_amount,
 										payment_hash, outgoing_cltv_value, htlc_source.clone(),
@@ -4473,6 +4484,7 @@ where
 										htlc_id: prev_htlc_id,
 										incoming_packet_shared_secret: incoming_shared_secret,
 										phantom_shared_secret,
+										blinded_failure: None,
 									},
 									sender_intended_yuv_value: outgoing_yuv_amount,
 									// We differentiate the received value from the sender intended value
@@ -4504,6 +4516,7 @@ where
 												htlc_id: $htlc.prev_hop.htlc_id,
 												incoming_packet_shared_secret: $htlc.prev_hop.incoming_packet_shared_secret,
 												phantom_shared_secret,
+												blinded_failure: None,
 											}), payment_hash,
 											HTLCFailReason::reason(0x4000 | 15, htlc_msat_height_data),
 											HTLCDestination::FailedPayment { payment_hash: $payment_hash },
@@ -6859,6 +6872,7 @@ where
 											htlc_id: prev_htlc_id,
 											incoming_packet_shared_secret: forward_info.incoming_shared_secret,
 											phantom_shared_secret: None,
+											blinded_failure: None,
 										});
 
 										failed_intercept_forwards.push((htlc_source, forward_info.payment_hash,
@@ -8761,6 +8775,7 @@ where
 						incoming_packet_shared_secret: htlc.forward_info.incoming_shared_secret,
 						phantom_shared_secret: None,
 						outpoint: htlc.prev_funding_outpoint,
+						blinded_failure: None,
 					});
 
 					let requested_forward_scid /* intercept scid */ = match htlc.forward_info.routing {
@@ -9940,10 +9955,15 @@ impl_writeable_tlv_based_enum!(PendingHTLCStatus, ;
 	(1, Fail),
 );
 
+impl_writeable_tlv_based_enum!(BlindedFailure,
+	(0, FromIntroductionNode) => {}, ;
+);
+
 impl_writeable_tlv_based!(HTLCPreviousHopData, {
 	(0, short_channel_id, required),
 	(1, phantom_shared_secret, option),
 	(2, outpoint, required),
+	(3, blinded_failure, option),
 	(4, htlc_id, required),
 	(6, incoming_packet_shared_secret, required),
 	(7, user_channel_id, option),
