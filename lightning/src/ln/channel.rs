@@ -275,6 +275,11 @@ enum HTLCUpdateAwaitingACK {
 		htlc_id: u64,
 		err_packet: msgs::OnionErrorPacket,
 	},
+	FailMalformedHTLC {
+		htlc_id: u64,
+		failure_code: u16,
+		sha256_of_onion: [u8; 32],
+	},
 }
 
 macro_rules! define_state_flags {
@@ -3247,7 +3252,9 @@ impl<SP: Deref> Channel<SP> where
 							return UpdateFulfillFetch::DuplicateClaim {};
 						}
 					},
-					&HTLCUpdateAwaitingACK::FailHTLC { htlc_id, .. } => {
+					&HTLCUpdateAwaitingACK::FailHTLC { htlc_id, .. } |
+						&HTLCUpdateAwaitingACK::FailMalformedHTLC { htlc_id, .. } =>
+					{
 						if htlc_id_arg == htlc_id {
 							log_warn!(logger, "Have preimage and want to fulfill HTLC with pending failure against channel {}", &self.context.channel_id());
 							// TODO: We may actually be able to switch to a fulfill here, though its
@@ -3406,7 +3413,9 @@ impl<SP: Deref> Channel<SP> where
 							return Ok(None);
 						}
 					},
-					&HTLCUpdateAwaitingACK::FailHTLC { htlc_id, .. } => {
+					&HTLCUpdateAwaitingACK::FailHTLC { htlc_id, .. } |
+						&HTLCUpdateAwaitingACK::FailMalformedHTLC { htlc_id, .. } =>
+					{
 						if htlc_id_arg == htlc_id {
 							debug_assert!(false, "Tried to fail an HTLC that was already failed");
 							return Err(ChannelError::Ignore("Unable to find a pending HTLC which matched the given HTLC ID".to_owned()));
@@ -4096,6 +4105,9 @@ impl<SP: Deref> Channel<SP> where
 								}
 							}
 						}
+					},
+					&HTLCUpdateAwaitingACK::FailMalformedHTLC { .. } => {
+						todo!()
 					},
 				}
 			}
@@ -8660,6 +8672,8 @@ impl<SP: Deref> Writeable for Channel<SP> where SP::Target: SignerProvider {
 
 		let mut holding_cell_skimmed_fees: Vec<Option<u64>> = Vec::new();
 		let mut holding_cell_blinding_points: Vec<Option<PublicKey>> = Vec::new();
+		// Vec of (htlc_id, failure_code, sha256_of_onion)
+		let mut malformed_htlcs: Vec<(u64, u16, [u8; 32])> = Vec::new();
 		(self.context.holding_cell_htlc_updates.len() as u64).write(writer)?;
 		for update in self.context.holding_cell_htlc_updates.iter() {
 			match update {
@@ -8686,6 +8700,18 @@ impl<SP: Deref> Writeable for Channel<SP> where SP::Target: SignerProvider {
 					2u8.write(writer)?;
 					htlc_id.write(writer)?;
 					err_packet.write(writer)?;
+				}
+				&HTLCUpdateAwaitingACK::FailMalformedHTLC {
+					htlc_id, failure_code, sha256_of_onion
+				} => {
+					// We don't want to break downgrading by adding a new variant, so write a dummy
+					// `::FailHTLC` variant and write the real malformed error as an optional TLV.
+					malformed_htlcs.push((htlc_id, failure_code, sha256_of_onion));
+
+					let dummy_err_packet = msgs::OnionErrorPacket { data: Vec::new() };
+					2u8.write(writer)?;
+					htlc_id.write(writer)?;
+					dummy_err_packet.write(writer)?;
 				}
 			}
 		}
@@ -8852,6 +8878,7 @@ impl<SP: Deref> Writeable for Channel<SP> where SP::Target: SignerProvider {
 			(38, self.context.is_batch_funding, option),
 			(39, pending_outbound_blinding_points, optional_vec),
 			(41, holding_cell_blinding_points, optional_vec),
+			(43, malformed_htlcs, optional_vec), // Added in 0.0.119
 		});
 
 		Ok(())
@@ -9143,6 +9170,8 @@ impl<'a, 'b, 'c, ES: Deref, SP: Deref> ReadableArgs<(&'a ES, &'b SP, u32, &'c Ch
 		let mut pending_outbound_blinding_points_opt: Option<Vec<Option<PublicKey>>> = None;
 		let mut holding_cell_blinding_points_opt: Option<Vec<Option<PublicKey>>> = None;
 
+		let mut malformed_htlcs: Option<Vec<(u64, u16, [u8; 32])>> = None;
+
 		read_tlv_fields!(reader, {
 			(0, announcement_sigs, option),
 			(1, minimum_depth, option),
@@ -9171,6 +9200,7 @@ impl<'a, 'b, 'c, ES: Deref, SP: Deref> ReadableArgs<(&'a ES, &'b SP, u32, &'c Ch
 			(38, is_batch_funding, option),
 			(39, pending_outbound_blinding_points_opt, optional_vec),
 			(41, holding_cell_blinding_points_opt, optional_vec),
+			(43, malformed_htlcs, optional_vec), // Added in 0.0.119
 		});
 
 		let (channel_keys_id, holder_signer) = if let Some(channel_keys_id) = channel_keys_id {
@@ -9265,40 +9295,20 @@ impl<'a, 'b, 'c, ES: Deref, SP: Deref> ReadableArgs<(&'a ES, &'b SP, u32, &'c Ch
 			if iter.next().is_some() { return Err(DecodeError::InvalidValue) }
 		}
 
-		let is_yuv_closing_tx_confirmed = is_yuv_closing_tx_confirmed_opt.is_some();
-		let is_btc_closing_tx_confirmed = is_btc_closing_tx_confirmed_opt.is_some();
-
-		let pending_update_balance = pending_update_balance_opt
-			.unwrap_or(UpdateBalanceInfo::default());
-
-		if let Some(yuv_amounts) = inbound_yuv_amounts_opt {
-			let mut iter = yuv_amounts.into_iter();
-			for htlc in pending_inbound_htlcs.iter_mut() {
-				htlc.yuv_amount = iter.next().ok_or(DecodeError::InvalidValue)?;
+		if let Some(malformed_htlcs) = malformed_htlcs {
+			for (malformed_htlc_id, failure_code, sha256_of_onion) in malformed_htlcs {
+				let htlc_idx = holding_cell_htlc_updates.iter().position(|htlc| {
+					if let HTLCUpdateAwaitingACK::FailHTLC { htlc_id, err_packet } = htlc {
+						let matches = *htlc_id == malformed_htlc_id;
+						if matches { debug_assert!(err_packet.data.is_empty()) }
+						matches
+					} else { false }
+				}).ok_or(DecodeError::InvalidValue)?;
+				let malformed_htlc = HTLCUpdateAwaitingACK::FailMalformedHTLC {
+					htlc_id: malformed_htlc_id, failure_code, sha256_of_onion
+				};
+				let _ = core::mem::replace(&mut holding_cell_htlc_updates[htlc_idx], malformed_htlc);
 			}
-			// We expect all yuv_amount to be consumed above
-			if iter.next().is_some() { return Err(DecodeError::InvalidValue) }
-		}
-
-		if let Some(yuv_amounts) = outbound_yuv_amounts_opt {
-			let mut iter = yuv_amounts.into_iter();
-			for htlc in pending_outbound_htlcs.iter_mut() {
-				htlc.yuv_amount = iter.next().ok_or(DecodeError::InvalidValue)?;
-			}
-			// We expect all yuv_amounts to be consumed above
-			if iter.next().is_some() { return Err(DecodeError::InvalidValue) }
-		}
-
-		if let Some(yuv_amounts) = holder_cell_htlc_update_yuv_amounts_opt {
-			let mut iter = yuv_amounts.into_iter();
-
-			for htlc in holding_cell_htlc_updates.iter_mut() {
-				if let HTLCUpdateAwaitingACK::AddHTLC { ref mut yuv_amount, .. } = htlc {
-					*yuv_amount = iter.next().ok_or(DecodeError::InvalidValue)?;
-				}
-			}
-			// We expect all yuv_amounts to be consumed above
-			if iter.next().is_some() { return Err(DecodeError::InvalidValue); }
 		}
 
 		Ok(Channel {
