@@ -2516,6 +2516,9 @@ where
 	/// connection is available, the outbound `open_channel` message may fail to send, resulting in
 	/// the channel eventually being silently forgotten (dropped on reload).
 	///
+	/// If `temporary_channel_id` is specified, it will be used as the temporary channel ID of the
+	/// channel. Otherwise, a random one will be generated for you.
+	///
 	/// Returns the new Channel's temporary `channel_id`. This ID will appear as
 	/// [`Event::FundingGenerationReady::temporary_channel_id`] and in
 	/// [`ChannelDetails::channel_id`] until after
@@ -2526,7 +2529,7 @@ where
 	/// [`Event::FundingGenerationReady::user_channel_id`]: events::Event::FundingGenerationReady::user_channel_id
 	/// [`Event::FundingGenerationReady::temporary_channel_id`]: events::Event::FundingGenerationReady::temporary_channel_id
 	/// [`Event::ChannelClosed::channel_id`]: events::Event::ChannelClosed::channel_id
-	pub fn create_channel(&self, their_network_key: PublicKey, channel_value_satoshis: u64, push_msat: u64, user_channel_id: u128, funding_yuv_pixel: Option<Pixel>, override_config: Option<UserConfig>) -> Result<ChannelId, APIError> {
+	pub fn create_channel(&self, their_network_key: PublicKey, channel_value_satoshis: u64, push_msat: u64, user_channel_id: u128, temporary_channel_id: Option<ChannelId>, override_config: Option<UserConfig>) -> Result<ChannelId, APIError> {
 		if channel_value_satoshis < 1000 {
 			return Err(APIError::APIMisuseError { err: format!("Channel value must be at least 1000 satoshis. It was {}", channel_value_satoshis) });
 		}
@@ -2541,13 +2544,20 @@ where
 			.ok_or_else(|| APIError::APIMisuseError{ err: format!("Not connected to node: {}", their_network_key) })?;
 
 		let mut peer_state = peer_state_mutex.lock().unwrap();
+
+		if let Some(temporary_channel_id) = temporary_channel_id {
+			if peer_state.channel_by_id.contains_key(&temporary_channel_id) {
+				return Err(APIError::APIMisuseError{ err: format!("Channel with temporary channel ID {} already exists!", temporary_channel_id)});
+			}
+		}
+
 		let channel = {
 			let outbound_scid_alias = self.create_and_insert_outbound_scid_alias();
 			let their_features = &peer_state.latest_features;
 			let config = if override_config.is_some() { override_config.as_ref().unwrap() } else { &self.default_configuration };
 			match OutboundV1Channel::new(&self.fee_estimator, &self.entropy_source, &self.signer_provider, their_network_key,
-										 their_features, channel_value_satoshis, push_msat, user_channel_id, config,
-										 self.best_block.read().unwrap().height(), outbound_scid_alias, funding_yuv_pixel)
+				their_features, channel_value_satoshis, push_msat, user_channel_id, config,
+				self.best_block.read().unwrap().height(), outbound_scid_alias, temporary_channel_id)
 			{
 				Ok(res) => res,
 				Err(e) => {
@@ -12913,7 +12923,7 @@ pub mod bench {
 		node_b.peer_connected(&node_a.get_our_node_id(), &Init {
 			features: node_a.init_features(), networks: None, remote_network_address: None
 		}, false).unwrap();
-		node_a.create_channel(node_b.get_our_node_id(), 8_000_000, 100_000_000, 42, None).unwrap();
+		node_a.create_channel(node_b.get_our_node_id(), 8_000_000, 100_000_000, 42, None, None).unwrap();
 		node_b.handle_open_channel(&node_a.get_our_node_id(), &get_event_msg!(node_a_holder, MessageSendEvent::SendOpenChannel, node_b.get_our_node_id()));
 		node_a.handle_accept_channel(&node_b.get_our_node_id(), &get_event_msg!(node_b_holder, MessageSendEvent::SendAcceptChannel, node_a.get_our_node_id()));
 

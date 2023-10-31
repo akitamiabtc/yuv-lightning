@@ -3564,7 +3564,9 @@ pub fn create_batch_channel_funding<'a, 'b, 'c>(
 	for (other_node, channel_value_satoshis, push_msat, user_channel_id, override_config) in params {
 		// Initialize channel opening.
 		let temp_chan_id = funding_node.node.create_channel(
-			other_node.node.get_our_node_id(), *channel_value_satoshis, *push_msat, *user_channel_id, None, *override_config,
+			other_node.node.get_our_node_id(), *channel_value_satoshis, *push_msat, *user_channel_id,
+			None,
+			*override_config,
 		).unwrap();
 		let open_channel_msg = get_event_msg!(funding_node, MessageSendEvent::SendOpenChannel, other_node.node.get_our_node_id());
 		other_node.node.handle_open_channel(&funding_node.node.get_our_node_id(), &open_channel_msg);
