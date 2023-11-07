@@ -246,7 +246,7 @@ impl From<&ClaimableHTLC> for events::ClaimedHTLC {
 			user_channel_id: val.prev_hop.user_channel_id.unwrap_or(0),
 			cltv_expiry: val.cltv_expiry,
 			value_msat: val.value,
-			yuv_amount: val.sender_intended_yuv_value,
+			counterparty_skimmed_fee_msat: val.counterparty_skimmed_fee_msat.unwrap_or(0),
 		}
 	}
 }
