@@ -1779,7 +1779,7 @@ pub use self::fuzzy_internal_msgs::*;
 pub(crate) use self::fuzzy_internal_msgs::*;
 
 /// BOLT 4 onion packet including hop data for the next peer.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct OnionPacket {
 	/// BOLT 4 version number.
 	pub version: u8,
@@ -1804,18 +1804,6 @@ impl onion_utils::Packet for OnionPacket {
 			hop_data: hop_data.0,
 			hmac,
 		}
-	}
-}
-
-impl Eq for OnionPacket { }
-impl PartialEq for OnionPacket {
-	fn eq(&self, other: &OnionPacket) -> bool {
-		for (i, j) in self.hop_data.iter().zip(other.hop_data.iter()) {
-			if i != j { return false; }
-		}
-		self.version == other.version &&
-			self.public_key == other.public_key &&
-			self.hmac == other.hmac
 	}
 }
 
