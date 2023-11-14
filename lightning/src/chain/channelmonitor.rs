@@ -37,8 +37,8 @@ use bitcoin::sighash::EcdsaSighashType;
 use crate::ln::channel::INITIAL_COMMITMENT_NUMBER;
 use crate::ln::{PaymentHash, PaymentPreimage};
 use crate::ln::msgs::DecodeError;
-use crate::ln::chan_utils;
-use crate::ln::chan_utils::{CommitmentTransaction, CounterpartyCommitmentSecrets, HTLCOutputInCommitment, HTLCClaim, ChannelTransactionParameters, HolderCommitmentTransaction, TxCreationKeys};
+use crate::ln::channel_keys::{DelayedPaymentKey, DelayedPaymentBasepoint, HtlcBasepoint, HtlcKey, RevocationKey, RevocationBasepoint};
+use crate::ln::chan_utils::{self,CommitmentTransaction, CounterpartyCommitmentSecrets, HTLCOutputInCommitment, HTLCClaim, ChannelTransactionParameters, HolderCommitmentTransaction, TxCreationKeys};
 use crate::ln::channelmanager::{HTLCSource, SentHTLCId};
 use crate::chain;
 use crate::chain::{BestBlock, WatchedOutput};
@@ -244,10 +244,10 @@ pub(crate) const HTLC_FAIL_BACK_BUFFER: u32 = CLTV_CLAIM_BUFFER + LATENCY_GRACE_
 struct HolderSignedTx {
 	/// txid of the transaction in tx, just used to make comparison faster
 	txid: Txid,
-	revocation_key: PublicKey,
-	a_htlc_key: PublicKey,
-	b_htlc_key: PublicKey,
-	delayed_payment_key: PublicKey,
+	revocation_key: RevocationKey,
+	a_htlc_key: HtlcKey,
+	b_htlc_key: HtlcKey,
+	delayed_payment_key: DelayedPaymentKey,
 	per_commitment_point: PublicKey,
 	htlc_outputs: Vec<(HTLCOutputInCommitment, Option<Signature>, Option<HTLCSource>)>,
 	to_self_value_sat: u64,
@@ -286,8 +286,8 @@ impl HolderSignedTx {
 /// justice or 2nd-stage preimage/timeout transactions.
 #[derive(Clone, PartialEq, Eq)]
 struct CounterpartyCommitmentParameters {
-	counterparty_delayed_payment_base_key: PublicKey,
-	counterparty_htlc_base_key: PublicKey,
+	counterparty_delayed_payment_base_key: DelayedPaymentBasepoint,
+	counterparty_htlc_base_key: HtlcBasepoint,
 	on_counterparty_tx_csv: u16,
 }
 
@@ -779,12 +779,12 @@ pub(crate) struct ChannelMonitorImpl<Signer: WriteableEcdsaChannelSigner> {
 	commitment_transaction_number_obscure_factor: u64,
 
 	destination_script: ScriptBuf,
-	broadcasted_holder_revokable_script: Option<(ScriptBuf, PublicKey, PublicKey)>,
+	broadcasted_holder_revokable_script: Option<(ScriptBuf, PublicKey, RevocationKey)>,
 	counterparty_payment_script: ScriptBuf,
 	shutdown_script: Option<ScriptBuf>,
 
 	channel_keys_id: [u8; 32],
-	holder_revocation_basepoint: PublicKey,
+	holder_revocation_basepoint: RevocationBasepoint,
 	funding_info: (OutPoint, ScriptBuf),
 	current_counterparty_commitment_txid: Option<Txid>,
 	prev_counterparty_commitment_txid: Option<Txid>,
@@ -3202,12 +3202,10 @@ impl<Signer: WriteableEcdsaChannelSigner> ChannelMonitorImpl<Signer> {
 		let their_per_commitment_point = PublicKey::from_secret_key(
 			&self.onchain_tx_handler.secp_ctx, &per_commitment_key);
 
-		let revocation_pubkey = chan_utils::derive_public_revocation_key(
-			&self.onchain_tx_handler.secp_ctx, &their_per_commitment_point,
-			&self.holder_revocation_basepoint);
-		let delayed_key = chan_utils::derive_public_key(&self.onchain_tx_handler.secp_ctx,
-			&their_per_commitment_point,
-			&self.counterparty_commitment_params.counterparty_delayed_payment_base_key);
+		let revocation_pubkey = RevocationKey::from_basepoint(&self.onchain_tx_handler.secp_ctx,
+			&self.holder_revocation_basepoint, &their_per_commitment_point);
+		let delayed_key = DelayedPaymentKey::from_basepoint(&self.onchain_tx_handler.secp_ctx,
+			&self.counterparty_commitment_params.counterparty_delayed_payment_base_key, &their_per_commitment_point);
 		let revokeable_redeemscript = chan_utils::get_revokeable_redeemscript(&revocation_pubkey,
 			self.counterparty_commitment_params.on_counterparty_tx_csv, &delayed_key);
 
@@ -3271,7 +3269,8 @@ impl<Signer: WriteableEcdsaChannelSigner> ChannelMonitorImpl<Signer> {
 			let secret = self.get_secret(commitment_number).unwrap();
 			let per_commitment_key = ignore_error!(SecretKey::from_slice(secret.as_slice()));
 			let per_commitment_point = PublicKey::from_secret_key(&self.onchain_tx_handler.secp_ctx, &per_commitment_key);
-			let delayed_key = chan_utils::derive_public_key(&self.onchain_tx_handler.secp_ctx, &PublicKey::from_secret_key(&self.onchain_tx_handler.secp_ctx, &per_commitment_key), &self.counterparty_commitment_params.counterparty_delayed_payment_base_key);
+			let revocation_pubkey = RevocationKey::from_basepoint(&self.onchain_tx_handler.secp_ctx,  &self.holder_revocation_basepoint, &per_commitment_point,);
+			let delayed_key = DelayedPaymentKey::from_basepoint(&self.onchain_tx_handler.secp_ctx, &self.counterparty_commitment_params.counterparty_delayed_payment_base_key, &PublicKey::from_secret_key(&self.onchain_tx_handler.secp_ctx, &per_commitment_key));
 
 			// If YUV payments are used, we also need to check if the YUV transaction for the
 			// malicious commitment is published. If not - we should publish it ourselves,
@@ -3536,11 +3535,11 @@ impl<Signer: WriteableEcdsaChannelSigner> ChannelMonitorImpl<Signer> {
 			} else { return (claimable_outpoints, to_counterparty_output_info); };
 
 		if let Some(transaction) = tx {
-			let revocation_pubkey = chan_utils::derive_public_revocation_key(
-				&self.onchain_tx_handler.secp_ctx, &per_commitment_point, &self.holder_revocation_basepoint);
-			let delayed_key = chan_utils::derive_public_key(&self.onchain_tx_handler.secp_ctx,
-				&per_commitment_point,
-				&self.counterparty_commitment_params.counterparty_delayed_payment_base_key);
+			let revocation_pubkey = RevocationKey::from_basepoint(
+				&self.onchain_tx_handler.secp_ctx,  &self.holder_revocation_basepoint, &per_commitment_point);
+
+			let delayed_key = DelayedPaymentKey::from_basepoint(&self.onchain_tx_handler.secp_ctx, &self.counterparty_commitment_params.counterparty_delayed_payment_base_key, &per_commitment_point);
+
 			let revokeable_p2wsh = chan_utils::get_revokeable_redeemscript(&revocation_pubkey,
 				self.counterparty_commitment_params.on_counterparty_tx_csv,
 				&delayed_key).to_v0_p2wsh();
@@ -3662,7 +3661,7 @@ impl<Signer: WriteableEcdsaChannelSigner> ChannelMonitorImpl<Signer> {
 	// Returns (1) `PackageTemplate`s that can be given to the OnchainTxHandler, so that the handler can
 	// broadcast transactions claiming holder HTLC commitment outputs and (2) a holder revokable
 	// script so we can detect whether a holder transaction has been seen on-chain.
-	fn get_broadcasted_holder_claims(&self, holder_tx: &HolderSignedTx, conf_height: u32) -> (Vec<PackageTemplate>, Option<(ScriptBuf, PublicKey, PublicKey)>) {
+	fn get_broadcasted_holder_claims(&self, holder_tx: &HolderSignedTx, conf_height: u32) -> (Vec<PackageTemplate>, Option<(ScriptBuf, PublicKey, RevocationKey)>) {
 		let mut claim_requests = Vec::with_capacity(holder_tx.htlc_outputs.len());
 		let mut htlc_yuv_revokable_scripts = Vec::with_capacity(holder_tx.htlc_outputs.len());
 		
@@ -5243,8 +5242,8 @@ mod tests {
 	use crate::chain::transaction::OutPoint;
 	use crate::sign::InMemorySigner;
 	use crate::ln::{PaymentPreimage, PaymentHash};
-	use crate::ln::chan_utils;
-	use crate::ln::chan_utils::{HTLCOutputInCommitment, ChannelPublicKeys, ChannelTransactionParameters, HolderCommitmentTransaction, CounterpartyChannelTransactionParameters};
+	use crate::ln::channel_keys::{DelayedPaymentBasepoint, DelayedPaymentKey, HtlcBasepoint, RevocationBasepoint, RevocationKey};
+	use crate::ln::chan_utils::{self,HTLCOutputInCommitment, ChannelPublicKeys, ChannelTransactionParameters, HolderCommitmentTransaction, CounterpartyChannelTransactionParameters};
 	use crate::ln::channelmanager::{PaymentSendFailure, PaymentId, RecipientOnionFields};
 	use crate::ln::functional_test_utils::*;
 	use crate::ln::script::ShutdownScript;
@@ -5416,12 +5415,10 @@ mod tests {
 
 		let counterparty_pubkeys = ChannelPublicKeys {
 			funding_pubkey: PublicKey::from_secret_key(&secp_ctx, &SecretKey::from_slice(&[44; 32]).unwrap()),
-			revocation_basepoint: PublicKey::from_secret_key(&secp_ctx, &SecretKey::from_slice(&[45; 32]).unwrap()),
+			revocation_basepoint: RevocationBasepoint::from(PublicKey::from_secret_key(&secp_ctx, &SecretKey::from_slice(&[45; 32]).unwrap())),
 			payment_point: PublicKey::from_secret_key(&secp_ctx, &SecretKey::from_slice(&[46; 32]).unwrap()),
-			delayed_payment_basepoint: PublicKey::from_secret_key(&secp_ctx, &SecretKey::from_slice(&[47; 32]).unwrap()),
-			htlc_basepoint: PublicKey::from_secret_key(&secp_ctx, &SecretKey::from_slice(&[48; 32]).unwrap()),
-			funding_yuv_pixel_key: None,
-			destination_pubkey: None,
+			delayed_payment_basepoint: DelayedPaymentBasepoint::from(PublicKey::from_secret_key(&secp_ctx, &SecretKey::from_slice(&[47; 32]).unwrap())),
+			htlc_basepoint: HtlcBasepoint::from(PublicKey::from_secret_key(&secp_ctx, &SecretKey::from_slice(&[48; 32]).unwrap()))
 		};
 		let funding_outpoint = OutPoint { txid: Txid::all_zeros(), index: u16::max_value() };
 		let channel_parameters = ChannelTransactionParameters {
@@ -5511,6 +5508,7 @@ mod tests {
 		let privkey = SecretKey::from_slice(&<Vec<u8>>::from_hex("0101010101010101010101010101010101010101010101010101010101010101").unwrap()[..]).unwrap();
 		let pubkey = PublicKey::from_secret_key(&secp_ctx, &privkey);
 
+		use crate::ln::channel_keys::{HtlcKey, HtlcBasepoint};
 		macro_rules! sign_input {
 			($sighash_parts: expr, $idx: expr, $amount: expr, $weight: expr, $sum_actual_sigs: expr, $opt_anchors: expr) => {
 				let htlc = HTLCOutputInCommitment {
@@ -5521,7 +5519,7 @@ mod tests {
 					payment_hash: PaymentHash([1; 32]),
 					transaction_output_index: Some($idx as u32),
 				};
-				let redeem_script = if *$weight == WEIGHT_REVOKED_OUTPUT { chan_utils::get_revokeable_redeemscript(&pubkey, 256, &pubkey) } else { chan_utils::get_htlc_redeemscript_with_explicit_keys(&htlc, $opt_anchors, &pubkey, &pubkey, &pubkey) };
+				let redeem_script = if *$weight == WEIGHT_REVOKED_OUTPUT { chan_utils::get_revokeable_redeemscript(&RevocationKey::from_basepoint(&secp_ctx, &RevocationBasepoint::from(pubkey), &pubkey), 256, &DelayedPaymentKey::from_basepoint(&secp_ctx, &DelayedPaymentBasepoint::from(pubkey), &pubkey)) } else { chan_utils::get_htlc_redeemscript_with_explicit_keys(&htlc, $opt_anchors, &HtlcKey::from_basepoint(&secp_ctx, &HtlcBasepoint::from(pubkey), &pubkey), &HtlcKey::from_basepoint(&secp_ctx, &HtlcBasepoint::from(pubkey), &pubkey), &RevocationKey::from_basepoint(&secp_ctx, &RevocationBasepoint::from(pubkey), &pubkey)) };
 				let sighash = hash_to_message!(&$sighash_parts.segwit_signature_hash($idx, &redeem_script, $amount, EcdsaSighashType::All).unwrap()[..]);
 				let sig = secp_ctx.sign_ecdsa(&sighash, &privkey);
 				let mut ser_sig = sig.serialize_der().to_vec();
