@@ -1280,7 +1280,7 @@ fn successful_probe_yields_event() {
 	create_announced_chan_between_nodes(&nodes, 1, 2);
 
 	let recv_value = 100_000;
-	let (route, payment_hash, _, _) = get_route_and_payment_hash!(&nodes[0], nodes[2], recv_value);
+	let (route, _, _, _) = get_route_and_payment_hash!(&nodes[0], nodes[2], recv_value);
 
 	let res = nodes[0].node.send_probe(route.paths[0].clone()).unwrap();
 
