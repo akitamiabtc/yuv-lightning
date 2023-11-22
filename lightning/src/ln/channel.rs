@@ -7105,7 +7105,7 @@ impl<SP: Deref> OutboundV1Channel<SP> where SP::Target: SignerProvider {
 			}
 		}
 
-		let destination_script = match signer_provider.get_destination_script() {
+		let destination_script = match signer_provider.get_destination_script(channel_keys_id) {
 			Ok(script) => script,
 			Err(_) => return Err(APIError::ChannelUnavailable { err: "Failed to get destination script".to_owned()}),
 		};
@@ -7781,7 +7781,7 @@ impl<SP: Deref> InboundV1Channel<SP> where SP::Target: SignerProvider {
 			}
 		}
 
-		let destination_script = match signer_provider.get_destination_script() {
+		let destination_script = match signer_provider.get_destination_script(channel_keys_id) {
 			Ok(script) => script,
 			Err(_) => return Err(ChannelError::Close("Failed to get destination script".to_owned())),
 		};
@@ -9214,7 +9214,7 @@ use crate::ln::channelmanager::{self, HTLCSource, PaymentId};
 
 		fn read_chan_signer(&self, _data: &[u8]) -> Result<Self::Signer, DecodeError> { panic!(); }
 
-		fn get_destination_script(&self) -> Result<ScriptBuf, ()> {
+		fn get_destination_script(&self, _channel_keys_id: [u8; 32]) -> Result<ScriptBuf, ()> {
 			let secp_ctx = Secp256k1::signing_only();
 			let channel_monitor_claim_key = SecretKey::from_slice(&<Vec<u8>>::from_hex("0fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff").unwrap()[..]).unwrap();
 			let channel_monitor_claim_key_hash = WPubkeyHash::hash(&PublicKey::from_secret_key(&secp_ctx, &channel_monitor_claim_key).serialize());
