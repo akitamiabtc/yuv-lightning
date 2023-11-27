@@ -4617,6 +4617,7 @@ impl<Signer: WriteableEcdsaChannelSigner> ChannelMonitorImpl<Signer> {
 				spendable_outputs.push(SpendableOutputDescriptor::StaticOutput {
 					outpoint: OutPoint { txid: tx.txid(), index: i as u16 },
 					output: outp.clone(),
+					channel_keys_id: Some(self.channel_keys_id),
 				});
 			}
 
@@ -4673,73 +4674,11 @@ impl<Signer: WriteableEcdsaChannelSigner> ChannelMonitorImpl<Signer> {
 				);
 			}
 			if self.shutdown_script.as_ref() == Some(&outp.script_pubkey) {
-				if self.funding_yuv_pixel.is_some() {
-					spendable_outputs.push(SpendableOutputDescriptor::YuvStaticOutput(YuvStaticOutputDescriptor {
-						outpoint: OutPoint { txid: tx.txid(), index: i as u16 },
-						output: outp.clone(),
-						// It will be set after YUV transaction will be confirmed on L1 YUV network.
-						yuv_pixel_proof: None,
-					}));
-				} else {
-					spendable_outputs.push(SpendableOutputDescriptor::StaticOutput {
-						outpoint: OutPoint { txid: tx.txid(), index: i as u16 },
-						output: outp.clone(),
-					});
-				}
-			}
-
-			if let Some(counterparty_lumas) = self.counterparty_per_commitment_luma.as_ref() {
-				let txid = &tx.txid();
-
-				let Some(counterparty_yuv_luma) = counterparty_lumas.get(txid) else {
-					continue
-				};
-
-				let Some(funding_yuv_pixel) = self.funding_yuv_pixel else {
-					continue
-				};
-
-				let htlcs_amount = self.counterparty_claimable_outpoints
-					.get(txid)
-					.unwrap_or(&Vec::new())
-					.iter()
-					.map(|(htlc, _)| htlc.yuv_amount.unwrap_or(0))
-					.sum();
-
-				let holder_amount = funding_yuv_pixel.luma.amount
-					.saturating_sub(counterparty_yuv_luma.amount)
-					.saturating_sub(htlcs_amount);
-
-				let holder_yuv_pixel = Pixel::new(holder_amount, funding_yuv_pixel.chroma);
-
-				let payment_key = self.onchain_tx_handler
-					.channel_transaction_parameters
-					.holder_pubkeys
-					.payment_point
-					.tweak(holder_yuv_pixel);
-
-				let yuv_payment_script = Script::new_v0_p2wpkh(
-					&WPubkeyHash::hash(&payment_key.serialize()),
-				);
-
-				if yuv_payment_script == outp.script_pubkey {
-					let descriptor = StaticPaymentOutputDescriptor {
-						outpoint: OutPoint { txid: tx.txid(), index: i as u16 },
-						output: outp.clone(),
-						channel_keys_id: self.channel_keys_id,
-						channel_value_satoshis: self.channel_value_satoshis,
-						channel_transaction_parameters: Some(self.onchain_tx_handler.channel_transaction_parameters.clone()),
-					};
-
-					spendable_outputs.push(SpendableOutputDescriptor::StaticYuvPaymentOutput(
-						StaticYuvPaymentOutputDescriptor {
-							inner: descriptor,
-							// It will be set after YUV transaction will be confirmed on L1
-							// YUV network.
-							yuv_pixel_proof: None,
-						}
-					));
-				}
+				spendable_outputs.push(SpendableOutputDescriptor::StaticOutput {
+					outpoint: OutPoint { txid: tx.txid(), index: i as u16 },
+					output: outp.clone(),
+					channel_keys_id: Some(self.channel_keys_id),
+				});
 			}
 		}
 		spendable_outputs

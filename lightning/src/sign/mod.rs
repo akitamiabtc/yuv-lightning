@@ -266,6 +266,15 @@ pub enum SpendableOutputDescriptor {
 		outpoint: OutPoint,
 		/// The output which is referenced by the given outpoint.
 		output: TxOut,
+		/// The `channel_keys_id` for the channel which this output came from.
+		///
+		/// For channels which were generated on LDK 0.0.119 or later, this is the value which was
+		/// passed to the [`SignerProvider::get_destination_script`] call which provided this
+		/// output script.
+		///
+		/// For channels which were generated prior to LDK 0.0.119, no such argument existed,
+		/// however this field may still be filled in if such data is available.
+		channel_keys_id: Option<[u8; 32]>
 	},
 	/// An output that can be spent by our payment key that is tweaked with YUV pixel and bound
 	/// to the output. It is supported only with YUVPayments channel feature.
@@ -340,6 +349,7 @@ pub enum SpendableOutputDescriptor {
 impl_writeable_tlv_based_enum!(SpendableOutputDescriptor,
 	(0, StaticOutput) => {
 		(0, outpoint, required),
+		(1, channel_keys_id, option),
 		(2, output, required),
 	},
 ;
@@ -475,7 +485,7 @@ impl SpendableOutputDescriptor {
 					{ witness_weight -= 1; } // Guarantees a low R signature
 					input_value += descriptor.output.value;
 				},
-				SpendableOutputDescriptor::StaticOutput { ref outpoint, ref output } => {
+				SpendableOutputDescriptor::StaticOutput { ref outpoint, ref output, .. } => {
 					if !output_set.insert(*outpoint) { return Err(()); }
 					input.push(TxIn {
 						previous_output: outpoint.into_bitcoin_outpoint(),
@@ -2153,7 +2163,7 @@ impl KeysManager {
 					let witness = keys_cache.as_ref().unwrap().0.sign_dynamic_p2wsh_input(&psbt.unsigned_tx, input_idx, &descriptor, &secp_ctx)?;
 					psbt.inputs[input_idx].final_script_witness = Some(witness);
 				},
-				SpendableOutputDescriptor::StaticOutput { ref outpoint, ref output } => {
+				SpendableOutputDescriptor::StaticOutput { ref outpoint, ref output, .. } => {
 					let input_idx = psbt.unsigned_tx.input.iter().position(|i| i.previous_output == outpoint.into_bitcoin_outpoint()).ok_or(())?;
 					let derivation_idx = if output.script_pubkey == self.destination_script {
 						1
