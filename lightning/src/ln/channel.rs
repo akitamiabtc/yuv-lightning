@@ -2296,10 +2296,9 @@ impl<SP: Deref> ChannelContext<SP> where SP::Target: SignerProvider  {
 	/// Creates a set of keys for build_commitment_transaction to generate a transaction which we
 	/// will sign and send to our counterparty.
 	/// If an Err is returned, it is a ChannelError::Close (for get_funding_created)
-	fn build_remote_transaction_keys(&self, commitment_point: &PublicKey) -> TxCreationKeys {
-		//TODO: Ensure that the payment_key derived here ends up in the library users' wallet as we
-		//may see payments to it!
-		let holder_pubkeys = &self.get_holder_pubkeys();
+	fn build_remote_transaction_keys(&self) -> TxCreationKeys {
+		let revocation_basepoint = &self.get_holder_pubkeys().revocation_basepoint;
+		let htlc_basepoint = &self.get_holder_pubkeys().htlc_basepoint;
 		let counterparty_pubkeys = self.get_counterparty_pubkeys();
 
 		TxCreationKeys::derive_new(
