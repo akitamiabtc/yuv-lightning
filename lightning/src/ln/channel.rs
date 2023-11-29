@@ -2879,7 +2879,8 @@ impl<SP: Deref> ChannelContext<SP> where SP::Target: SignerProvider  {
 
 				Some((self.get_counterparty_node_id(), funding_txo, ChannelMonitorUpdate {
 					update_id: self.latest_monitor_update_id,
-					updates: vec![ChannelMonitorUpdateStep::ChannelForceClosed {should_broadcast}],
+					counterparty_node_id: Some(self.counterparty_node_id),
+					updates: vec![ChannelMonitorUpdateStep::ChannelForceClosed { should_broadcast }],
 				}))
 			} else { None }
 		} else { None };
@@ -3294,6 +3295,7 @@ impl<SP: Deref> Channel<SP> where
 		self.context.latest_monitor_update_id += 1;
 		let monitor_update = ChannelMonitorUpdate {
 			update_id: self.context.latest_monitor_update_id,
+			counterparty_node_id: Some(self.context.counterparty_node_id),
 			updates: vec![ChannelMonitorUpdateStep::PaymentPreimage {
 				payment_preimage: payment_preimage_arg.clone(),
 			}],
@@ -4021,6 +4023,7 @@ impl<SP: Deref> Channel<SP> where
 		self.context.latest_monitor_update_id += 1;
 		let mut monitor_update = ChannelMonitorUpdate {
 			update_id: self.context.latest_monitor_update_id,
+			counterparty_node_id: Some(self.context.counterparty_node_id),
 			updates: vec![ChannelMonitorUpdateStep::LatestHolderCommitmentTXInfo {
 				commitment_tx: holder_commitment_tx,
 				htlc_outputs: htlcs_and_sigs,
@@ -4100,6 +4103,7 @@ impl<SP: Deref> Channel<SP> where
 
 			let mut monitor_update = ChannelMonitorUpdate {
 				update_id: self.context.latest_monitor_update_id + 1, // We don't increment this yet!
+				counterparty_node_id: Some(self.context.counterparty_node_id),
 				updates: Vec::new(),
 			};
 
@@ -4280,6 +4284,7 @@ impl<SP: Deref> Channel<SP> where
 		self.context.latest_monitor_update_id += 1;
 		let mut monitor_update = ChannelMonitorUpdate {
 			update_id: self.context.latest_monitor_update_id,
+			counterparty_node_id: Some(self.context.counterparty_node_id),
 			updates: vec![ChannelMonitorUpdateStep::CommitmentSecret {
 				idx: self.context.cur_counterparty_commitment_transaction_number + 1,
 				secret: msg.per_commitment_secret,
@@ -5392,6 +5397,7 @@ impl<SP: Deref> Channel<SP> where
 			self.context.latest_monitor_update_id += 1;
 			let monitor_update = ChannelMonitorUpdate {
 				update_id: self.context.latest_monitor_update_id,
+				counterparty_node_id: Some(self.context.counterparty_node_id),
 				updates: vec![ChannelMonitorUpdateStep::ShutdownScript {
 					scriptpubkey: self.get_closing_scriptpubkey(),
 				}],
@@ -6720,6 +6726,7 @@ impl<SP: Deref> Channel<SP> where
 		self.context.latest_monitor_update_id += 1;
 		let monitor_update = ChannelMonitorUpdate {
 			update_id: self.context.latest_monitor_update_id,
+			counterparty_node_id: Some(self.context.counterparty_node_id),
 			updates: vec![ChannelMonitorUpdateStep::LatestCounterpartyCommitmentTXInfo {
 				commitment_txid: counterparty_commitment_txid,
 				htlc_outputs: htlcs.clone(),
@@ -6939,6 +6946,7 @@ impl<SP: Deref> Channel<SP> where
 			self.context.latest_monitor_update_id += 1;
 			let monitor_update = ChannelMonitorUpdate {
 				update_id: self.context.latest_monitor_update_id,
+				counterparty_node_id: Some(self.context.counterparty_node_id),
 				updates: vec![ChannelMonitorUpdateStep::ShutdownScript {
 					scriptpubkey: self.get_closing_scriptpubkey(),
 				}],

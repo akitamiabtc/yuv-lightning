@@ -5774,6 +5774,7 @@ where
 		}
 		let preimage_update = ChannelMonitorUpdate {
 			update_id: CLOSED_CHANNEL_UPDATE_ID,
+			counterparty_node_id: None,
 			updates: vec![ChannelMonitorUpdateStep::PaymentPreimage {
 				payment_preimage,
 			}],
@@ -11030,6 +11031,7 @@ where
 					&funding_txo.to_channel_id());
 				let monitor_update = ChannelMonitorUpdate {
 					update_id: CLOSED_CHANNEL_UPDATE_ID,
+					counterparty_node_id: None,
 					updates: vec![ChannelMonitorUpdateStep::ChannelForceClosed { should_broadcast: true }],
 				};
 				close_background_events.push(BackgroundEvent::ClosedMonitorUpdateRegeneratedOnStartup((*funding_txo, monitor_update)));
