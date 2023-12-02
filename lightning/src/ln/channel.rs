@@ -641,6 +641,8 @@ pub(crate) struct ShutdownResult {
 	/// An unbroadcasted batch funding transaction id. The closure of this channel should be
 	/// propagated to the remainder of the batch.
 	pub(crate) unbroadcasted_batch_funding_txid: Option<Txid>,
+	pub(crate) channel_id: ChannelId,
+	pub(crate) counterparty_node_id: PublicKey,
 }
 
 /// If the majority of the channels funds are to the fundee and the initiator holds only just
@@ -2649,6 +2651,8 @@ impl<SP: Deref> ChannelContext<SP> where SP::Target: SignerProvider  {
 			monitor_update,
 			dropped_outbound_htlcs,
 			unbroadcasted_batch_funding_txid,
+			channel_id: self.channel_id,
+			counterparty_node_id: self.counterparty_node_id,
 		}
 	}
 
@@ -5306,6 +5310,8 @@ impl<SP: Deref> Channel<SP> where
 					monitor_update: None,
 					dropped_outbound_htlcs: Vec::new(),
 					unbroadcasted_batch_funding_txid: self.context.unbroadcasted_batch_funding_txid(),
+					channel_id: self.context.channel_id,
+					counterparty_node_id: self.context.counterparty_node_id,
 				};
 				let tx = self.build_signed_closing_transaction(&mut closing_tx, &msg.signature, &sig);
 				self.context.channel_state = ChannelState::ShutdownComplete as u32;
@@ -5348,6 +5354,8 @@ impl<SP: Deref> Channel<SP> where
 								monitor_update: None,
 								dropped_outbound_htlcs: Vec::new(),
 								unbroadcasted_batch_funding_txid: self.context.unbroadcasted_batch_funding_txid(),
+								channel_id: self.context.channel_id,
+								counterparty_node_id: self.context.counterparty_node_id,
 							};
 							self.context.channel_state = ChannelState::ShutdownComplete as u32;
 							self.context.update_time_counter += 1;
@@ -6728,6 +6736,8 @@ impl<SP: Deref> Channel<SP> where
 				monitor_update: None,
 				dropped_outbound_htlcs: Vec::new(),
 				unbroadcasted_batch_funding_txid: self.context.unbroadcasted_batch_funding_txid(),
+				channel_id: self.context.channel_id,
+				counterparty_node_id: self.context.counterparty_node_id,
 			};
 			self.context.channel_state = ChannelState::ShutdownComplete as u32;
 			Some(shutdown_result)
