@@ -818,8 +818,7 @@ where
 
 	fn update_channel(&self, funding_txo: OutPoint, update: &ChannelMonitorUpdate) -> ChannelMonitorUpdateStatus {
 		// Update the monitor that watches the channel referred to by the given outpoint.
-		let monitors_lock = self.monitors.read().unwrap();
-		let monitors = monitors_lock.deref();
+		let monitors = self.monitors.read().unwrap();
 		match monitors.get(&funding_txo) {
 			None => {
 				log_error!(self.logger, "Failed to update channel monitor: no such monitor registered");
@@ -862,6 +861,7 @@ where
 					ChannelMonitorUpdateStatus::UnrecoverableError => {
 						// Take the monitors lock for writing so that we poison it and any future
 						// operations going forward fail immediately.
+						core::mem::drop(pending_monitor_updates);
 						core::mem::drop(monitors);
 						let _poison = self.monitors.write().unwrap();
 						let err_str = "ChannelMonitor[Update] persistence failed unrecoverably. This indicates we cannot continue normal operation and must shut down.";
