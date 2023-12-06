@@ -2252,10 +2252,6 @@ mod tests {
 		PublicKey::from_secret_key(&secp_ctx, &recipient_privkey())
 	}
 
-	fn sender_node_id() -> NodeId {
-		NodeId::from_pubkey(&sender_pubkey())
-	}
-
 	fn recipient_node_id() -> NodeId {
 		NodeId::from_pubkey(&recipient_pubkey())
 	}
@@ -2976,7 +2972,7 @@ mod tests {
 			},
 		};
 		let channel = network_graph.read_only().channel(42).unwrap().to_owned();
-		let (info, target) = channel.as_directed_from(&source).unwrap();
+		let (info, _) = channel.as_directed_from(&source).unwrap();
 		let candidate = CandidateRouteHop::PublicHop {
 			info,
 			short_channel_id: 42,
@@ -3083,7 +3079,7 @@ mod tests {
 			},
 		};
 		let channel = network_graph.read_only().channel(42).unwrap().to_owned();
-		let (info, target) = channel.as_directed_from(&source).unwrap();
+		let (info, _) = channel.as_directed_from(&source).unwrap();
 		let candidate = CandidateRouteHop::PublicHop {
 			info,
 			short_channel_id: 42,
