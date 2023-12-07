@@ -71,6 +71,7 @@ use crate::sign::{InMemorySigner, Recipient, EntropySource, NodeSigner, SignerPr
 
 #[cfg(feature = "std")]
 use std::time::{SystemTime, UNIX_EPOCH};
+use bitcoin::psbt::PartiallySignedTransaction;
 use bitcoin::Sequence;
 
 use yuv_pixels::Pixel;
@@ -1506,7 +1507,8 @@ impl WalletSource for TestWalletSource {
 		Ok(ScriptBuf::new_p2pkh(&public_key.pubkey_hash()))
 	}
 
-	fn sign_tx(&self, mut tx: Transaction) -> Result<Transaction, ()> {
+	fn sign_psbt(&self, psbt: PartiallySignedTransaction) -> Result<Transaction, ()> {
+		let mut tx = psbt.extract_tx();
 		let utxos = self.utxos.borrow();
 		for i in 0..tx.input.len() {
 			if let Some(utxo) = utxos.iter().find(|utxo| utxo.outpoint == tx.input[i].previous_output) {
