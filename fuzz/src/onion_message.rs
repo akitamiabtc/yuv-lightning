@@ -80,7 +80,7 @@ impl MessageRouter for TestMessageRouter {
 		Ok(OnionMessagePath {
 			intermediate_nodes: vec![],
 			destination,
-			addresses: None,
+			first_node_addresses: None,
 		})
 	}
 }
