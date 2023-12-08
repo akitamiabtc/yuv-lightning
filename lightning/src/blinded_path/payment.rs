@@ -8,6 +8,7 @@ use crate::blinded_path::BlindedHop;
 use crate::blinded_path::utils;
 use crate::io;
 use crate::ln::PaymentSecret;
+use crate::ln::channelmanager::CounterpartyForwardingInfo;
 use crate::ln::features::BlindedHopFeatures;
 use crate::ln::msgs::DecodeError;
 use crate::offers::invoice::BlindedPayInfo;
@@ -161,13 +162,12 @@ pub struct PaymentConstraints {
 	pub htlc_minimum_msat: u64,
 }
 
-impl PaymentConstraints {
-	/// Create a new [`PaymentConstraints`] with the given parameters.
-	pub fn new(max_cltv_expiry: u32, htlc_minimum_msat: u64) -> Self {
-		Self {
-			max_cltv_expiry,
-			htlc_minimum_msat,
-		}
+impl From<CounterpartyForwardingInfo> for PaymentRelay {
+	fn from(info: CounterpartyForwardingInfo) -> Self {
+		let CounterpartyForwardingInfo {
+			fee_base_msat, fee_proportional_millionths, cltv_expiry_delta
+		} = info;
+		Self { cltv_expiry_delta, fee_proportional_millionths, fee_base_msat }
 	}
 }
 
