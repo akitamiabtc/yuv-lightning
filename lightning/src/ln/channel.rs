@@ -2919,8 +2919,13 @@ impl<SP: Deref> ChannelContext<SP> where SP::Target: SignerProvider  {
 					.ok();
 
 				if funding_signed.is_none() {
-					log_trace!(logger, "Counterparty commitment signature not available for funding_signed message; setting signer_pending_funding");
-					self.signer_pending_funding = true;
+					#[cfg(not(async_signing))] {
+						panic!("Failed to get signature for funding_signed");
+					}
+					#[cfg(async_signing)] {
+						log_trace!(logger, "Counterparty commitment signature not available for funding_signed message; setting signer_pending_funding");
+						self.signer_pending_funding = true;
+					}
 				} else if self.signer_pending_funding {
 					log_trace!(logger, "Counterparty commitment signature available for funding_signed message; clearing signer_pending_funding");
 					self.signer_pending_funding = false;
@@ -4804,7 +4809,7 @@ impl<SP: Deref> Channel<SP> where
 
 	/// Indicates that the signer may have some signatures for us, so we should retry if we're
 	/// blocked.
-	#[allow(unused)]
+	#[cfg(async_signing)]
 	pub fn signer_maybe_unblocked<L: Deref>(&mut self, logger: &L) -> SignerResumeUpdates where L::Target: Logger {
 		let commitment_update = if self.context.signer_pending_commitment_update {
 			self.get_last_commitment_update_for_send(logger).ok()
@@ -4908,11 +4913,16 @@ impl<SP: Deref> Channel<SP> where
 			}
 			update
 		} else {
-			if !self.context.signer_pending_commitment_update {
-				log_trace!(logger, "Commitment update awaiting signer: setting signer_pending_commitment_update");
-				self.context.signer_pending_commitment_update = true;
+			#[cfg(not(async_signing))] {
+				panic!("Failed to get signature for new commitment state");
 			}
-			return Err(());
+			#[cfg(async_signing)] {
+				if !self.context.signer_pending_commitment_update {
+					log_trace!(logger, "Commitment update awaiting signer: setting signer_pending_commitment_update");
+					self.context.signer_pending_commitment_update = true;
+				}
+				return Err(());
+			}
 		};
 		Ok(msgs::CommitmentUpdate {
 			update_add_htlcs, update_fulfill_htlcs, update_fail_htlcs, update_fail_malformed_htlcs, update_fee,
@@ -7602,9 +7612,14 @@ impl<SP: Deref> OutboundV1Channel<SP> where SP::Target: SignerProvider {
 
 		let funding_created = self.get_funding_created_msg(logger);
 		if funding_created.is_none() {
-			if !self.context.signer_pending_funding {
-				log_trace!(logger, "funding_created awaiting signer; setting signer_pending_funding");
-				self.context.signer_pending_funding = true;
+			#[cfg(not(async_signing))] {
+				panic!("Failed to get signature for new funding creation");
+			}
+			#[cfg(async_signing)] {
+				if !self.context.signer_pending_funding {
+					log_trace!(logger, "funding_created awaiting signer; setting signer_pending_funding");
+					self.context.signer_pending_funding = true;
+				}
 			}
 		}
 
@@ -7970,7 +7985,7 @@ impl<SP: Deref> OutboundV1Channel<SP> where SP::Target: SignerProvider {
 
 	/// Indicates that the signer may have some signatures for us, so we should retry if we're
 	/// blocked.
-	#[allow(unused)]
+	#[cfg(async_signing)]
 	pub fn signer_maybe_unblocked<L: Deref>(&mut self, logger: &L) -> Option<msgs::FundingCreated> where L::Target: Logger {
 		if self.context.signer_pending_funding && self.context.is_outbound() {
 			log_trace!(logger, "Signer unblocked a funding_created");
