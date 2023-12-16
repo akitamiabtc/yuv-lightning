@@ -78,6 +78,7 @@ mod de;
 mod ser;
 mod tb;
 
+#[allow(unused_imports)]
 mod prelude {
 	#[cfg(feature = "hashbrown")]
 	extern crate hashbrown;
