@@ -4726,22 +4726,8 @@ impl<Signer: WriteableEcdsaChannelSigner> ChannelMonitorImpl<Signer> {
 						revocation_pubkey: broadcasted_holder_revokable_script.2,
 						channel_keys_id: self.channel_keys_id,
 						channel_value_satoshis: self.channel_value_satoshis,
-					};
-
-					if self.funding_yuv_pixel.is_some() {
-						spendable_outputs.push(SpendableOutputDescriptor::DelayedYuvPaymentOutput(
-							DelayedYuvPaymentOutputDescriptor {
-								inner: descriptor,
-								// It will be set after YUV transaction will be confirmed on L1
-								// YUV network.
-								yuv_pixel_proof: None,
-							}
-						));
-					} else {
-						spendable_outputs.push(
-							SpendableOutputDescriptor::DelayedPaymentOutput(descriptor),
-						);
-					}
+						channel_transaction_parameters: Some(self.onchain_tx_handler.channel_transaction_parameters.clone()),
+					}));
 				}
 			}
 			if self.counterparty_payment_script == outp.script_pubkey {
