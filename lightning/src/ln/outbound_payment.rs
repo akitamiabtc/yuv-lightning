@@ -174,7 +174,7 @@ impl PendingOutboundPayment {
 	}
 
 	fn mark_fulfilled(&mut self) {
-		let mut session_privs = HashSet::new();
+		let mut session_privs = new_hash_set();
 		core::mem::swap(&mut session_privs, match self {
 			PendingOutboundPayment::Legacy { session_privs } |
 				PendingOutboundPayment::Retryable { session_privs, .. } |
@@ -189,7 +189,7 @@ impl PendingOutboundPayment {
 
 	fn mark_abandoned(&mut self, reason: PaymentFailureReason) {
 		if let PendingOutboundPayment::Retryable { session_privs, payment_hash, .. } = self {
-			let mut our_session_privs = HashSet::new();
+			let mut our_session_privs = new_hash_set();
 			core::mem::swap(&mut our_session_privs, session_privs);
 			*self = PendingOutboundPayment::Abandoned {
 				session_privs: our_session_privs,
@@ -198,7 +198,7 @@ impl PendingOutboundPayment {
 			};
 		} else if let PendingOutboundPayment::InvoiceReceived { payment_hash, .. } = self {
 			*self = PendingOutboundPayment::Abandoned {
-				session_privs: HashSet::new(),
+				session_privs: new_hash_set(),
 				payment_hash: *payment_hash,
 				reason: Some(reason)
 			};
@@ -679,7 +679,7 @@ pub(super) struct OutboundPayments {
 impl OutboundPayments {
 	pub(super) fn new() -> Self {
 		Self {
-			pending_outbound_payments: Mutex::new(HashMap::new()),
+			pending_outbound_payments: Mutex::new(new_hash_map()),
 			retry_lock: Mutex::new(()),
 		}
 	}
@@ -1288,7 +1288,7 @@ impl OutboundPayments {
 			retry_strategy,
 			attempts: PaymentAttempts::new(),
 			payment_params,
-			session_privs: HashSet::new(),
+			session_privs: new_hash_set(),
 			pending_amt_msat: 0,
 			pending_fee_msat: Some(0),
 			payment_hash,
