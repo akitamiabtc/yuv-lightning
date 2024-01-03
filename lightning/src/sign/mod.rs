@@ -1235,11 +1235,8 @@ pub struct InMemorySigner {
 	channel_value_satoshis: u64,
 	/// Key derivation parameters.
 	channel_keys_id: [u8; 32],
-	/// Seed from which all randomness produced is derived from.
-	rand_bytes_unique_start: [u8; 32],
-	/// Tracks the number of times we've produced randomness to ensure we don't return the same
-	/// bytes twice.
-	rand_bytes_index: AtomicCounter,
+	/// A source of random bytes.
+	entropy_source: RandomBytes,
 }
 
 impl PartialEq for InMemorySigner {
@@ -1270,8 +1267,7 @@ impl Clone for InMemorySigner {
 			channel_parameters: self.channel_parameters.clone(),
 			channel_value_satoshis: self.channel_value_satoshis,
 			channel_keys_id: self.channel_keys_id,
-			rand_bytes_unique_start: self.get_secure_random_bytes(),
-			rand_bytes_index: AtomicCounter::new(),
+			entropy_source: RandomBytes::new(self.get_secure_random_bytes()),
 		}
 	}
 }
@@ -1305,8 +1301,7 @@ impl InMemorySigner {
 			holder_channel_pubkeys,
 			channel_parameters: None,
 			channel_keys_id,
-			rand_bytes_unique_start,
-			rand_bytes_index: AtomicCounter::new(),
+			entropy_source: RandomBytes::new(rand_bytes_unique_start),
 		}
 	}
 
@@ -1486,10 +1481,7 @@ impl InMemorySigner {
 
 impl EntropySource for InMemorySigner {
 	fn get_secure_random_bytes(&self) -> [u8; 32] {
-		let index = self.rand_bytes_index.get_increment();
-		let mut nonce = [0u8; 16];
-		nonce[..8].copy_from_slice(&index.to_be_bytes());
-		ChaCha20::get_single_block(&self.rand_bytes_unique_start, &nonce)
+		self.entropy_source.get_secure_random_bytes()
 	}
 }
 
@@ -1840,8 +1832,7 @@ impl<ES: Deref> ReadableArgs<ES> for InMemorySigner where ES::Target: EntropySou
 			holder_channel_pubkeys,
 			channel_parameters: counterparty_channel_data,
 			channel_keys_id: keys_id,
-			rand_bytes_unique_start: entropy_source.get_secure_random_bytes(),
-			rand_bytes_index: AtomicCounter::new(),
+			entropy_source: RandomBytes::new(entropy_source.get_secure_random_bytes()),
 		})
 	}
 }
@@ -1869,8 +1860,7 @@ pub struct KeysManager {
 	channel_master_key: ExtendedPrivKey,
 	channel_child_index: AtomicUsize,
 
-	rand_bytes_unique_start: [u8; 32],
-	rand_bytes_index: AtomicCounter,
+	entropy_source: RandomBytes,
 
 	seed: [u8; 32],
 	starting_time_secs: u64,
@@ -1940,8 +1930,7 @@ impl KeysManager {
 					channel_master_key,
 					channel_child_index: AtomicUsize::new(0),
 
-					rand_bytes_unique_start,
-					rand_bytes_index: AtomicCounter::new(),
+					entropy_source: RandomBytes::new(rand_bytes_unique_start),
 
 					seed: *seed,
 					starting_time_secs,
@@ -2364,10 +2353,7 @@ impl KeysManager {
 
 impl EntropySource for KeysManager {
 	fn get_secure_random_bytes(&self) -> [u8; 32] {
-		let index = self.rand_bytes_index.get_increment();
-		let mut nonce = [0u8; 16];
-		nonce[..8].copy_from_slice(&index.to_be_bytes());
-		ChaCha20::get_single_block(&self.rand_bytes_unique_start, &nonce)
+		self.entropy_source.get_secure_random_bytes()
 	}
 }
 
@@ -2629,6 +2615,35 @@ impl PhantomKeysManager {
 	/// last-hop onion data, etc.
 	pub fn get_phantom_node_secret_key(&self) -> SecretKey {
 		self.phantom_secret
+	}
+}
+
+/// An implementation of [`EntropySource`] using [`ChaCha20`].
+#[derive(Debug)]
+struct RandomBytes {
+	/// Seed from which all randomness produced is derived from.
+	seed: [u8; 32],
+	/// Tracks the number of times we've produced randomness to ensure we don't return the same
+	/// bytes twice.
+	index: AtomicCounter,
+}
+
+impl RandomBytes {
+	/// Creates a new instance using the given seed.
+	pub fn new(seed: [u8; 32]) -> Self {
+		Self {
+			seed,
+			index: AtomicCounter::new(),
+		}
+	}
+}
+
+impl EntropySource for RandomBytes {
+	fn get_secure_random_bytes(&self) -> [u8; 32] {
+		let index = self.index.get_increment();
+		let mut nonce = [0u8; 16];
+		nonce[..8].copy_from_slice(&index.to_be_bytes());
+		ChaCha20::get_single_block(&self.seed, &nonce)
 	}
 }
 
