@@ -6198,56 +6198,21 @@ where
 		self.do_accept_inbound_channel(temporary_channel_id, counterparty_node_id, true, user_channel_id, None)
 	}
 
-	/// Accepts a request to open a channel after a [`Event::OpenChannelRequest`].
-	///
-	/// The `temporary_channel_id` parameter indicates which inbound channel should be accepted,
-	/// and the `counterparty_node_id` parameter is the id of the peer which has requested to open
-	/// the channel.
-	///
-	/// The `user_channel_id` parameter will be provided back in
-	/// [`Event::ChannelClosed::user_channel_id`] to allow tracking of which events correspond
-	/// with which `accept_inbound_channel`/`accept_inbound_channel_from_trusted_peer_0conf` call.
-	///
-	/// The override_config parameter holds the [`UserConfig`] that will replace the standard settings
-	/// established by [`ChannelManager::new`].
-	///
-	/// Note that this method will return an error and reject the channel, if it requires support
-	/// for zero confirmations. Instead, `accept_inbound_channel_from_trusted_peer_0conf` must be
-	/// used to accept such channels.
-	///
-	/// [`Event::OpenChannelRequest`]: events::Event::OpenChannelRequest
-	/// [`Event::ChannelClosed::user_channel_id`]: events::Event::ChannelClosed::user_channel_id
-	pub fn accept_inbound_channel_override_config(
-		&self,
-		temporary_channel_id: &ChannelId,
-		counterparty_node_id: &PublicKey,
-		user_channel_id: u128,
-		override_config: UserConfig,
-	) -> Result<(), APIError> {
-		self.do_accept_inbound_channel(
-			temporary_channel_id,
-			counterparty_node_id,
-			false,
-			user_channel_id,
-			Some(override_config),
-		)
-	}
+	fn do_accept_inbound_channel(&self, temporary_channel_id: &ChannelId, counterparty_node_id: &PublicKey, accept_0conf: bool, user_channel_id: u128) -> Result<(), APIError> {
 
-	fn do_accept_inbound_channel(
-		&self,
-		temporary_channel_id: &ChannelId,
-		counterparty_node_id: &PublicKey,
-		accept_0conf: bool,
-		user_channel_id: u128,
-		override_config: Option<UserConfig>,
-	) -> Result<(), APIError> {
+		let logger = WithContext::from(&self.logger, Some(*counterparty_node_id), Some(*temporary_channel_id));
 		let _persistence_guard = PersistenceNotifierGuard::notify_on_drop(self);
 
 		let peers_without_funded_channels =
 			self.peers_without_funded_channels(|peer| { peer.total_channel_count() > 0 });
 		let per_peer_state = self.per_peer_state.read().unwrap();
 		let peer_state_mutex = per_peer_state.get(counterparty_node_id)
-			.ok_or_else(|| APIError::ChannelUnavailable { err: format!("Can't find a peer matching the passed counterparty node_id {}", counterparty_node_id) })?;
+		.ok_or_else(|| {
+			let err_str = format!("Can't find a peer matching the passed counterparty node_id {}", counterparty_node_id); 
+			log_error!(logger, "{}", err_str);
+
+			APIError::ChannelUnavailable { err: err_str } 
+		})?;
 		let mut peer_state_lock = peer_state_mutex.lock().unwrap();
 		let peer_state = &mut *peer_state_lock;
 		let is_only_peer_channel = peer_state.total_channel_count() == 1;
@@ -6263,10 +6228,20 @@ where
 				let best_block_height = self.best_block.read().unwrap().height();
 				InboundV1Channel::new(&self.fee_estimator, &self.entropy_source, &self.signer_provider,
 					counterparty_node_id.clone(), &self.channel_type_features(), &peer_state.latest_features,
-					&unaccepted_channel.open_channel_msg, user_channel_id, &user_config, best_block_height,
-					&self.logger, accept_0conf).map_err(|e| APIError::ChannelUnavailable { err: e.to_string() })
+					&unaccepted_channel.open_channel_msg, user_channel_id, &self.default_configuration, best_block_height,
+					&self.logger, accept_0conf).map_err(|e| {
+						let err_str = e.to_string();
+						log_error!(logger, "{}", err_str);
+
+						APIError::ChannelUnavailable { err: err_str }
+					})
+				}
+			_ => { 
+				let err_str = "No such channel awaiting to be accepted.".to_owned();
+				log_error!(logger, "{}", err_str);
+
+				Err(APIError::APIMisuseError { err: err_str })
 			}
-			_ => Err(APIError::APIMisuseError { err: "No such channel awaiting to be accepted.".to_owned() })
 		}?;
 
 		if accept_0conf {
@@ -6280,7 +6255,10 @@ where
 				}
 			};
 			peer_state.pending_msg_events.push(send_msg_err_event);
-			return Err(APIError::APIMisuseError { err: "Please use accept_inbound_channel_from_trusted_peer_0conf to accept channels with zero confirmations.".to_owned() });
+			let err_str = "Please use accept_inbound_channel_from_trusted_peer_0conf to accept channels with zero confirmations.".to_owned();
+			log_error!(logger, "{}", err_str);
+
+			return Err(APIError::APIMisuseError { err: err_str });
 		} else {
 			// If this peer already has some channels, a new channel won't increase our number of peers
 			// with unfunded channels, so as long as we aren't over the maximum number of unfunded
@@ -6293,7 +6271,10 @@ where
 					}
 				};
 				peer_state.pending_msg_events.push(send_msg_err_event);
-				return Err(APIError::APIMisuseError { err: "Too many peers with unfunded channels, refusing to accept new ones".to_owned() });
+				let err_str = "Too many peers with unfunded channels, refusing to accept new ones".to_owned();
+				log_error!(logger, "{}", err_str);
+
+				return Err(APIError::APIMisuseError { err: err_str });
 			}
 		}
 
