@@ -18,6 +18,7 @@ use bitcoin::secp256k1::PublicKey;
 use yuv_types::YuvTransaction;
 
 use crate::chain::channelmonitor::{ChannelMonitor, ChannelMonitorUpdate, MonitorEvent};
+use crate::ln::ChannelId;
 use crate::sign::ecdsa::WriteableEcdsaChannelSigner;
 use crate::chain::transaction::{OutPoint, TransactionData};
 
@@ -298,7 +299,7 @@ pub trait Watch<ChannelSigner: WriteableEcdsaChannelSigner> {
 	///
 	/// For details on asynchronous [`ChannelMonitor`] updating and returning
 	/// [`MonitorEvent::Completed`] here, see [`ChannelMonitorUpdateStatus::InProgress`].
-	fn release_pending_monitor_events(&self) -> Vec<(OutPoint, Vec<MonitorEvent>, Option<PublicKey>)>;
+	fn release_pending_monitor_events(&self) -> Vec<(OutPoint, ChannelId, Vec<MonitorEvent>, Option<PublicKey>)>;
 }
 
 /// The `Filter` trait defines behavior for indicating chain activity of interest pertaining to
