@@ -49,8 +49,7 @@ use yuv_pixels::{Chroma, HtlcScriptKind, LightningCommitmentProof, LightningHtlc
 use yuv_types::YuvTxType;
 use crate::chain;
 use crate::ln::features::ChannelTypeFeatures;
-use crate::routing::gossip::NodeId;
-use crate::util::crypto::{sign, sign_with_aux_rand};
+use crate::crypto::utils::{sign, sign_with_aux_rand};
 use super::channel_keys::{DelayedPaymentBasepoint, DelayedPaymentKey, HtlcKey, HtlcBasepoint, RevocationKey, RevocationBasepoint};
 
 /// Maximum number of one-way in-flight HTLC (protocol-level value).
