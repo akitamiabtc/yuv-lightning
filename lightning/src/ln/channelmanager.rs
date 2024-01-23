@@ -1018,6 +1018,7 @@ pub type SimpleArcChannelManager<M, T, F, L> = ChannelManager<
 	Arc<DefaultRouter<
 		Arc<NetworkGraph<Arc<L>>>,
 		Arc<L>,
+		Arc<KeysManager>,
 		Arc<RwLock<ProbabilisticScorer<Arc<NetworkGraph<Arc<L>>>, Arc<L>>>>,
 		ProbabilisticScoringFeeParameters,
 		ProbabilisticScorer<Arc<NetworkGraph<Arc<L>>>, Arc<L>>,
@@ -1049,6 +1050,7 @@ pub type SimpleRefChannelManager<'a, 'b, 'c, 'd, 'e, 'f, 'g, 'h, M, T, F, L> =
 		&'e DefaultRouter<
 			&'f NetworkGraph<&'g L>,
 			&'g L,
+			&'c KeysManager,
 			&'h RwLock<ProbabilisticScorer<&'f NetworkGraph<&'g L>, &'g L>>,
 			ProbabilisticScoringFeeParameters,
 			ProbabilisticScorer<&'f NetworkGraph<&'g L>, &'g L>
@@ -8140,7 +8142,6 @@ where
 	/// Errors if the `MessageRouter` errors or returns an empty `Vec`.
 	fn create_blinded_path(&self) -> Result<BlindedPath, ()> {
 		let recipient = self.get_our_node_id();
-		let entropy_source = self.entropy_source.deref();
 		let secp_ctx = &self.secp_ctx;
 
 		let peers = self.per_peer_state.read().unwrap()
@@ -8150,7 +8151,7 @@ where
 			.collect::<Vec<_>>();
 
 		self.router
-			.create_blinded_paths(recipient, peers, entropy_source, secp_ctx)
+			.create_blinded_paths(recipient, peers, secp_ctx)
 			.and_then(|paths| paths.into_iter().next().ok_or(()))
 	}
 
@@ -8159,7 +8160,6 @@ where
 	fn create_blinded_payment_paths(
 		&self, amount_msats: u64, payment_secret: PaymentSecret
 	) -> Result<Vec<(BlindedPayInfo, BlindedPath)>, ()> {
-		let entropy_source = self.entropy_source.deref();
 		let secp_ctx = &self.secp_ctx;
 
 		let first_hops = self.list_usable_channels();
@@ -8174,7 +8174,7 @@ where
 			},
 		};
 		self.router.create_blinded_payment_paths(
-			payee_node_id, first_hops, payee_tlvs, amount_msats, entropy_source, secp_ctx
+			payee_node_id, first_hops, payee_tlvs, amount_msats, secp_ctx
 		)
 	}
 
