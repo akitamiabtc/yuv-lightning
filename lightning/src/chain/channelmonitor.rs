@@ -1867,6 +1867,25 @@ impl<Signer: WriteableEcdsaChannelSigner> ChannelMonitor<Signer> {
 		);
 	}
 
+	/// Triggers rebroadcasts of pending claims from a force-closed channel after a transaction
+	/// signature generation failure.
+	pub fn signer_unblocked<B: Deref, F: Deref, L: Deref>(
+		&self, broadcaster: B, fee_estimator: F, logger: &L,
+	)
+	where
+		B::Target: BroadcasterInterface,
+		F::Target: FeeEstimator,
+		L::Target: Logger,
+	{
+		let fee_estimator = LowerBoundedFeeEstimator::new(fee_estimator);
+		let mut inner = self.inner.lock().unwrap();
+		let logger = WithChannelMonitor::from_impl(logger, &*inner);
+		let current_height = inner.best_block.height;
+		inner.onchain_tx_handler.rebroadcast_pending_claims(
+			current_height, FeerateStrategy::RetryPrevious, &broadcaster, &fee_estimator, &logger,
+		);
+	}
+
 	/// Returns the descriptors for relevant outputs (i.e., those that we can spend) within the
 	/// transaction if they exist and the transaction has at least [`ANTI_REORG_DELAY`]
 	/// confirmations. For [`SpendableOutputDescriptor::DelayedPaymentOutput`] descriptors to be
@@ -1910,75 +1929,10 @@ impl<Signer: WriteableEcdsaChannelSigner> ChannelMonitor<Signer> {
 		self.inner.lock().unwrap().counterparty_payment_script = script;
 	}
 
-	/// Returns pending YUV transactions
-	pub fn get_pending_yuv_transactions(&self) -> Vec<Txid> {
+	#[cfg(test)]
+	pub fn do_signer_call<F: FnMut(&Signer) -> ()>(&self, mut f: F) {
 		let inner = self.inner.lock().unwrap();
-		inner.pending_yuv_payments
-			.iter()
-			.filter_map(|(txid, desc)| desc.as_ref().map(|_| *txid))
-			.collect()
-	}
-
-	/// Returns if channelmonitor is waiting a specified tx id.
-	pub fn is_pending_yuv_tx(&self, txid: &Txid) -> bool {
-		let inner = self.inner.lock().unwrap();
-		inner.pending_yuv_payments.contains_key(txid)
-	}
-
-	/// Handle YUV transaction that has been confirmed in YUV network. Use
-	/// [`Self::get_pending_yuv_transactions`] to receive pending transactions.
-	pub fn yuv_transaction_confirmed(&self, yuv_tx: YuvTransaction) {
-		let mut inner = self.inner.lock().unwrap();
-
-		let YuvTxType::Transfer { output_proofs, .. } = yuv_tx.tx_type else {
-			panic!("Unexpected YuvTxType, panic to avoid lost funds!");
-		};
-
-		let Some(spendable_descriptor) = inner.pending_yuv_payments.remove(&yuv_tx.bitcoin_tx.txid()) else {
-			return
-		};
-
-		let confirmed_descriptor = match spendable_descriptor {
-			Some(SpendableOutputDescriptor::YuvStaticOutput(mut descriptor)) => {
-				match output_proofs.get(&(descriptor.outpoint.index as u32)) {
-					Some(yuv_pixel_proof) => {
-						descriptor.yuv_pixel_proof = Some(yuv_pixel_proof.clone());
-						SpendableOutputDescriptor::YuvStaticOutput(descriptor)
-					},
-					None => SpendableOutputDescriptor::StaticOutput {
-						outpoint: descriptor.outpoint,
-						output: descriptor.output
-					}
-				}
-			},
-			Some(SpendableOutputDescriptor::DelayedYuvPaymentOutput(mut descriptor)) => {
-				match output_proofs.get(&(descriptor.inner.outpoint.index as u32)) {
-					Some(yuv_pixel_proof) => {
-						descriptor.yuv_pixel_proof = Some(yuv_pixel_proof.clone());
-						SpendableOutputDescriptor::DelayedYuvPaymentOutput(descriptor)
-					},
-					None => SpendableOutputDescriptor::DelayedPaymentOutput(descriptor.inner)
-				}
-			},
-			Some(SpendableOutputDescriptor::StaticYuvPaymentOutput(mut descriptor)) => {
-				match output_proofs.get(&(descriptor.inner.outpoint.index as u32)) {
-					Some(yuv_pixel_proof) => {
-						descriptor.yuv_pixel_proof = Some(yuv_pixel_proof.clone());
-						SpendableOutputDescriptor::StaticYuvPaymentOutput(descriptor)
-					},
-					None => SpendableOutputDescriptor::StaticPaymentOutput(descriptor.inner)
-				}
-			},
-			Some(..) => panic!("Unexpected SpendableOutputDescriptor type, panic to avoid lost funds!"),
-			None => return,
-		};
-
-		let channel_id = inner.funding_info.0.to_channel_id();
-		inner.pending_events.push(Event::SpendableOutputs {
-			outputs: vec![confirmed_descriptor],
-			channel_id: Some(channel_id),
-		});
-		inner.spendable_txids_confirmed.push(yuv_tx.bitcoin_tx.txid());
+		f(&inner.onchain_tx_handler.signer);
 	}
 }
 
@@ -3943,9 +3897,12 @@ impl<Signer: WriteableEcdsaChannelSigner> ChannelMonitorImpl<Signer> {
 						continue;
 					}
 				} else { None };
-				if let Some(htlc_tx) = self.onchain_tx_handler.get_fully_signed_htlc_tx(
-					&::bitcoin::OutPoint { txid, vout }, &preimage) {
-					holder_transactions.push(htlc_tx);
+				if let Some(htlc_tx) = self.onchain_tx_handler.get_maybe_signed_htlc_tx(
+					&::bitcoin::OutPoint { txid, vout }, &preimage
+				) {
+					if htlc_tx.is_fully_signed() {
+						holder_transactions.push(htlc_tx.0);
+					}
 				}
 			}
 		}

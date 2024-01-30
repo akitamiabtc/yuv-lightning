@@ -1206,6 +1206,7 @@ pub struct TestKeysInterface {
 	pub disable_revocation_policy_check: bool,
 	enforcement_states: Mutex<HashMap<[u8;32], Arc<Mutex<EnforcementState>>>>,
 	expectations: Mutex<Option<VecDeque<OnGetShutdownScriptpubkey>>>,
+	pub unavailable_signers: Mutex<HashSet<[u8; 32]>>,
 }
 
 impl EntropySource for TestKeysInterface {
@@ -1264,7 +1265,11 @@ impl SignerProvider for TestKeysInterface {
 	fn derive_channel_signer(&self, channel_value_satoshis: u64, channel_keys_id: [u8; 32]) -> TestChannelSigner {
 		let keys = self.backing.derive_channel_signer(channel_value_satoshis, channel_keys_id);
 		let state = self.make_enforcement_state_cell(keys.commitment_seed);
-		TestChannelSigner::new_with_revoked(keys, state, self.disable_revocation_policy_check)
+		let signer = TestChannelSigner::new_with_revoked(keys, state, self.disable_revocation_policy_check);
+		if self.unavailable_signers.lock().unwrap().contains(&channel_keys_id) {
+			signer.set_available(false);
+		}
+		signer
 	}
 
 	fn read_chan_signer(&self, buffer: &[u8]) -> Result<Self::EcdsaSigner, msgs::DecodeError> {
@@ -1306,6 +1311,7 @@ impl TestKeysInterface {
 			disable_revocation_policy_check: false,
 			enforcement_states: Mutex::new(new_hash_map()),
 			expectations: Mutex::new(None),
+			unavailable_signers: Mutex::new(new_hash_set()),
 		}
 	}
 
@@ -1319,9 +1325,7 @@ impl TestKeysInterface {
 	}
 
 	pub fn derive_channel_keys(&self, channel_value_satoshis: u64, id: &[u8; 32]) -> TestChannelSigner {
-		let keys = self.backing.derive_channel_keys(channel_value_satoshis, id);
-		let state = self.make_enforcement_state_cell(keys.commitment_seed);
-		TestChannelSigner::new_with_revoked(keys, state, self.disable_revocation_policy_check)
+		self.derive_channel_signer(channel_value_satoshis, *id)
 	}
 
 	fn make_enforcement_state_cell(&self, commitment_seed: [u8; 32]) -> Arc<Mutex<EnforcementState>> {
