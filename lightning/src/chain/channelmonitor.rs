@@ -45,8 +45,8 @@ use crate::chain::{BestBlock, WatchedOutput};
 use crate::chain::chaininterface::{BroadcasterInterface, FeeEstimator, LowerBoundedFeeEstimator, YuvBroadcaster};
 use crate::chain::transaction::{OutPoint, TransactionData};
 use crate::sign::{ChannelDerivationParameters, HTLCDescriptor, SpendableOutputDescriptor, StaticPaymentOutputDescriptor, DelayedPaymentOutputDescriptor, ecdsa::WriteableEcdsaChannelSigner, SignerProvider, EntropySource};
-use crate::chain::onchaintx::{ClaimEvent, OnchainTxHandler};
-use crate::chain::package::{CounterpartyOfferedHTLCOutput, CounterpartyReceivedHTLCOutput, HolderFundingOutput, HolderHTLCOutput, PackageSolvingData, PackageTemplate, RevokedOutput, RevokedHTLCOutput, get_yuv_htlc_pixel_proof};
+use crate::chain::onchaintx::{ClaimEvent, FeerateStrategy, OnchainTxHandler};
+use crate::chain::package::{CounterpartyOfferedHTLCOutput, CounterpartyReceivedHTLCOutput, HolderFundingOutput, HolderHTLCOutput, PackageSolvingData, PackageTemplate, RevokedOutput, RevokedHTLCOutput};
 use crate::chain::Filter;
 use crate::util::logger::{Logger, Record};
 use crate::util::ser::{Readable, ReadableArgs, RequiredWrapper, MaybeReadable, UpgradableRequired, Writer, Writeable, U48};
@@ -1863,7 +1863,7 @@ impl<Signer: WriteableEcdsaChannelSigner> ChannelMonitor<Signer> {
 		let logger = WithChannelMonitor::from_impl(logger, &*inner);
 		let current_height = inner.best_block.height;
 		inner.onchain_tx_handler.rebroadcast_pending_claims(
-			current_height, &broadcaster, yuv_broadcaster, &fee_estimator, &logger,
+			current_height, FeerateStrategy::HighestOfPreviousOrNew, &broadcaster, &fee_estimator, &logger,
 		);
 	}
 
