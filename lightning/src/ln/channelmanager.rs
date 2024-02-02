@@ -6432,40 +6432,38 @@ where
 	fn internal_accept_channel(&self, counterparty_node_id: &PublicKey, msg: &msgs::AcceptChannel) -> Result<(), MsgHandleErrInternal> {
 		// Note that the ChannelManager is NOT re-persisted on disk after this, so any changes are
 		// likely to be lost on restart!
-		let per_peer_state = self.per_peer_state.read().unwrap();
-		let peer_state_mutex = per_peer_state.get(counterparty_node_id)
-			.ok_or_else(|| {
-				debug_assert!(false);
-				MsgHandleErrInternal::send_err_msg_no_close(format!("Can't find a peer matching the passed counterparty node_id {}", counterparty_node_id), msg.temporary_channel_id)
-			})?;
-		let mut peer_state_lock = peer_state_mutex.lock().unwrap();
-		let peer_state = &mut *peer_state_lock;
-		match peer_state.channel_by_id.entry(msg.temporary_channel_id) {
-			hash_map::Entry::Occupied(mut phase) => {
-				match phase.get_mut() {
-					ChannelPhase::UnfundedOutboundV1(chan) => {
-						try_chan_phase_entry!(self, chan.accept_channel(&msg, &self.default_configuration.channel_handshake_limits, &peer_state.latest_features), phase);
-
-						let mut pending_events = self.pending_events.lock().unwrap();
-						pending_events.push_back((Event::FundingGenerationReady {
-							funding_yuv_pixel: chan.context.get_funding_yuv_pixel(),
-							funding_holder_pubkey: chan.context.holder_funding_pubkey().clone(),
-							temporary_channel_id: msg.temporary_channel_id,
-							counterparty_node_id: *counterparty_node_id,
-							channel_value_satoshis: chan.context.get_value_satoshis(),
-							output_script: chan.context.get_funding_redeemscript().to_v0_p2wsh(),
-							user_channel_id: chan.context.get_user_id(),
-							funding_counterparty_pubkey: chan.context.counterparty_funding_pubkey().clone(),
-						}, None));
-					},
-					_ => {
-						return Err(MsgHandleErrInternal::send_err_msg_no_close(format!("Got an unexpected accept_channel message from peer with counterparty_node_id {}", counterparty_node_id), msg.temporary_channel_id));
+		let (value, output_script, user_id) = {
+			let per_peer_state = self.per_peer_state.read().unwrap();
+			let peer_state_mutex = per_peer_state.get(counterparty_node_id)
+				.ok_or_else(|| {
+					debug_assert!(false);
+					MsgHandleErrInternal::send_err_msg_no_close(format!("Can't find a peer matching the passed counterparty node_id {}", counterparty_node_id), msg.common_fields.temporary_channel_id)
+				})?;
+			let mut peer_state_lock = peer_state_mutex.lock().unwrap();
+			let peer_state = &mut *peer_state_lock;
+			match peer_state.channel_by_id.entry(msg.common_fields.temporary_channel_id) {
+				hash_map::Entry::Occupied(mut phase) => {
+					match phase.get_mut() {
+						ChannelPhase::UnfundedOutboundV1(chan) => {
+							try_chan_phase_entry!(self, chan.accept_channel(&msg, &self.default_configuration.channel_handshake_limits, &peer_state.latest_features), phase);
+							(chan.context.get_value_satoshis(), chan.context.get_funding_redeemscript().to_v0_p2wsh(), chan.context.get_user_id())
+						},
+						_ => {
+							return Err(MsgHandleErrInternal::send_err_msg_no_close(format!("Got an unexpected accept_channel message from peer with counterparty_node_id {}", counterparty_node_id), msg.common_fields.temporary_channel_id));
+						}
 					}
-				}
-			},
-			hash_map::Entry::Vacant(_) => return Err(MsgHandleErrInternal::send_err_msg_no_close(format!("Got a message for a channel from the wrong node! No such channel for the passed counterparty_node_id {}", counterparty_node_id), msg.temporary_channel_id))
+				},
+				hash_map::Entry::Vacant(_) => return Err(MsgHandleErrInternal::send_err_msg_no_close(format!("Got a message for a channel from the wrong node! No such channel for the passed counterparty_node_id {}", counterparty_node_id), msg.common_fields.temporary_channel_id))
+			}
 		};
-
+		let mut pending_events = self.pending_events.lock().unwrap();
+		pending_events.push_back((events::Event::FundingGenerationReady {
+			temporary_channel_id: msg.common_fields.temporary_channel_id,
+			counterparty_node_id: *counterparty_node_id,
+			channel_value_satoshis: value,
+			output_script,
+			user_channel_id: user_id,
+		}, None));
 		Ok(())
 	}
 
@@ -9234,7 +9232,7 @@ where
 	fn handle_accept_channel_v2(&self, counterparty_node_id: &PublicKey, msg: &msgs::AcceptChannelV2) {
 		let _: Result<(), _> = handle_error!(self, Err(MsgHandleErrInternal::send_err_msg_no_close(
 			"Dual-funded channels not supported".to_owned(),
-			 msg.temporary_channel_id.clone())), *counterparty_node_id);
+			 msg.common_fields.temporary_channel_id.clone())), *counterparty_node_id);
 	}
 
 	fn handle_funding_created(&self, counterparty_node_id: &PublicKey, msg: &msgs::FundingCreated) {
