@@ -592,7 +592,7 @@ impl InvoiceBuilder<tb::False, tb::False, tb::False, tb::False, tb::False, tb::F
 			amount: None,
 			si_prefix: None,
 			timestamp: None,
-			tagged_fields: Vec::new(),
+			tagged_fields: Vec::with_capacity(8),
 			error: None,
 			yuv_pixel: None,
 
