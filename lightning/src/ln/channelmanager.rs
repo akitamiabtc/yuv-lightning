@@ -5858,7 +5858,7 @@ where
 	fn claim_funds_internal(&self, source: HTLCSource, payment_preimage: PaymentPreimage,
 		forwarded_htlc_value_msat: Option<u64>, skimmed_fee_msat: Option<u64>, from_onchain: bool,
 		startup_replay: bool, next_channel_counterparty_node_id: Option<PublicKey>,
-		next_channel_outpoint: OutPoint, next_channel_id: ChannelId,
+		next_channel_outpoint: OutPoint, next_channel_id: ChannelId, next_user_channel_id: Option<u128>,
 	) {
 		match source {
 			HTLCSource::OutboundRoute { session_priv, payment_id, path, .. } => {
@@ -5877,6 +5877,7 @@ where
 			},
 			HTLCSource::PreviousHopData(hop_data) => {
 				let prev_channel_id = hop_data.channel_id;
+				let prev_user_channel_id = hop_data.user_channel_id;
 				let completed_blocker = RAAMonitorUpdateBlockingAction::from_prev_hop_data(&hop_data);
 				#[cfg(debug_assertions)]
 				let claiming_chan_funding_outpoint = hop_data.outpoint;
@@ -5963,12 +5964,14 @@ where
 								"skimmed_fee_msat must always be included in total_fee_earned_msat");
 							Some(MonitorUpdateCompletionAction::EmitEventAndFreeOtherChannel {
 								event: events::Event::PaymentForwarded {
-									total_fee_earned_msat,
-									claim_from_onchain_tx: from_onchain,
 									prev_channel_id: Some(prev_channel_id),
 									next_channel_id: Some(next_channel_id),
-									outbound_amount_forwarded_msat: forwarded_htlc_value_msat,
+									prev_user_channel_id,
+									next_user_channel_id,
+									total_fee_earned_msat,
 									skimmed_fee_msat,
+									claim_from_onchain_tx: from_onchain,
+									outbound_amount_forwarded_msat: forwarded_htlc_value_msat,
 								},
 								downstream_counterparty_and_funding_outpoint: chan_to_release,
 							})
@@ -6946,6 +6949,7 @@ where
 
 	fn internal_update_fulfill_htlc(&self, counterparty_node_id: &PublicKey, msg: &msgs::UpdateFulfillHTLC) -> Result<(), MsgHandleErrInternal> {
 		let funding_txo;
+		let next_user_channel_id;
 		let (htlc_source, forwarded_htlc_value, skimmed_fee_msat) = {
 			let per_peer_state = self.per_peer_state.read().unwrap();
 			let peer_state_mutex = per_peer_state.get(counterparty_node_id)
@@ -6975,6 +6979,7 @@ where
 						// outbound HTLC is claimed. This is guaranteed to all complete before we
 						// process the RAA as messages are processed from single peers serially.
 						funding_txo = chan.context.get_funding_txo().expect("We won't accept a fulfill until funded");
+						next_user_channel_id = chan.context.get_user_id();
 						res
 					} else {
 						return try_chan_phase_entry!(self, Err(ChannelError::Close(
@@ -6986,7 +6991,7 @@ where
 		};
 		self.claim_funds_internal(htlc_source, msg.payment_preimage.clone(),
 			Some(forwarded_htlc_value), skimmed_fee_msat, false, false, Some(*counterparty_node_id),
-			funding_txo, msg.channel_id
+			funding_txo, msg.channel_id, Some(next_user_channel_id),
 		);
 
 		Ok(())
@@ -7488,7 +7493,7 @@ where
 							log_trace!(logger, "Claiming HTLC with preimage {} from our monitor", preimage);
 							self.claim_funds_internal(htlc_update.source, preimage,
 								htlc_update.htlc_value_satoshis.map(|v| v * 1000), None, true,
-								false, counterparty_node_id, funding_outpoint, channel_id);
+								false, counterparty_node_id, funding_outpoint, channel_id, None);
 						} else {
 							log_trace!(logger, "Failing HTLC with hash {} from our monitor", &htlc_update.payment_hash);
 							let receiver = HTLCDestination::NextHopChannel { node_id: counterparty_node_id, channel_id };
@@ -11898,7 +11903,9 @@ where
 			// don't remember in the `ChannelMonitor` where we got a preimage from, but if the
 			// channel is closed we just assume that it probably came from an on-chain claim.
 			channel_manager.claim_funds_internal(source, preimage, Some(downstream_value), None,
-				downstream_closed, true, downstream_node_id, downstream_funding, downstream_channel_id);
+				downstream_closed, true, downstream_node_id, downstream_funding,
+				downstream_channel_id, None
+			);
 		}
 
 		//TODO: Broadcast channel update for closed channels, but only after we've made a
