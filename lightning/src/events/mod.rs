@@ -1338,7 +1338,7 @@ impl MaybeReadable for Event {
 			// Note that we do not write a length-prefixed TLV for FundingGenerationReady events.
 			0u8 => Ok(None),
 			1u8 => {
-				let f = || {
+				let mut f = || {
 					let mut payment_hash = PaymentHash([0; 32]);
 					let mut payment_preimage = None;
 					let mut payment_secret = None;
@@ -1389,7 +1389,7 @@ impl MaybeReadable for Event {
 				f()
 			},
 			2u8 => {
-				let f = || {
+				let mut f = || {
 					let mut payment_preimage = PaymentPreimage([0; 32]);
 					let mut payment_hash = None;
 					let mut payment_id = None;
@@ -1413,7 +1413,7 @@ impl MaybeReadable for Event {
 				f()
 			},
 			3u8 => {
-				let f = || {
+				let mut f = || {
 					#[cfg(test)]
 					let error_code = Readable::read(reader)?;
 					#[cfg(test)]
@@ -1458,7 +1458,7 @@ impl MaybeReadable for Event {
 			},
 			4u8 => Ok(None),
 			5u8 => {
-				let f = || {
+				let mut f = || {
 					let mut outputs = WithoutLength(Vec::new());
 					let mut channel_id: Option<ChannelId> = None;
 					read_tlv_fields!(reader, {
@@ -1494,7 +1494,7 @@ impl MaybeReadable for Event {
 				}))
 			},
 			7u8 => {
-				let f = || {
+				let mut f = || {
 					let mut prev_channel_id = None;
 					let mut next_channel_id = None;
 					let mut prev_user_channel_id = None;
@@ -1522,7 +1522,7 @@ impl MaybeReadable for Event {
 				f()
 			},
 			9u8 => {
-				let f = || {
+				let mut f = || {
 					let mut channel_id = ChannelId::new_zero();
 					let mut reason = UpgradableRequired(None);
 					let mut user_channel_id_low_opt: Option<u64> = None;
@@ -1552,7 +1552,7 @@ impl MaybeReadable for Event {
 				f()
 			},
 			11u8 => {
-				let f = || {
+				let mut f = || {
 					let mut channel_id = ChannelId::new_zero();
 					let mut transaction = Transaction{ version: 2, lock_time: LockTime::ZERO, input: Vec::new(), output: Vec::new() };
 					read_tlv_fields!(reader, {
@@ -1564,7 +1564,7 @@ impl MaybeReadable for Event {
 				f()
 			},
 			13u8 => {
-				let f = || {
+				let mut f = || {
 					_init_and_read_len_prefixed_tlv_fields!(reader, {
 						(0, payment_id, required),
 						(2, payment_hash, option),
@@ -1581,7 +1581,7 @@ impl MaybeReadable for Event {
 				f()
 			},
 			15u8 => {
-				let f = || {
+				let mut f = || {
 					let mut payment_hash = PaymentHash([0; 32]);
 					let mut payment_id = PaymentId([0; 32]);
 					let mut reason = None;
@@ -1603,7 +1603,7 @@ impl MaybeReadable for Event {
 				Ok(None)
 			},
 			19u8 => {
-				let f = || {
+				let mut f = || {
 					let mut payment_hash = PaymentHash([0; 32]);
 					let mut purpose = UpgradableRequired(None);
 					let mut amount_msat = 0;
@@ -1633,7 +1633,7 @@ impl MaybeReadable for Event {
 				f()
 			},
 			21u8 => {
-				let f = || {
+				let mut f = || {
 					_init_and_read_len_prefixed_tlv_fields!(reader, {
 						(0, payment_id, required),
 						(2, payment_hash, required),
@@ -1650,7 +1650,7 @@ impl MaybeReadable for Event {
 				f()
 			},
 			23u8 => {
-				let f = || {
+				let mut f = || {
 					_init_and_read_len_prefixed_tlv_fields!(reader, {
 						(0, payment_id, required),
 						(2, payment_hash, required),
@@ -1669,7 +1669,7 @@ impl MaybeReadable for Event {
 				f()
 			},
 			25u8 => {
-				let f = || {
+				let mut f = || {
 					let mut prev_channel_id = ChannelId::new_zero();
 					let mut failed_next_destination_opt = UpgradableRequired(None);
 					read_tlv_fields!(reader, {
@@ -1685,7 +1685,7 @@ impl MaybeReadable for Event {
 			},
 			27u8 => Ok(None),
 			29u8 => {
-				let f = || {
+				let mut f = || {
 					let mut channel_id = ChannelId::new_zero();
 					let mut user_channel_id: u128 = 0;
 					let mut counterparty_node_id = RequiredWrapper(None);
@@ -1707,7 +1707,7 @@ impl MaybeReadable for Event {
 				f()
 			},
 			31u8 => {
-				let f = || {
+				let mut f = || {
 					let mut channel_id = ChannelId::new_zero();
 					let mut user_channel_id: u128 = 0;
 					let mut former_temporary_channel_id = None;
@@ -1735,7 +1735,7 @@ impl MaybeReadable for Event {
 				f()
 			},
 			33u8 => {
-				let f = || {
+				let mut f = || {
 					_init_and_read_len_prefixed_tlv_fields!(reader, {
 						(0, payment_id, required),
 					});
