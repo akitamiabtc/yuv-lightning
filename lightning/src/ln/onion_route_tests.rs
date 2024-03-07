@@ -1322,7 +1322,7 @@ fn test_phantom_failure_too_low_cltv() {
 	// Ensure the payment fails with the expected error.
 	let mut error_data = recv_value_msat.to_be_bytes().to_vec();
 	error_data.extend_from_slice(
-		&nodes[0].node.best_block.read().unwrap().height().to_be_bytes(),
+		&nodes[0].node.best_block.read().unwrap().height.to_be_bytes(),
 	);
 	let mut fail_conditions = PaymentFailedConditions::new()
 		.blamed_scid(phantom_scid)
@@ -1452,7 +1452,7 @@ fn test_phantom_failure_too_low_recv_amt() {
 
 	// Ensure the payment fails with the expected error.
 	let mut error_data = bad_recv_amt_msat.to_be_bytes().to_vec();
-	error_data.extend_from_slice(&nodes[1].node.best_block.read().unwrap().height().to_be_bytes());
+	error_data.extend_from_slice(&nodes[1].node.best_block.read().unwrap().height.to_be_bytes());
 	let mut fail_conditions = PaymentFailedConditions::new()
 		.blamed_scid(phantom_scid)
 		.expected_htlc_error_data(0x4000 | 15, &error_data);
@@ -1559,7 +1559,7 @@ fn test_phantom_failure_reject_payment() {
 
 	// Ensure the payment fails with the expected error.
 	let mut error_data = recv_amt_msat.to_be_bytes().to_vec();
-	error_data.extend_from_slice(&nodes[1].node.best_block.read().unwrap().height().to_be_bytes());
+	error_data.extend_from_slice(&nodes[1].node.best_block.read().unwrap().height.to_be_bytes());
 	let mut fail_conditions = PaymentFailedConditions::new()
 		.blamed_scid(phantom_scid)
 		.expected_htlc_error_data(0x4000 | 15, &error_data);
