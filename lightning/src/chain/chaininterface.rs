@@ -14,8 +14,8 @@
 //! disconnections, transaction broadcasting, and feerate information requests.
 
 use core::{cmp, ops::Deref};
-use core::convert::TryInto;
-use alloc::string::String;
+
+use crate::prelude::*;
 
 use bitcoin::blockdata::transaction::Transaction;
 use yuv_types::YuvTransaction;

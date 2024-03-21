@@ -19,7 +19,6 @@ use crate::io_extras::{copy, sink};
 use core::hash::Hash;
 use crate::sync::{Mutex, RwLock};
 use core::cmp;
-use core::convert::TryFrom;
 use core::ops::Deref;
 
 use alloc::collections::BTreeMap;
@@ -35,7 +34,6 @@ use bitcoin::{consensus, Witness, XOnlyPublicKey};
 use bitcoin::consensus::Encodable;
 use bitcoin::hashes::sha256d::Hash as Sha256dHash;
 use bitcoin::hash_types::{Txid, BlockHash};
-use core::marker::Sized;
 use core::time::Duration;
 use bitcoin::hashes::{Hash as Hash160, hash160};
 use yuv_pixels::{Chroma, EmptyPixelProof, HtlcScriptKind, LightningCommitmentProof, LightningHtlcData, LightningHtlcProof, Luma, MultisigPixelProof, Pixel, PixelProof, SigPixelProof, CHROMA_SIZE, LUMA_SIZE, PIXEL_SIZE};
@@ -2030,10 +2028,10 @@ impl Readable for UpdateBalanceInfo {
 
 #[cfg(test)]
 mod tests {
-	use core::convert::TryFrom;
 	use bitcoin::hashes::hex::FromHex;
 	use bitcoin::secp256k1::ecdsa;
 	use crate::util::ser::{Readable, Hostname, Writeable};
+	use crate::prelude::*;
 
 	#[test]
 	fn hostname_conversion() {

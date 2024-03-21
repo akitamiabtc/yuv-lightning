@@ -27,7 +27,6 @@ use crate::util::test_utils;
 use crate::chain::chaininterface::YuvBroadcaster;
 
 use crate::prelude::*;
-use core::default::Default;
 
 use crate::ln::functional_test_utils::*;
 

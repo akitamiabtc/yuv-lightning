@@ -59,7 +59,6 @@ use crate::prelude::*;
 
 use core::{cmp, mem};
 use crate::io::{self, Error};
-use core::convert::TryInto;
 use core::ops::Deref;
 use alloc::collections::BTreeMap;
 use yuv_pixels::{Luma, Pixel, PixelProof, Tweakable};

@@ -19,6 +19,7 @@ use secp256k1::PublicKey;
 use alloc::collections::{btree_map, BTreeMap};
 use core::ops::Deref;
 use core::time::Duration;
+#[cfg(not(feature = "std"))]
 use core::iter::Iterator;
 use yuv_pixels::Pixel;
 
