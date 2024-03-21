@@ -54,7 +54,9 @@ use crate::util::byte_utils;
 use crate::events::{ClosureReason, Event, EventHandler};
 use crate::events::bump_transaction::{AnchorDescriptor, BumpTransactionEvent};
 
+#[allow(unused_imports)]
 use crate::prelude::*;
+
 use core::{cmp, mem};
 use crate::io::{self, Error};
 use core::convert::TryInto;
@@ -5227,6 +5229,8 @@ mod tests {
 	use crate::sync::{Arc, Mutex};
 	use crate::io;
 	use crate::ln::features::ChannelTypeFeatures;
+
+	#[allow(unused_imports)]
 	use crate::prelude::*;
 
 	use std::str::FromStr;

@@ -23,6 +23,7 @@ use bitcoin::secp256k1::{Secp256k1, All};
 use yuv_pixels::{Chroma, Pixel};
 use crate::ln::chan_utils::make_funding_redeemscript_from_node_ids;
 
+#[allow(unused)]
 use crate::prelude::*;
 use crate::sync::{self, Arc};
 

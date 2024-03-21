@@ -37,7 +37,6 @@ use bitcoin::{secp256k1, Sequence, Witness};
 use bitcoin::PublicKey as BitcoinPublicKey;
 
 use crate::io;
-use crate::prelude::*;
 use core::cmp;
 use core::mem::swap;
 use crate::ln::chan_utils;
@@ -51,6 +50,9 @@ use crate::chain;
 use crate::ln::features::ChannelTypeFeatures;
 use crate::crypto::utils::{sign, sign_with_aux_rand};
 use super::channel_keys::{DelayedPaymentBasepoint, DelayedPaymentKey, HtlcKey, HtlcBasepoint, RevocationKey, RevocationBasepoint};
+
+#[allow(unused_imports)]
+use crate::prelude::*;
 
 /// Maximum number of one-way in-flight HTLC (protocol-level value).
 pub const MAX_HTLCS: u16 = 483;
@@ -2249,7 +2251,6 @@ impl_writeable_tlv_based_enum!(NewUpdateBalanceRequest,
 mod tests {
 	use super::{CounterpartyCommitmentSecrets, ChannelPublicKeys};
 	use crate::chain;
-	use crate::prelude::*;
 	use crate::ln::chan_utils::{get_htlc_redeemscript, get_to_countersignatory_with_anchors_redeemscript, CommitmentTransaction, TxCreationKeys, ChannelTransactionParameters, CounterpartyChannelTransactionParameters, HTLCOutputInCommitment};
 	use bitcoin::secp256k1::{PublicKey, SecretKey, Secp256k1};
 	use crate::util::test_utils;
@@ -2261,6 +2262,9 @@ mod tests {
 	use bitcoin::address::Payload;
 	use bitcoin::PublicKey as BitcoinPublicKey;
 	use crate::ln::features::ChannelTypeFeatures;
+
+	#[allow(unused_imports)]
+	use crate::prelude::*;
 
 	struct TestCommitmentTxBuilder {
 		commitment_number: u64,

@@ -38,12 +38,14 @@ use bitcoin::hashes::Hash;
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::secp256k1::PublicKey;
 use crate::io;
-use crate::prelude::*;
 use core::time::Duration;
 use core::ops::Deref;
 use yuv_pixels::Pixel;
 use crate::ln::chan_utils::NewUpdateBalanceRequest;
 use crate::sync::Arc;
+
+#[allow(unused_imports)]
+use crate::prelude::*;
 
 /// Some information provided on receipt of payment depends on whether the payment received is a
 /// spontaneous payment or a "conventional" lightning payment that's paying an invoice.
