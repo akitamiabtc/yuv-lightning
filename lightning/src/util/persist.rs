@@ -164,15 +164,13 @@ impl<'a, A: KVStore, M: Deref, T: Deref, ES: Deref, NS: Deref, SP: Deref, F: Der
 		R::Target: 'static + Router,
 		L::Target: 'static + Logger,
 {
-	/// Persist the given [`ChannelManager`] to disk, returning an error if persistence failed.
-	fn persist_manager(&self, channel_manager: &ChannelManager<M, T, YT, ES, NS, SP, F, R, L>) -> Result<(), io::Error> {
+	fn persist_manager(&self, channel_manager: &ChannelManager<M, T, ES, NS, SP, F, R, L>) -> Result<(), io::Error> {
 		self.write(CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
 			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
 			CHANNEL_MANAGER_PERSISTENCE_KEY,
 			&channel_manager.encode())
 	}
 
-	/// Persist the given [`NetworkGraph`] to disk, returning an error if persistence failed.
 	fn persist_graph(&self, network_graph: &NetworkGraph<L>) -> Result<(), io::Error> {
 		self.write(NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
 			NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
@@ -180,7 +178,6 @@ impl<'a, A: KVStore, M: Deref, T: Deref, ES: Deref, NS: Deref, SP: Deref, F: Der
 			&network_graph.encode())
 	}
 
-	/// Persist the given [`WriteableScore`] to disk, returning an error if persistence failed.
 	fn persist_scorer(&self, scorer: &S) -> Result<(), io::Error> {
 		self.write(SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
 			SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
@@ -199,7 +196,6 @@ impl<'a, M: Deref, T: Deref, ES: Deref, NS: Deref, SP: Deref, F: Deref, R: Deref
 		R::Target: 'static + Router,
 		L::Target: 'static + Logger,
 {
-	/// Persist the given [`ChannelManager`] to disk, returning an error if persistence failed.
 	fn persist_manager(&self, channel_manager: &ChannelManager<M, T, ES, NS, SP, F, R, L>) -> Result<(), io::Error> {
 		self.write(CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
 			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
@@ -207,7 +203,6 @@ impl<'a, M: Deref, T: Deref, ES: Deref, NS: Deref, SP: Deref, F: Deref, R: Deref
 			&channel_manager.encode())
 	}
 
-	/// Persist the given [`NetworkGraph`] to disk, returning an error if persistence failed.
 	fn persist_graph(&self, network_graph: &NetworkGraph<L>) -> Result<(), io::Error> {
 		self.write(NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
 			NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
@@ -215,7 +210,6 @@ impl<'a, M: Deref, T: Deref, ES: Deref, NS: Deref, SP: Deref, F: Deref, R: Deref
 			&network_graph.encode())
 	}
 
-	/// Persist the given [`WriteableScore`] to disk, returning an error if persistence failed.
 	fn persist_scorer(&self, scorer: &S) -> Result<(), io::Error> {
 		self.write(SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
 			SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
