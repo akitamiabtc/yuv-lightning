@@ -32,7 +32,7 @@ use bitcoin::secp256k1::Secp256k1;
 use bitcoin::{secp256k1, Sequence};
 
 use crate::blinded_path::{BlindedPath, NodeIdLookUp};
-use crate::blinded_path::payment::{PaymentConstraints, ReceiveTlvs};
+use crate::blinded_path::payment::{PaymentConstraints, PaymentContext, ReceiveTlvs};
 use crate::chain;
 use crate::chain::{Confirm, ChannelMonitorUpdateStatus, Watch, BestBlock};
 use crate::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator, LowerBoundedFeeEstimator};
@@ -9117,6 +9117,7 @@ where
 				max_cltv_expiry,
 				htlc_minimum_msat: 1,
 			},
+			payment_context: PaymentContext::unknown(),
 		};
 		self.router.create_blinded_payment_paths(
 			payee_node_id, first_hops, payee_tlvs, amount_msats, secp_ctx
