@@ -1739,6 +1739,7 @@ mod fuzzy_internal_msgs {
 			payment_constraints: PaymentConstraints,
 			intro_node_blinding_point: Option<PublicKey>,
 			keysend_preimage: Option<PaymentPreimage>,
+			custom_tlvs: Vec<(u64, Vec<u8>)>,
 		}
 	}
 
@@ -2754,6 +2755,7 @@ impl<NS: Deref> ReadableArgs<(Option<PublicKey>, &NS)> for InboundOnionPayload w
 						payment_constraints,
 						intro_node_blinding_point,
 						keysend_preimage,
+						custom_tlvs,
 					})
 				},
 			}
