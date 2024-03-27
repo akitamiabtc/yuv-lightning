@@ -511,6 +511,10 @@ impl<Signer: sign::ecdsa::WriteableEcdsaChannelSigner> chainmonitor::Persist<Sig
 		}
 		res
 	}
+
+	fn archive_persisted_channel(&self, funding_txo: OutPoint) {
+		<TestPersister as chainmonitor::Persist<TestChannelSigner>>::archive_persisted_channel(&self.persister, funding_txo);
+	}
 }
 
 pub struct TestPersister {
@@ -558,6 +562,18 @@ impl<Signer: sign::ecdsa::WriteableEcdsaChannelSigner> chainmonitor::Persist<Sig
 			self.offchain_monitor_updates.lock().unwrap().entry(funding_txo).or_insert(new_hash_set()).insert(update_id);
 		}
 		ret
+	}
+
+	fn archive_persisted_channel(&self, funding_txo: OutPoint) { 
+		// remove the channel from the offchain_monitor_updates map
+		match self.offchain_monitor_updates.lock().unwrap().remove(&funding_txo) {
+			Some(_) => {},
+			None => {
+				// If the channel was not in the offchain_monitor_updates map, it should be in the
+				// chain_sync_monitor_persistences map.
+				assert!(self.chain_sync_monitor_persistences.lock().unwrap().remove(&funding_txo).is_some());
+			}
+		};
 	}
 }
 
@@ -1402,35 +1418,9 @@ impl TestChainSource {
 			watched_outputs: Mutex::new(new_hash_set()),
 		}
 	}
-
-	/// Include pixel for [`TestChainSource::utxo_ret`] on [`UtxoResult::Sync`] result.
-	pub fn set_yuv_pixel(&self, pixel: Pixel) -> &Self {
-		let mut ret = self.utxo_ret.lock().unwrap();
-
-		match *ret {
-			UtxoResult::Sync(Ok(ref mut utxo_entry)) => {
-				utxo_entry.pixel = Some(pixel);
-			},
-			// Do nothing as for async and error cases, pixel is not used
-			_ => {},
-		};
-
-		self
-	}
-
-	pub fn set_txout(&self, script: Script, value: u64) -> &Self {
-		let mut ret = self.utxo_ret.lock().unwrap();
-
-		match *ret {
-			UtxoResult::Sync(Ok(ref mut utxo_entry)) => {
-				utxo_entry.txout.script_pubkey = script;
-				utxo_entry.txout.value = value;
-			},
-			// Do nothing as for async and error cases, script_pubkey is not used
-			_ => {},
-		};
-
-		self
+	pub fn remove_watched_txn_and_outputs(&self, outpoint: OutPoint, script_pubkey: ScriptBuf) {
+		self.watched_outputs.lock().unwrap().remove(&(outpoint, script_pubkey.clone())); 
+		self.watched_txn.lock().unwrap().remove(&(outpoint.txid, script_pubkey));
 	}
 }
 
