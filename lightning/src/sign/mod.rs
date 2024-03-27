@@ -2031,9 +2031,10 @@ impl KeysManager {
 	pub fn sign_spendable_outputs_psbt<C: Signing>(&self, descriptors: &[&SpendableOutputDescriptor], mut psbt: PartiallySignedTransaction, secp_ctx: &Secp256k1<C>) -> Result<PartiallySignedTransaction, ()> {
 		let mut keys_cache: Option<(InMemorySigner, [u8; 32])> = None;
 		for outp in descriptors {
+			let get_input_idx = |outpoint: &OutPoint| psbt.unsigned_tx.input.iter().position(|i| i.previous_output == outpoint.into_bitcoin_outpoint()).ok_or(());
 			match outp {
 				SpendableOutputDescriptor::StaticPaymentOutput(descriptor) => {
-					let input_idx = psbt.unsigned_tx.input.iter().position(|i| i.previous_output == descriptor.outpoint.into_bitcoin_outpoint()).ok_or(())?;
+					let input_idx = get_input_idx(&descriptor.outpoint)?;
 					if keys_cache.is_none() || keys_cache.as_ref().unwrap().1 != descriptor.channel_keys_id {
 						let mut signer = self.derive_channel_keys(descriptor.channel_value_satoshis, &descriptor.channel_keys_id);
 						if let Some(channel_params) = descriptor.channel_transaction_parameters.as_ref() {
@@ -2045,7 +2046,7 @@ impl KeysManager {
 					psbt.inputs[input_idx].final_script_witness = Some(witness);
 				},
 				SpendableOutputDescriptor::DelayedPaymentOutput(descriptor) => {
-					let input_idx = psbt.unsigned_tx.input.iter().position(|i| i.previous_output == descriptor.outpoint.into_bitcoin_outpoint()).ok_or(())?;
+					let input_idx = get_input_idx(&descriptor.outpoint)?;
 					if keys_cache.is_none() || keys_cache.as_ref().unwrap().1 != descriptor.channel_keys_id {
 						keys_cache = Some((
 							self.derive_channel_keys(descriptor.channel_value_satoshis, &descriptor.channel_keys_id),
@@ -2055,7 +2056,7 @@ impl KeysManager {
 					psbt.inputs[input_idx].final_script_witness = Some(witness);
 				},
 				SpendableOutputDescriptor::StaticOutput { ref outpoint, ref output, .. } => {
-					let input_idx = psbt.unsigned_tx.input.iter().position(|i| i.previous_output == outpoint.into_bitcoin_outpoint()).ok_or(())?;
+					let input_idx = get_input_idx(outpoint)?;
 					let derivation_idx = if output.script_pubkey == self.destination_script {
 						1
 					} else {
