@@ -963,30 +963,8 @@ pub(crate) struct ChannelMonitorImpl<Signer: WriteableEcdsaChannelSigner> {
 	/// to_countersignatory_sats)
 	initial_counterparty_commitment_info: Option<(PublicKey, u32, u64, u64)>,
 
-	/// Some contains funding pixel. It will be presented only if the channels uses YUV payments
-	/// feature.
-	funding_yuv_pixel: Option<Pixel>,
-
-	// TODO(yuv): if there is no confirmation too long, we should fail the payment.
-	/// The YUV payments that are monitor is waiting for. The `SpendableOutputDescriptor` is always
-	/// [`SpendableOutputDescriptor::YuvStaticOutput`].
-	pending_yuv_payments: HashMap<Txid, Option<SpendableOutputDescriptor>>,
-
-	/// The YUV Luma for each commitment tx. It is needed to build justice tx output with correct
-	/// Pixel. We don't need Chroma here, because only monochrome pixels are currently supported,
-	/// so we can use Chroma of the funding pixel to decrease an amount of the storing data.
-	///
-	/// It is always presented if YUV Payments are used for the channel, e.g
-	/// [`funding_yuv_pixel`] is presented, so unwrap() can be used.
-	///
-	/// [`funding_yuv_pixel`]: #structfield.funding_yuv_pixel
-	counterparty_per_commitment_luma: Option<HashMap<Txid, Luma>>,
-
-	/// Holder's revokable YUV scripts so we can detect whether a holder HTLC YUV transactions have
-	/// been seen on-chain. It is some only if `broadcasted_holder_revokable_script` is some,
-	/// the `per_commitment_point` and the `revocation_key` can be taken from there to build the
-	/// descriptor.
-	broadcasted_htlc_yuv_revokable_scripts: Vec<Script>,
+	/// The first block height at which we had no remaining claimable balances.
+	balances_empty_height: Option<u32>,
 }
 
 /// Transaction outputs to watch for on-chain spends.
@@ -1212,6 +1190,7 @@ impl<Signer: WriteableEcdsaChannelSigner> Writeable for ChannelMonitorImpl<Signe
 			(15, self.counterparty_fulfilled_htlcs, required),
 			(17, self.initial_counterparty_commitment_info, option),
 			(19, self.channel_id, required),
+			(21, self.balances_empty_height, option),
 		});
 
 		Ok(())
@@ -1401,11 +1380,7 @@ impl<Signer: WriteableEcdsaChannelSigner> ChannelMonitor<Signer> {
 			best_block,
 			counterparty_node_id: Some(counterparty_node_id),
 			initial_counterparty_commitment_info: None,
-
-			funding_yuv_pixel,
-			pending_yuv_payments: HashMap::new(),
-			counterparty_per_commitment_luma,
-			broadcasted_htlc_yuv_revokable_scripts: Vec::new(),
+			balances_empty_height: None,
 		})
 	}
 
@@ -1949,6 +1924,52 @@ impl<Signer: WriteableEcdsaChannelSigner> ChannelMonitor<Signer> {
 			conf_threshold >= confirmation_height
 		});
 		spendable_outputs
+	}
+
+	/// Checks if the monitor is fully resolved. Resolved monitor is one that has claimed all of
+	/// its outputs and balances (i.e. [`Self::get_claimable_balances`] returns an empty set).
+	///
+	/// This function returns true only if [`Self::get_claimable_balances`] has been empty for at least
+	/// 2016 blocks as an additional protection against any bugs resulting in spuriously empty balance sets.
+	pub fn is_fully_resolved<L: Logger>(&self, logger: &L) -> bool {
+		let mut is_all_funds_claimed = self.get_claimable_balances().is_empty();
+		let current_height = self.current_best_block().height;
+		let mut inner = self.inner.lock().unwrap();
+
+		if is_all_funds_claimed {
+			if !inner.funding_spend_seen {
+				debug_assert!(false, "We should see funding spend by the time a monitor clears out");
+				is_all_funds_claimed = false;
+			}
+		}
+
+		match (inner.balances_empty_height, is_all_funds_claimed) {
+			(Some(balances_empty_height), true) => {
+				// Claimed all funds, check if reached the blocks threshold.
+				const BLOCKS_THRESHOLD: u32 = 4032; // ~four weeks
+				return current_height >= balances_empty_height + BLOCKS_THRESHOLD;
+			},
+			(Some(_), false) => {
+				// previously assumed we claimed all funds, but we have new funds to claim.
+				// Should not happen in practice.
+				debug_assert!(false, "Thought we were done claiming funds, but claimable_balances now has entries");
+				log_error!(logger,
+					"WARNING: LDK thought it was done claiming all the available funds in the ChannelMonitor for channel {}, but later decided it had more to claim. This is potentially an important bug in LDK, please report it at https://github.com/lightningdevkit/rust-lightning/issues/new",
+					inner.get_funding_txo().0);
+				inner.balances_empty_height = None;
+				false
+			},
+			(None, true) => {
+				// Claimed all funds but `balances_empty_height` is None. It is set to the
+				// current block height.
+				inner.balances_empty_height = Some(current_height);
+				false
+			},
+			(None, false) => {
+				// Have funds to claim.
+				false
+			},
+		}
 	}
 
 	#[cfg(test)]
@@ -5089,6 +5110,7 @@ impl<'a, 'b, ES: EntropySource, SP: SignerProvider> ReadableArgs<(&'a ES, &'b SP
 		let mut spendable_txids_confirmed = Some(Vec::new());
 		let mut counterparty_fulfilled_htlcs = Some(new_hash_map());
 		let mut initial_counterparty_commitment_info = None;
+		let mut balances_empty_height = None;
 		let mut channel_id = None;
 		read_tlv_fields!(reader, {
 			(1, funding_spend_confirmed, option),
@@ -5101,6 +5123,7 @@ impl<'a, 'b, ES: EntropySource, SP: SignerProvider> ReadableArgs<(&'a ES, &'b SP
 			(15, counterparty_fulfilled_htlcs, option),
 			(17, initial_counterparty_commitment_info, option),
 			(19, channel_id, option),
+			(21, balances_empty_height, option),
 		});
 
 		// `HolderForceClosedWithInfo` replaced `HolderForceClosed` in v0.0.122. If we have both
@@ -5179,11 +5202,7 @@ impl<'a, 'b, ES: EntropySource, SP: SignerProvider> ReadableArgs<(&'a ES, &'b SP
 			best_block,
 			counterparty_node_id,
 			initial_counterparty_commitment_info,
-
-			funding_yuv_pixel,
-			pending_yuv_payments,
-			counterparty_per_commitment_luma,
-			broadcasted_htlc_yuv_revokable_scripts,
+			balances_empty_height,
 		})))
 	}
 }
