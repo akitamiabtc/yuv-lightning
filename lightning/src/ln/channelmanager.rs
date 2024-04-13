@@ -1615,11 +1615,11 @@ where
 /// // On the event processing thread
 /// channel_manager.process_pending_events(&|event| match event {
 ///     Event::PaymentClaimable { payment_hash, purpose, .. } => match purpose {
-///         PaymentPurpose::Bolt11InvoicePayment { payment_preimage: Some(payment_preimage), .. } => {
+///         PaymentPurpose::Bolt12OfferPayment { payment_preimage: Some(payment_preimage), .. } => {
 ///             println!("Claiming payment {}", payment_hash);
 ///             channel_manager.claim_funds(payment_preimage);
 ///         },
-///         PaymentPurpose::Bolt11InvoicePayment { payment_preimage: None, .. } => {
+///         PaymentPurpose::Bolt12OfferPayment { payment_preimage: None, .. } => {
 ///             println!("Unknown payment hash: {}", payment_hash);
 ///         },
 ///         // ...
@@ -1767,12 +1767,12 @@ where
 /// // On the event processing thread
 /// channel_manager.process_pending_events(&|event| match event {
 ///     Event::PaymentClaimable { payment_hash, purpose, .. } => match purpose {
-///     	PaymentPurpose::Bolt11InvoicePayment { payment_preimage: Some(payment_preimage), .. } => {
+///     	PaymentPurpose::Bolt12RefundPayment { payment_preimage: Some(payment_preimage), .. } => {
 ///             assert_eq!(payment_hash, known_payment_hash);
 ///             println!("Claiming payment {}", payment_hash);
 ///             channel_manager.claim_funds(payment_preimage);
 ///         },
-///     	PaymentPurpose::Bolt11InvoicePayment { payment_preimage: None, .. } => {
+///     	PaymentPurpose::Bolt12RefundPayment { payment_preimage: None, .. } => {
 ///             println!("Unknown payment hash: {}", payment_hash);
 ///     	},
 ///         // ...
@@ -5636,7 +5636,7 @@ where
 								match payment_secrets.entry(payment_hash) {
 									hash_map::Entry::Vacant(_) => {
 										match claimable_htlc.onion_payload {
-											OnionPayload::Invoice { .. } => {
+											OnionPayload::Invoice { ref payment_context, .. } => {
 												let payment_data = payment_data.unwrap();
 												let (payment_preimage, min_final_cltv_expiry_delta) = match inbound_payment::verify(payment_hash, &payment_data, self.highest_seen_timestamp.load(Ordering::Acquire) as u64, &self.inbound_payment_key, &self.logger) {
 													Ok(result) => result,
@@ -5653,10 +5653,11 @@ where
 														fail_htlc!(claimable_htlc, payment_hash);
 													}
 												}
-												let purpose = events::PaymentPurpose::Bolt11InvoicePayment {
-													payment_preimage: payment_preimage.clone(),
-													payment_secret: payment_data.payment_secret,
-												};
+												let purpose = events::PaymentPurpose::from_parts(
+													payment_preimage.clone(),
+													payment_data.payment_secret,
+													payment_context.clone(),
+												);
 												check_total_value!(purpose);
 											},
 											OnionPayload::Spontaneous(preimage) => {
@@ -5666,10 +5667,13 @@ where
 										}
 									},
 									hash_map::Entry::Occupied(inbound_payment) => {
-										if let OnionPayload::Spontaneous(_) = claimable_htlc.onion_payload {
-											log_trace!(self.logger, "Failing new keysend HTLC with payment_hash {} because we already have an inbound payment with the same payment hash", &payment_hash);
-											fail_htlc!(claimable_htlc, payment_hash);
-										}
+										let payment_context = match claimable_htlc.onion_payload {
+											OnionPayload::Spontaneous(_) => {
+												log_trace!(self.logger, "Failing new keysend HTLC with payment_hash {} because we already have an inbound payment with the same payment hash", &payment_hash);
+												fail_htlc!(claimable_htlc, payment_hash);
+											},
+											OnionPayload::Invoice { ref payment_context, .. } => payment_context,
+										};
 										let payment_data = payment_data.unwrap();
 										if inbound_payment.get().payment_secret != payment_data.payment_secret {
 											log_trace!(self.logger, "Failing new HTLC with payment_hash {} as it didn't match our expected payment secret.", &payment_hash);
@@ -5679,10 +5683,11 @@ where
 												&payment_hash, payment_data.total_msat, inbound_payment.get().min_value_msat.unwrap());
 											fail_htlc!(claimable_htlc, payment_hash);
 										} else {
-											let purpose = events::PaymentPurpose::Bolt11InvoicePayment {
-												payment_preimage: inbound_payment.get().payment_preimage,
-												payment_secret: payment_data.payment_secret,
-											};
+											let purpose = events::PaymentPurpose::from_parts(
+												inbound_payment.get().payment_preimage,
+												payment_data.payment_secret,
+												payment_context.clone(),
+											);
 											let payment_claimable_generated = check_total_value!(purpose);
 											if payment_claimable_generated {
 												inbound_payment.remove_entry();
