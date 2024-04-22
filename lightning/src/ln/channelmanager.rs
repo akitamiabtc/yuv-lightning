@@ -5654,7 +5654,7 @@ where
 													}
 												}
 												let purpose = events::PaymentPurpose::from_parts(
-													payment_preimage.clone(),
+													payment_preimage,
 													payment_data.payment_secret,
 													payment_context.clone(),
 												);
