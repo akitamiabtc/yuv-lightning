@@ -16,7 +16,7 @@ use yuv_pixels::Pixel;
 
 use crate::sign::{EntropySource, NodeSigner, Recipient};
 use crate::events::{self, PaymentFailureReason};
-use crate::ln::{PaymentHash, PaymentPreimage, PaymentSecret};
+use crate::ln::types::{PaymentHash, PaymentPreimage, PaymentSecret};
 use crate::ln::channelmanager::{ChannelDetails, EventCompletionAction, HTLCSource, PaymentId};
 use crate::ln::onion_utils::{DecodedOnionFailure, HTLCFailReason};
 use crate::offers::invoice::Bolt12Invoice;
@@ -1869,7 +1869,7 @@ mod tests {
 	use core::time::Duration;
 
 	use crate::events::{Event, PathFailure, PaymentFailureReason};
-	use crate::ln::PaymentHash;
+	use crate::ln::types::PaymentHash;
 	use crate::ln::channelmanager::{PaymentId, RecipientOnionFields};
 	use crate::ln::features::{ChannelFeatures, NodeFeatures};
 	use crate::ln::msgs::{ErrorAction, LightningError};

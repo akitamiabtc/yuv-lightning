@@ -18,7 +18,7 @@ use bitcoin::secp256k1::PublicKey;
 use yuv_types::YuvTransaction;
 
 use crate::chain::channelmonitor::{ChannelMonitor, ChannelMonitorUpdate, MonitorEvent};
-use crate::ln::ChannelId;
+use crate::ln::types::ChannelId;
 use crate::sign::ecdsa::WriteableEcdsaChannelSigner;
 use crate::chain::transaction::{OutPoint, TransactionData};
 use crate::impl_writeable_tlv_based;
