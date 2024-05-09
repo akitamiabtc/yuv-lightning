@@ -560,43 +560,29 @@ use core::task;
 /// #     fn send_data(&mut self, _data: &[u8], _resume_read: bool) -> usize { 0 }
 /// #     fn disconnect_socket(&mut self) {}
 /// # }
-/// # type ChainMonitor<B, F, FE> = lightning::chain::chainmonitor::ChainMonitor<lightning::sign::InMemorySigner, Arc<F>, Arc<B>, Arc<FE>, Arc<Logger>, Arc<Store>>;
-/// # type NetworkGraph = lightning::routing::gossip::NetworkGraph<Arc<Logger>>;
-/// # type P2PGossipSync<UL> = lightning::routing::gossip::P2PGossipSync<Arc<NetworkGraph>, Arc<UL>, Arc<Logger>>;
-/// # type ChannelManager<B, F, FE> = lightning::ln::channelmanager::SimpleArcChannelManager<ChainMonitor<B, F, FE>, B, FE, Logger>;
-/// # type Scorer = RwLock<lightning::routing::scoring::ProbabilisticScorer<Arc<NetworkGraph>, Arc<Logger>>>;
-/// # type PeerManager<B, F, FE, UL> = lightning::ln::peer_handler::SimpleArcPeerManager<SocketDescriptor, ChainMonitor<B, F, FE>, B, FE, Arc<UL>, Logger>;
-/// #
-/// # struct Node<
-/// #     B: lightning::chain::chaininterface::BroadcasterInterface + Send + Sync + 'static,
-/// #     F: lightning::chain::Filter + Send + Sync + 'static,
-/// #     FE: lightning::chain::chaininterface::FeeEstimator + Send + Sync + 'static,
-/// #     UL: lightning::routing::utxo::UtxoLookup + Send + Sync + 'static,
-/// # > {
-/// #     peer_manager: Arc<PeerManager<B, F, FE, UL>>,
-/// #     event_handler: Arc<EventHandler>,
-/// #     channel_manager: Arc<ChannelManager<B, F, FE>>,
-/// #     chain_monitor: Arc<ChainMonitor<B, F, FE>>,
-/// #     gossip_sync: Arc<P2PGossipSync<UL>>,
-/// #     persister: Arc<Store>,
-/// #     logger: Arc<Logger>,
-/// #     scorer: Arc<Scorer>,
-/// # }
-/// #
-/// # async fn setup_background_processing<
-/// #     B: lightning::chain::chaininterface::BroadcasterInterface + Send + Sync + 'static,
-/// #     F: lightning::chain::Filter + Send + Sync + 'static,
-/// #     FE: lightning::chain::chaininterface::FeeEstimator + Send + Sync + 'static,
-/// #     UL: lightning::routing::utxo::UtxoLookup + Send + Sync + 'static,
-/// # >(node: Node<B, F, FE, UL>) {
-///	let background_persister = Arc::clone(&node.persister);
-///	let background_event_handler = Arc::clone(&node.event_handler);
-///	let background_chain_mon = Arc::clone(&node.chain_monitor);
-///	let background_chan_man = Arc::clone(&node.channel_manager);
-///	let background_gossip_sync = GossipSync::p2p(Arc::clone(&node.gossip_sync));
-///	let background_peer_man = Arc::clone(&node.peer_manager);
-///	let background_logger = Arc::clone(&node.logger);
-///	let background_scorer = Arc::clone(&node.scorer);
+/// # type MyBroadcaster = dyn lightning::chain::chaininterface::BroadcasterInterface + Send + Sync;
+/// # type MyYuvBroadcaster = dyn lightning::chain::chaininterface::YuvBroadcaster + Send + Sync;
+/// # type MyFeeEstimator = dyn lightning::chain::chaininterface::FeeEstimator + Send + Sync;
+/// # type MyNodeSigner = dyn lightning::sign::NodeSigner + Send + Sync;
+/// # type MyUtxoLookup = dyn lightning::routing::utxo::UtxoLookup + Send + Sync;
+/// # type MyFilter = dyn lightning::chain::Filter + Send + Sync;
+/// # type MyLogger = dyn lightning::util::logger::Logger + Send + Sync;
+/// # type MyChainMonitor = lightning::chain::chainmonitor::ChainMonitor<lightning::sign::InMemorySigner, Arc<MyFilter>, Arc<MyBroadcaster>, Arc<MyYuvBroadcaster>, Arc<MyFeeEstimator>, Arc<MyLogger>, Arc<MyStore>>;
+/// # type MyPeerManager = lightning::ln::peer_handler::SimpleArcPeerManager<MySocketDescriptor, MyChainMonitor, MyBroadcaster, MyYuvBroadcaster, MyFeeEstimator, Arc<MyUtxoLookup>, MyLogger>;
+/// # type MyNetworkGraph = lightning::routing::gossip::NetworkGraph<Arc<MyLogger>>;
+/// # type MyGossipSync = lightning::routing::gossip::P2PGossipSync<Arc<MyNetworkGraph>, Arc<MyUtxoLookup>, Arc<MyLogger>>;
+/// # type MyChannelManager = lightning::ln::channelmanager::SimpleArcChannelManager<MyChainMonitor, MyBroadcaster, MyYuvBroadcaster, MyFeeEstimator, MyLogger>;
+/// # type MyScorer = RwLock<lightning::routing::scoring::ProbabilisticScorer<Arc<MyNetworkGraph>, Arc<MyLogger>>>;
+///
+/// # async fn setup_background_processing(my_persister: Arc<MyStore>, my_event_handler: Arc<MyEventHandler>, my_chain_monitor: Arc<MyChainMonitor>, my_channel_manager: Arc<MyChannelManager>, my_gossip_sync: Arc<MyGossipSync>, my_logger: Arc<MyLogger>, my_scorer: Arc<MyScorer>, my_peer_manager: Arc<MyPeerManager>) {
+///	let background_persister = Arc::clone(&my_persister);
+///	let background_event_handler = Arc::clone(&my_event_handler);
+///	let background_chain_mon = Arc::clone(&my_chain_monitor);
+///	let background_chan_man = Arc::clone(&my_channel_manager);
+///	let background_gossip_sync = GossipSync::p2p(Arc::clone(&my_gossip_sync));
+///	let background_peer_man = Arc::clone(&my_peer_manager);
+///	let background_logger = Arc::clone(&my_logger);
+///	let background_scorer = Arc::clone(&my_scorer);
 ///
 ///	// Setup the sleeper.
 ///	let (stop_sender, stop_receiver) = tokio::sync::watch::channel(());
@@ -642,6 +628,10 @@ pub async fn process_events_async<
 	UL: 'static + Deref + Send + Sync,
 	CF: 'static + Deref + Send + Sync,
 	T: 'static + Deref + Send + Sync,
+	YT: 'static + Deref + Send + Sync,
+	ES: 'static + Deref + Send + Sync,
+	NS: 'static + Deref + Send + Sync,
+	SP: 'static + Deref + Send + Sync,
 	F: 'static + Deref + Send + Sync,
 	G: 'static + Deref<Target = NetworkGraph<L>> + Send + Sync,
 	L: 'static + Deref + Send + Sync,
@@ -649,8 +639,8 @@ pub async fn process_events_async<
 	EventHandlerFuture: core::future::Future<Output = ()>,
 	EventHandler: Fn(Event) -> EventHandlerFuture,
 	PS: 'static + Deref + Send,
-	M: 'static + Deref<Target = ChainMonitor<<CM::Target as AChannelManager>::Signer, CF, T, F, L, P>> + Send + Sync,
-	CM: 'static + Deref + Send + Sync,
+	M: 'static + Deref<Target = ChainMonitor<<SP::Target as SignerProvider>::Signer, CF, T, YT, F, L, P>> + Send + Sync,
+	CM: 'static + Deref<Target = ChannelManager<CW, T, YT, ES, NS, SP, F, R, L>> + Send + Sync,
 	PGS: 'static + Deref<Target = P2PGossipSync<G, UL, L>> + Send + Sync,
 	RGS: 'static + Deref<Target = RapidGossipSync<G, L>> + Send,
 	PM: 'static + Deref + Send + Sync,
@@ -668,12 +658,14 @@ where
 	UL::Target: 'static + UtxoLookup,
 	CF::Target: 'static + chain::Filter,
 	T::Target: 'static + BroadcasterInterface,
+	YT::Target: 'static + YuvBroadcaster,
+	ES::Target: 'static + EntropySource,
+	NS::Target: 'static + NodeSigner,
+	SP::Target: 'static + SignerProvider,
 	F::Target: 'static + FeeEstimator,
 	L::Target: 'static + Logger,
-	P::Target: 'static + Persist<<CM::Target as AChannelManager>::Signer>,
-	PS::Target: 'static + Persister<'a, CM, L, SC>,
-	CM::Target: AChannelManager + Send + Sync,
-	PM::Target: APeerManager + Send + Sync,
+	P::Target: 'static + Persist<<SP::Target as SignerProvider>::Signer>,
+	PS::Target: 'static + Persister<'a, CW, T, YT, ES, NS, SP, F, R, L, SC>,
 {
 	let mut should_break = false;
 	let async_event_handler = |event| {
@@ -799,14 +791,18 @@ impl BackgroundProcessor {
 		UL: 'static + Deref + Send + Sync,
 		CF: 'static + Deref + Send + Sync,
 		T: 'static + Deref + Send + Sync,
+		YT: 'static + Deref + Send + Sync,
+		ES: 'static + Deref + Send + Sync,
+		NS: 'static + Deref + Send + Sync,
+		SP: 'static + Deref + Send + Sync,
 		F: 'static + Deref + Send + Sync,
 		G: 'static + Deref<Target = NetworkGraph<L>> + Send + Sync,
 		L: 'static + Deref + Send + Sync,
 		P: 'static + Deref + Send + Sync,
 		EH: 'static + EventHandler + Send,
 		PS: 'static + Deref + Send,
-		M: 'static + Deref<Target = ChainMonitor<<CM::Target as AChannelManager>::Signer, CF, T, F, L, P>> + Send + Sync,
-		CM: 'static + Deref + Send + Sync,
+		M: 'static + Deref<Target = ChainMonitor<<SP::Target as SignerProvider>::Signer, CF, T, YT, F, L, P>> + Send + Sync,
+		CM: 'static + Deref<Target = ChannelManager<CW, T, YT, ES, NS, SP, F, R, L>> + Send + Sync,
 		PGS: 'static + Deref<Target = P2PGossipSync<G, UL, L>> + Send + Sync,
 		RGS: 'static + Deref<Target = RapidGossipSync<G, L>> + Send,
 		PM: 'static + Deref + Send + Sync,
@@ -820,12 +816,14 @@ impl BackgroundProcessor {
 		UL::Target: 'static + UtxoLookup,
 		CF::Target: 'static + chain::Filter,
 		T::Target: 'static + BroadcasterInterface,
+		YT::Target: 'static + YuvBroadcaster,
+		ES::Target: 'static + EntropySource,
+		NS::Target: 'static + NodeSigner,
+		SP::Target: 'static + SignerProvider,
 		F::Target: 'static + FeeEstimator,
 		L::Target: 'static + Logger,
-		P::Target: 'static + Persist<<CM::Target as AChannelManager>::Signer>,
-		PS::Target: 'static + Persister<'a, CM, L, SC>,
-		CM::Target: AChannelManager + Send + Sync,
-		PM::Target: APeerManager + Send + Sync,
+		P::Target: 'static + Persist<<SP::Target as SignerProvider>::Signer>,
+		PS::Target: 'static + Persister<'a, CW, T, YT, ES, NS, SP, F, R, L, SC>,
 	{
 		let stop_thread = Arc::new(AtomicBool::new(false));
 		let stop_thread_clone = stop_thread.clone();
@@ -1289,13 +1287,10 @@ mod tests {
 			let kv_store = Arc::new(FilesystemStore::new(format!("{}_persister_{}", &persist_dir, i).into()));
 			let now = Duration::from_secs(genesis_block.header.time as u64);
 			let keys_manager = Arc::new(KeysManager::new(&seed, now.as_secs(), now.subsec_nanos()));
-			let chain_monitor = Arc::new(chainmonitor::ChainMonitor::new(Some(chain_source.clone()), tx_broadcaster.clone(), logger.clone(), fee_estimator.clone(), kv_store.clone()));
+			let chain_monitor = Arc::new(chainmonitor::ChainMonitor::new(Some(chain_source.clone()), tx_broadcaster.clone(), yuv_tx_broadcaster.clone(), logger.clone(), fee_estimator.clone(), kv_store.clone()));
 			let best_block = BestBlock::from_network(network);
 			let params = ChainParameters { network, best_block };
-			let manager = Arc::new(ChannelManager::new(fee_estimator.clone(), chain_monitor.clone(), tx_broadcaster.clone(), router.clone(), logger.clone(), keys_manager.clone(), keys_manager.clone(), keys_manager.clone(), UserConfig::default(), params, genesis_block.header.time));
-			let wallet = Arc::new(TestWallet {});
-			let sweeper = Arc::new(OutputSweeper::new(best_block, Arc::clone(&tx_broadcaster), Arc::clone(&fee_estimator),
-				None::<Arc<dyn Filter + Sync + Send>>, Arc::clone(&keys_manager), wallet, Arc::clone(&kv_store), Arc::clone(&logger)));
+			let manager = Arc::new(ChannelManager::new(fee_estimator.clone(), chain_monitor.clone(), tx_broadcaster.clone(), yuv_tx_broadcaster.clone(), router.clone(), logger.clone(), keys_manager.clone(), keys_manager.clone(), keys_manager.clone(), UserConfig::default(), params, genesis_block.header.time));
 			let p2p_gossip_sync = Arc::new(P2PGossipSync::new(network_graph.clone(), Some(chain_source.clone()), logger.clone()));
 			let rapid_gossip_sync = Arc::new(RapidGossipSync::new(network_graph.clone(), logger.clone()));
 			let msg_handler = MessageHandler {

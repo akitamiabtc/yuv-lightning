@@ -10,10 +10,10 @@ use core::str::FromStr;
 
 use bech32::{u5, FromBase32};
 
-use bitcoin::{PubkeyHash, ScriptHash};
-use bitcoin::address::WitnessVersion;
-use bitcoin::hashes::Hash;
-use bitcoin::hashes::sha256;
+use bitcoin::{Address, Network, PubkeyHash, ScriptHash};
+use bitcoin::util::address::{Payload, WitnessVersion};
+use bitcoin_hashes::Hash;
+use bitcoin_hashes::sha256;
 use crate::prelude::*;
 use lightning::ln::types::PaymentSecret;
 use lightning::routing::gossip::RoutingFees;
@@ -849,8 +849,12 @@ mod test {
 	use crate::de::{Bolt11ParseError, parse_pixel_from_hrp};
 	use secp256k1::PublicKey;
 	use bech32::u5;
-	use bitcoin::hashes::sha256;
-	use std::str::FromStr;
+	use bitcoin::Network;
+	use bitcoin_hashes::hex::FromHex;
+	use bitcoin_hashes::sha256;
+	use yuv_pixels::Pixel;
+	use lightning::ln::functional_test_utils::new_test_pixel;
+	use crate::de::hrp_sm::parse_hrp;
 
 	const CHARSET_REV: [i8; 128] = [
 		-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,

@@ -24,6 +24,8 @@ use crate::util::test_utils;
 use crate::util::errors::APIError;
 use crate::util::ser::{Writeable, ReadableArgs};
 use crate::util::config::UserConfig;
+use crate::util::string::UntrustedString;
+use crate::chain::chaininterface::YuvBroadcaster;
 
 use bitcoin::hash_types::BlockHash;
 
@@ -413,8 +415,8 @@ fn test_manager_serialize_deserialize_inconsistent_monitor() {
 	}
 
 	let mut nodes_0_read = &nodes_0_serialized[..];
-	if let Err(msgs::DecodeError::DangerousValue) =
-		<(BlockHash, ChannelManager<&test_utils::TestChainMonitor, &test_utils::TestBroadcaster, &test_utils::TestKeysInterface, &test_utils::TestKeysInterface, &test_utils::TestKeysInterface, &test_utils::TestFeeEstimator, &test_utils::TestRouter, &test_utils::TestLogger>)>::read(&mut nodes_0_read, ChannelManagerReadArgs {
+	if let Err(msgs::DecodeError::InvalidValue) =
+		<(BlockHash, ChannelManager<&test_utils::TestChainMonitor, &test_utils::TestBroadcaster, &test_utils::TestYuvBroadcaster, &test_utils::TestKeysInterface, &test_utils::TestKeysInterface, &test_utils::TestKeysInterface, &test_utils::TestFeeEstimator, &test_utils::TestRouter, &test_utils::TestLogger>)>::read(&mut nodes_0_read, ChannelManagerReadArgs {
 		default_config: UserConfig::default(),
 		entropy_source: keys_manager,
 		node_signer: keys_manager,
@@ -423,6 +425,7 @@ fn test_manager_serialize_deserialize_inconsistent_monitor() {
 		router: &nodes[0].router,
 		chain_monitor: nodes[0].chain_monitor,
 		tx_broadcaster: nodes[0].tx_broadcaster,
+		yuv_tx_broadcaster: nodes[0].yuv_tx_broadcaster,
 		logger: &logger,
 		channel_monitors: node_0_stale_monitors.iter_mut().map(|monitor| { (monitor.get_funding_txo().0, monitor) }).collect(),
 	}) { } else {
@@ -440,6 +443,7 @@ fn test_manager_serialize_deserialize_inconsistent_monitor() {
 		router: nodes[0].router,
 		chain_monitor: nodes[0].chain_monitor,
 		tx_broadcaster: nodes[0].tx_broadcaster,
+		yuv_tx_broadcaster: nodes[0].yuv_tx_broadcaster,
 		logger: &logger,
 		channel_monitors: node_0_monitors.iter_mut().map(|monitor| { (monitor.get_funding_txo().0, monitor) }).collect(),
 	}).unwrap();

@@ -212,11 +212,8 @@ pub struct ClaimedHTLC {
 	pub cltv_expiry: u32,
 	/// The amount (in msats) of this part of an MPP.
 	pub value_msat: u64,
-	/// The extra fee our counterparty skimmed off the top of this HTLC, if any.
-	///
-	/// This value will always be 0 for [`ClaimedHTLC`]s serialized with LDK versions prior to
-	/// 0.0.119.
-	pub counterparty_skimmed_fee_msat: u64,
+	/// Optional YUV pixel amount that is received with that payemnt.
+	pub yuv_amount: Option<u128>,
 }
 impl_writeable_tlv_based!(ClaimedHTLC, {
 	(0, channel_id, required),
@@ -1236,7 +1233,7 @@ impl Writeable for Event {
 					(8, payment_preimage, option),
 					(9, onion_fields, option),
 					(10, skimmed_fee_opt, option),
-					(11, payment_context, option),
+					(11, yuv_amount, option),
 				});
 			},
 			&Event::PaymentSent { ref payment_id, ref payment_preimage, ref payment_hash, ref fee_paid_msat } => {
@@ -1299,9 +1296,8 @@ impl Writeable for Event {
 				});
 			}
 			&Event::PaymentForwarded {
-				prev_channel_id, next_channel_id, prev_user_channel_id, next_user_channel_id,
-				total_fee_earned_msat, skimmed_fee_msat, claim_from_onchain_tx,
-				outbound_amount_forwarded_msat,
+				fee_earned_msat, prev_channel_id, claim_from_onchain_tx,
+				next_channel_id, outbound_amount_forwarded_msat, outbound_amount_forwarded_yuv
 			} => {
 				7u8.write(writer)?;
 				write_tlv_fields!(writer, {
@@ -1310,9 +1306,7 @@ impl Writeable for Event {
 					(2, claim_from_onchain_tx, required),
 					(3, next_channel_id, option),
 					(5, outbound_amount_forwarded_msat, option),
-					(7, skimmed_fee_msat, option),
-					(9, prev_user_channel_id, option),
-					(11, next_user_channel_id, option),
+					(7, outbound_amount_forwarded_yuv, option),
 				});
 			},
 			&Event::ChannelClosed { ref channel_id, ref user_channel_id, ref reason,
@@ -1443,9 +1437,18 @@ impl Writeable for Event {
 					(0, payment_id, required),
 				})
 			},
-			&Event::ConnectionNeeded { .. } => {
+			&Event::UpdateBalanceApplied(ref channel_id) => {
 				35u8.write(writer)?;
-				// Never write ConnectionNeeded events as buffered onion messages aren't serialized.
+				write_tlv_fields!(writer, {
+					(0, channel_id, required),
+				})
+			},
+			&Event::NewUpdateBalanceRequest { ref channel_id, ref request } => {
+				37u8.write(writer)?;
+				write_tlv_fields!(writer, {
+					(0, channel_id, required),
+					(2, request, required),
+				})
 			},
 			// Note that, going forward, all new events must only write data inside of
 			// `write_tlv_fields`. Versions 0.0.101+ will ignore odd-numbered events that write
@@ -1472,7 +1475,7 @@ impl MaybeReadable for Event {
 					let mut claim_deadline = None;
 					let mut via_user_channel_id = None;
 					let mut onion_fields = None;
-					let mut payment_context = None;
+					let mut yuv_amount = None;
 					read_tlv_fields!(reader, {
 						(0, payment_hash, required),
 						(1, receiver_node_id, option),
@@ -1485,7 +1488,7 @@ impl MaybeReadable for Event {
 						(8, payment_preimage, option),
 						(9, onion_fields, option),
 						(10, counterparty_skimmed_fee_msat_opt, option),
-						(11, payment_context, option),
+						(11, yuv_amount, option),
 					});
 					let purpose = match payment_secret {
 						Some(secret) => PaymentPurpose::from_parts(payment_preimage, secret, payment_context),
@@ -1622,20 +1625,18 @@ impl MaybeReadable for Event {
 					let mut skimmed_fee_msat = None;
 					let mut claim_from_onchain_tx = false;
 					let mut outbound_amount_forwarded_msat = None;
+					let mut outbound_amount_forwarded_yuv = None;
 					read_tlv_fields!(reader, {
 						(0, total_fee_earned_msat, option),
 						(1, prev_channel_id, option),
 						(2, claim_from_onchain_tx, required),
 						(3, next_channel_id, option),
 						(5, outbound_amount_forwarded_msat, option),
-						(7, skimmed_fee_msat, option),
-						(9, prev_user_channel_id, option),
-						(11, next_user_channel_id, option),
+						(7, outbound_amount_forwarded_yuv, option),
 					});
 					Ok(Some(Event::PaymentForwarded {
-						prev_channel_id, next_channel_id, prev_user_channel_id,
-						next_user_channel_id, total_fee_earned_msat, skimmed_fee_msat,
-						claim_from_onchain_tx, outbound_amount_forwarded_msat,
+						fee_earned_msat, prev_channel_id, claim_from_onchain_tx, next_channel_id,
+						outbound_amount_forwarded_msat, outbound_amount_forwarded_yuv
 					}))
 				};
 				f()
@@ -1864,8 +1865,25 @@ impl MaybeReadable for Event {
 				};
 				f()
 			},
-			// Note that we do not write a length-prefixed TLV for ConnectionNeeded events.
-			35u8 => Ok(None),
+			35u8 => {
+				let mut channel_id = ChannelId::new_zero();
+				read_tlv_fields!(reader, {
+					(0, channel_id, required),
+				});
+				Ok(Some(Event::UpdateBalanceApplied(channel_id)))
+			},
+			37u8 => {
+				let mut channel_id = ChannelId::new_zero();
+				let mut request = NewUpdateBalanceRequest::Revoke;
+				read_tlv_fields!(reader, {
+					(0, channel_id, required),
+					(2, request, required),
+				});
+				Ok(Some(Event::NewUpdateBalanceRequest {
+					channel_id,
+					request,
+				}))
+			},
 			// Versions prior to 0.0.100 did not ignore odd types, instead returning InvalidValue.
 			// Version 0.0.100 failed to properly ignore odd types, possibly resulting in corrupt
 			// reads.

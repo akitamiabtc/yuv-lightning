@@ -9,7 +9,11 @@ use bitcoin::blockdata::constants::ChainHash;
 use bitcoin::blockdata::transaction::{TxOut, OutPoint};
 use bitcoin::hash_types::BlockHash;
 
-use lightning::ln::peer_handler::APeerManager;
+use bitcoin::Txid;
+use lightning::sign::NodeSigner;
+
+use lightning::ln::peer_handler::{CustomMessageHandler, PeerManager, SocketDescriptor};
+use lightning::ln::msgs::{ChannelMessageHandler, OnionMessageHandler};
 
 use lightning::routing::gossip::{NetworkGraph, P2PGossipSync};
 use lightning::routing::utxo::{UtxoEntry, UtxoFuture, UtxoLookup, UtxoLookupError, UtxoLookupYuvError, UtxoResult};
@@ -146,9 +150,20 @@ impl<
 pub struct GossipVerifier<S: FutureSpawner,
 	Blocks: Deref + Send + Sync + 'static + Clone,
 	L: Deref + Send + Sync + 'static,
+	Descriptor: SocketDescriptor + Send + Sync + 'static,
+	CM: Deref + Send + Sync + 'static,
+	OM: Deref + Send + Sync + 'static,
+	CMH: Deref + Send + Sync + 'static,
+	NS: Deref + Send + Sync + 'static,
+	YuvSource: Deref + Send + Sync + 'static + Clone,
 > where
 	Blocks::Target: UtxoSource,
 	L::Target: Logger,
+	CM::Target: ChannelMessageHandler,
+	OM::Target: OnionMessageHandler,
+	CMH::Target: CustomMessageHandler,
+	NS::Target: NodeSigner,
+	YuvSource::Target: YuvTransactionSource,
 {
 	source: Blocks,
 	peer_manager_wake: Arc<dyn Fn() + Send + Sync>,
@@ -163,11 +178,22 @@ pub struct GossipVerifier<S: FutureSpawner,
 const BLOCK_CACHE_SIZE: usize = 5;
 
 impl<S: FutureSpawner,
-	Blocks: Deref + Send + Sync + Clone,
-	L: Deref + Send + Sync,
-> GossipVerifier<S, Blocks, L> where
+	Blocks: Deref + Send + Sync + Clone + 'static,
+	L: Deref + Send + Sync + 'static,
+	Descriptor: SocketDescriptor + Send + Sync + 'static,
+	CM: Deref + Send + Sync + 'static,
+	OM: Deref + Send + Sync + 'static,
+	CMH: Deref + Send + Sync + 'static,
+	NS: Deref + Send + Sync + 'static,
+	YS: Deref + Send + Sync + Clone + 'static,
+> GossipVerifier<S, Blocks, L, Descriptor, CM, OM, CMH, NS, YS> where
 	Blocks::Target: UtxoSource,
 	L::Target: Logger,
+	CM::Target: ChannelMessageHandler,
+	OM::Target: OnionMessageHandler,
+	CMH::Target: CustomMessageHandler,
+	NS::Target: NodeSigner,
+	YS::Target: YuvTransactionSource,
 {
 	/// Constructs a new [`GossipVerifier`].
 	///
@@ -341,9 +367,20 @@ impl<S: FutureSpawner,
 impl<S: FutureSpawner,
 	Blocks: Deref + Send + Sync + Clone,
 	L: Deref + Send + Sync,
-> Deref for GossipVerifier<S, Blocks, L> where
+	Descriptor: SocketDescriptor + Send + Sync,
+	CM: Deref + Send + Sync,
+	OM: Deref + Send + Sync,
+	CMH: Deref + Send + Sync,
+	NS: Deref + Send + Sync,
+	YS: Deref + Send + Sync + Clone,
+> Deref for GossipVerifier<S, Blocks, L, Descriptor, CM, OM, CMH, NS, YS> where
 	Blocks::Target: UtxoSource,
 	L::Target: Logger,
+	CM::Target: ChannelMessageHandler,
+	OM::Target: OnionMessageHandler,
+	CMH::Target: CustomMessageHandler,
+	NS::Target: NodeSigner,
+	YS::Target: YuvTransactionSource,
 {
 	type Target = Self;
 	fn deref(&self) -> &Self { self }
@@ -353,9 +390,20 @@ impl<S: FutureSpawner,
 impl<S: FutureSpawner,
 	Blocks: Deref + Send + Sync + Clone,
 	L: Deref + Send + Sync,
-> UtxoLookup for GossipVerifier<S, Blocks, L> where
+	Descriptor: SocketDescriptor + Send + Sync,
+	CM: Deref + Send + Sync,
+	OM: Deref + Send + Sync,
+	CMH: Deref + Send + Sync,
+	NS: Deref + Send + Sync,
+	YS: Deref + Send + Sync + Clone,
+> UtxoLookup for GossipVerifier<S, Blocks, L, Descriptor, CM, OM, CMH, NS, YS> where
 	Blocks::Target: UtxoSource,
 	L::Target: Logger,
+	CM::Target: ChannelMessageHandler,
+	OM::Target: OnionMessageHandler,
+	CMH::Target: CustomMessageHandler,
+	NS::Target: NodeSigner,
+	YS::Target: YuvTransactionSource,
 {
 	fn get_utxo(&self, _chain_hash: &ChainHash, short_channel_id: u64) -> UtxoResult {
 		let res = UtxoFuture::new();

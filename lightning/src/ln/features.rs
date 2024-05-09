@@ -66,8 +66,12 @@
 //!      for more info).
 //! - `Keysend` - send funds to a node without an invoice
 //!     (see the [`Keysend` feature assignment proposal](https://github.com/lightning/bolts/issues/605#issuecomment-606679798) for more information).
-//! - `Trampoline` - supports receiving and forwarding Trampoline payments
-//!     (see the [`Trampoline` feature proposal](https://github.com/lightning/bolts/pull/836) for more information).
+//! - `AnchorsZeroFeeHtlcTx` - requires/supports that commitment transactions include anchor outputs
+//!     and HTLC transactions are pre-signed with zero fee (see
+//!     [BOLT-3](https://github.com/lightning/bolts/blob/master/03-transactions.md) for more
+//!     information).
+//! - `YuvPayments` - requires/supports that a node can receive YUV payments (see
+//!    // TODO: update link when it will appear ).
 //!
 //! LDK knows about the following features, but does not support them:
 //! - `AnchorsNonzeroFeeHtlcTx` - the initial version of anchor outputs, which was later found to be
@@ -158,7 +162,7 @@ mod sealed {
 		// Byte 6
 		ZeroConf,
 		// Byte 7
-		Trampoline,
+		YuvPayments,
 	]);
 	define_context!(NodeContext, [
 		// Byte 0
@@ -448,9 +452,10 @@ mod sealed {
 	define_feature!(55, Keysend, [NodeContext],
 		"Feature flags for keysend payments.", set_keysend_optional, set_keysend_required,
 		supports_keysend, requires_keysend);
-	define_feature!(57, Trampoline, [InitContext, NodeContext, Bolt11InvoiceContext],
-		"Feature flags for Trampoline routing.", set_trampoline_routing_optional, set_trampoline_routing_required,
-		supports_trampoline_routing, requires_trampoline_routing);
+	define_feature!(57, YuvPayments, [InitContext, ChannelContext],
+		"Feature flags for YUV payments.", set_yuv_payments_optional, set_yuv_payments_required,
+		supports_yuv_payments, requires_yuv_payments);
+
 	// Note: update the module-level docs when a new feature bit is added!
 
 	#[cfg(test)]

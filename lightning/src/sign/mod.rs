@@ -19,9 +19,9 @@ use bitcoin::blockdata::script::{Builder, Script, ScriptBuf};
 use bitcoin::blockdata::transaction::{Transaction, TxIn, TxOut};
 use bitcoin::ecdsa::Signature as EcdsaSignature;
 use bitcoin::network::constants::Network;
-use bitcoin::psbt::PartiallySignedTransaction;
-use bitcoin::sighash;
-use bitcoin::sighash::EcdsaSighashType;
+use bitcoin::psbt::{Input, PartiallySignedTransaction};
+use bitcoin::util::bip32::{ExtendedPrivKey, ExtendedPubKey, ChildNumber};
+use bitcoin::util::sighash;
 
 use bitcoin::bech32::u5;
 use bitcoin::hash_types::WPubkeyHash;
@@ -37,21 +37,14 @@ use bitcoin::secp256k1::All;
 use bitcoin::secp256k1::{KeyPair, PublicKey, Scalar, Secp256k1, SecretKey, Signing};
 use bitcoin::{secp256k1, Sequence, Txid, Witness};
 
+use crate::util::transaction_utils::{self, maybe_add_yuv_change_output};
+use crate::util::crypto::{hkdf_extract_expand_twice, sign, sign_with_aux_rand};
+use crate::util::ser::{Writeable, Writer, Readable, ReadableArgs};
 use crate::chain::transaction::OutPoint;
-use crate::crypto::utils::{hkdf_extract_expand_twice, sign, sign_with_aux_rand};
-use crate::ln::chan_utils;
-use crate::ln::chan_utils::{
-	get_revokeable_redeemscript, make_funding_redeemscript, ChannelPublicKeys,
-	ChannelTransactionParameters, ClosingTransaction, CommitmentTransaction,
-	HTLCOutputInCommitment, HolderCommitmentTransaction,
-};
-use crate::ln::channel::ANCHOR_OUTPUT_VALUE_SATOSHI;
-use crate::ln::channel_keys::{
-	add_public_key_tweak, DelayedPaymentBasepoint, DelayedPaymentKey, HtlcBasepoint, HtlcKey,
-	RevocationBasepoint, RevocationKey,
-};
-#[cfg(taproot)]
-use crate::ln::msgs::PartialSignatureWithNonce;
+use crate::events::bump_transaction::HTLCDescriptor;
+use crate::ln::channel::{ANCHOR_OUTPUT_VALUE_SATOSHI, MAX_STD_OUTPUT_DUST_LIMIT_SATOSHIS};
+use crate::ln::{chan_utils, PaymentPreimage};
+use crate::ln::chan_utils::{HTLCOutputInCommitment, make_funding_redeemscript, ChannelPublicKeys, HolderCommitmentTransaction, ChannelTransactionParameters, CommitmentTransaction, ClosingTransaction};
 use crate::ln::msgs::{UnsignedChannelAnnouncement, UnsignedGossipMessage};
 use crate::ln::script::ShutdownScript;
 use crate::ln::types::PaymentPreimage;
@@ -60,7 +53,16 @@ use crate::offers::invoice_request::UnsignedInvoiceRequest;
 use crate::util::ser::{Readable, ReadableArgs, Writeable, Writer};
 use crate::util::transaction_utils;
 
-use crate::crypto::chacha20::ChaCha20;
+use crate::prelude::*;
+use core::convert::TryInto;
+use core::ops::Deref;
+use core::sync::atomic::{AtomicUsize, Ordering};
+use alloc::collections::BTreeMap;
+use core::fmt;
+use core::fmt::{Display, Formatter};
+use bitcoin::PubkeyHash;
+use yuv_pixels::{Chroma, Pixel, PixelProof, SigPixelProof, Tweakable};
+use yuv_types::{YuvTransaction, YuvTxType};
 use crate::io::{self, Error};
 use crate::ln::features::ChannelTypeFeatures;
 use crate::ln::msgs::{DecodeError, MAX_VALUE_MSAT};
@@ -405,79 +407,11 @@ impl SpendableOutputDescriptor {
 	///
 	/// This is not exported to bindings users as there is no standard serialization for an input.
 	/// See [`Self::create_spendable_outputs_psbt`] instead.
-	///
-	/// The proprietary field is used to store add tweak for the signing key of this transaction.
-	/// See the [`DelayedPaymentBasepoint::derive_add_tweak`] docs for more info on add tweak and how to use it.
-	///
-	/// To get the proprietary field use:
-	/// ```
-	/// use bitcoin::psbt::{PartiallySignedTransaction};
-	/// use bitcoin::hashes::hex::FromHex;
-	///
-	/// # let s = "70736274ff0100520200000001dee978529ab3e61a2987bea5183713d0e6d5ceb5ac81100fdb54a1a2\
-	///	# 		 69cef505000000000090000000011f26000000000000160014abb3ab63280d4ccc5c11d6b50fd427a8\
-	///	# 		 e19d6470000000000001012b10270000000000002200200afe4736760d814a2651bae63b572d935d9a\
-	/// # 		 b74a1a16c01774e341a32afa763601054d63210394a27a700617f5b7aee72bd4f8076b5770a582b7fb\
-	///	# 		 d1d4ee2ea3802cd3cfbe2067029000b27521034629b1c8fdebfaeb58a74cd181f485e2c462e594cb30\
-	///	# 		 34dee655875f69f6c7c968ac20fc144c444b5f7370656e6461626c655f6f7574707574006164645f74\
-	///	# 		 7765616b20a86534f38ad61dc580ef41c3886204adf0911b81619c1ad7a2f5b5de39a2ba600000";
-	/// # let psbt = PartiallySignedTransaction::deserialize(<Vec<u8> as FromHex>::from_hex(s).unwrap().as_slice()).unwrap();
-	/// let key = bitcoin::psbt::raw::ProprietaryKey {
-	/// 	prefix: "LDK_spendable_output".as_bytes().to_vec(),
-	/// 	subtype: 0,
-	/// 	key: "add_tweak".as_bytes().to_vec(),
-	/// };
-	/// let value = psbt
-	/// 	.inputs
-	/// 	.first()
-	/// 	.expect("Unable to get add tweak as there are no inputs")
-	/// 	.proprietary
-	/// 	.get(&key)
-	/// 	.map(|x| x.to_owned());
-	/// ```
-	pub fn to_psbt_input<T: secp256k1::Signing>(
-		&self, secp_ctx: &Secp256k1<T>,
-	) -> bitcoin::psbt::Input {
+	pub fn to_psbt_input(&self) -> Input {
 		match self {
 			SpendableOutputDescriptor::StaticOutput { output, .. } => {
 				// Is a standard P2WPKH, no need for witness script
-				bitcoin::psbt::Input { witness_utxo: Some(output.clone()), ..Default::default() }
-			},
-			SpendableOutputDescriptor::DelayedPaymentOutput(DelayedPaymentOutputDescriptor {
-				channel_transaction_parameters,
-				per_commitment_point,
-				revocation_pubkey,
-				to_self_delay,
-				output,
-				..
-			}) => {
-				let delayed_payment_basepoint = channel_transaction_parameters
-					.as_ref()
-					.map(|params| params.holder_pubkeys.delayed_payment_basepoint);
-
-				let (witness_script, add_tweak) =
-					if let Some(basepoint) = delayed_payment_basepoint.as_ref() {
-						// Required to derive signing key: privkey = basepoint_secret + SHA256(per_commitment_point || basepoint)
-						let add_tweak = basepoint.derive_add_tweak(&per_commitment_point);
-						let payment_key = DelayedPaymentKey(add_public_key_tweak(
-							secp_ctx,
-							&basepoint.to_public_key(),
-							&add_tweak,
-						));
-
-						(
-							Some(get_revokeable_redeemscript(
-								&revocation_pubkey,
-								*to_self_delay,
-								&payment_key,
-							)),
-							Some(add_tweak),
-						)
-					} else {
-						(None, None)
-					};
-
-				bitcoin::psbt::Input {
+				Input {
 					witness_utxo: Some(output.clone()),
 					witness_script,
 					proprietary: add_tweak
@@ -499,10 +433,39 @@ impl SpendableOutputDescriptor {
 					..Default::default()
 				}
 			},
-			SpendableOutputDescriptor::StaticPaymentOutput(descriptor) => bitcoin::psbt::Input {
-				witness_utxo: Some(descriptor.output.clone()),
-				witness_script: descriptor.witness_script(),
-				..Default::default()
+			SpendableOutputDescriptor::YuvStaticOutput(descriptor) => {
+				Input {
+					witness_utxo: Some(descriptor.output.clone()),
+					..Default::default()
+				}
+			},
+			SpendableOutputDescriptor::DelayedPaymentOutput(descriptor) => {
+				// TODO we could add the witness script as well
+				Input {
+					witness_utxo: Some(descriptor.output.clone()),
+					..Default::default()
+				}
+			},
+			SpendableOutputDescriptor::StaticPaymentOutput(descriptor) => {
+				// TODO we could add the witness script as well
+				Input {
+					witness_utxo: Some(descriptor.output.clone()),
+					..Default::default()
+				}
+			},
+			SpendableOutputDescriptor::DelayedYuvPaymentOutput(descriptor) => {
+				// TODO we could add the witness script as well
+				Input {
+					witness_utxo: Some(descriptor.inner.output.clone()),
+					..Default::default()
+				}
+			},
+			SpendableOutputDescriptor::StaticYuvPaymentOutput(descriptor) => {
+				// TODO we could add the witness script as well
+				Input {
+					witness_utxo: Some(descriptor.inner.output.clone()),
+					..Default::default()
+				}
 			},
 			SpendableOutputDescriptor::DelayedYuvPaymentOutput(descriptor) => {
 				// TODO we could add the witness script as well
@@ -610,10 +573,11 @@ impl SpendableOutputDescriptor {
 						witness_weight -= 1;
 					}
 					input_value += output.value;
-				},
-			}
-			if input_value > MAX_VALUE_MSAT / 1000 {
-				return Err(());
+				}
+				// Use [`Self::create_yuv_spendable_outputs_psbt`] for last.
+				SpendableOutputDescriptor::YuvStaticOutput { .. } => continue,
+				SpendableOutputDescriptor::DelayedYuvPaymentOutput { .. } => continue,
+				SpendableOutputDescriptor::StaticYuvPaymentOutput { .. } => continue,
 			}
 		}
 		let mut tx = Transaction {
@@ -1187,6 +1151,177 @@ pub trait ChannelSigner {
 	fn provide_channel_parameters(&mut self, channel_parameters: &ChannelTransactionParameters);
 }
 
+/// A trait to sign Lightning channel transactions as described in
+/// [BOLT 3](https://github.com/lightning/bolts/blob/master/03-transactions.md).
+///
+/// Signing services could be implemented on a hardware wallet and should implement signing
+/// policies in order to be secure. Please refer to the [VLS Policy
+/// Controls](https://gitlab.com/lightning-signer/validating-lightning-signer/-/blob/main/docs/policy-controls.md)
+/// for an example of such policies.
+pub trait EcdsaChannelSigner: ChannelSigner {
+	/// Create a signature for a counterparty's commitment transaction and associated HTLC transactions.
+	///
+	/// Note that if signing fails or is rejected, the channel will be force-closed.
+	///
+	/// Policy checks should be implemented in this function, including checking the amount
+	/// sent to us and checking the HTLCs.
+	///
+	/// The preimages of outgoing HTLCs that were fulfilled since the last commitment are provided.
+	/// A validating signer should ensure that an HTLC output is removed only when the matching
+	/// preimage is provided, or when the value to holder is restored.
+	///
+	/// Note that all the relevant preimages will be provided, but there may also be additional
+	/// irrelevant or duplicate preimages.
+	//
+	// TODO: Document the things someone using this interface should enforce before signing.
+	fn sign_counterparty_commitment(
+		&self,
+		commitment_tx: &CommitmentTransaction,
+		preimages: Vec<PaymentPreimage>,
+		yuv_funding_pixel: Option<&Pixel>,
+		secp_ctx: &Secp256k1<secp256k1::All>,
+	) -> Result<(Signature, Vec<Signature>), ()>;
+	/// Validate the counterparty's revocation.
+	///
+	/// This is required in order for the signer to make sure that the state has moved
+	/// forward and it is safe to sign the next counterparty commitment.
+	fn validate_counterparty_revocation(&self, idx: u64, secret: &SecretKey) -> Result<(), ()>;
+	/// Creates a signature for a holder's commitment transaction and its claiming HTLC transactions.
+	///
+	/// This will be called
+	/// - with a non-revoked `commitment_tx`.
+	/// - with the latest `commitment_tx` when we initiate a force-close.
+	/// - with the previous `commitment_tx`, just to get claiming HTLC
+	///   signatures, if we are reacting to a [`ChannelMonitor`]
+	///   [replica](https://github.com/lightningdevkit/rust-lightning/blob/main/GLOSSARY.md#monitor-replicas)
+	///   that decided to broadcast before it had been updated to the latest `commitment_tx`.
+	///
+	/// This may be called multiple times for the same transaction.
+	///
+	/// An external signer implementation should check that the commitment has not been revoked.
+	///
+	/// [`ChannelMonitor`]: crate::chain::channelmonitor::ChannelMonitor
+	// TODO: Document the things someone using this interface should enforce before signing.
+	fn sign_holder_commitment_and_htlcs(
+		&self, commitment_tx:
+		&HolderCommitmentTransaction,
+		funding_yuv_pixel: Option<&Pixel>,
+		secp_ctx: &Secp256k1<secp256k1::All>,
+	) -> Result<(Signature, Vec<Signature>), ()>;
+	/// Same as [`sign_holder_commitment_and_htlcs`], but exists only for tests to get access to
+	/// holder commitment transactions which will be broadcasted later, after the channel has moved
+	/// on to a newer state. Thus, needs its own method as [`sign_holder_commitment_and_htlcs`] may
+	/// enforce that we only ever get called once.
+	#[cfg(any(test,feature = "unsafe_revoked_tx_signing"))]
+	fn unsafe_sign_holder_commitment_and_htlcs(&self, commitment_tx: &HolderCommitmentTransaction,
+		secp_ctx: &Secp256k1<secp256k1::All>) -> Result<(Signature, Vec<Signature>), ()>;
+	/// Create a signature for the given input in a transaction spending an HTLC transaction output
+	/// or a commitment transaction `to_local` output when our counterparty broadcasts an old state.
+	///
+	/// A justice transaction may claim multiple outputs at the same time if timelocks are
+	/// similar, but only a signature for the input at index `input` should be signed for here.
+	/// It may be called multiple times for same output(s) if a fee-bump is needed with regards
+	/// to an upcoming timelock expiration.
+	///
+	/// Amount is value of the output spent by this input, committed to in the BIP 143 signature.
+	///
+	/// `per_commitment_key` is revocation secret which was provided by our counterparty when they
+	/// revoked the state which they eventually broadcast. It's not a _holder_ secret key and does
+	/// not allow the spending of any funds by itself (you need our holder `revocation_secret` to do
+	/// so).
+	fn sign_justice_revoked_output(&self, justice_tx: &Transaction, input: usize, amount: u64,
+		per_commitment_key: &SecretKey, yuv_pixel: Option<Pixel>, secp_ctx: &Secp256k1<secp256k1::All>
+	) -> Result<Signature, ()>;
+	/// Create a signature for the given input in a transaction spending a commitment transaction
+	/// HTLC output when our counterparty broadcasts an old state.
+	///
+	/// A justice transaction may claim multiple outputs at the same time if timelocks are
+	/// similar, but only a signature for the input at index `input` should be signed for here.
+	/// It may be called multiple times for same output(s) if a fee-bump is needed with regards
+	/// to an upcoming timelock expiration.
+	///
+	/// `amount` is the value of the output spent by this input, committed to in the BIP 143
+	/// signature.
+	///
+	/// `per_commitment_key` is revocation secret which was provided by our counterparty when they
+	/// revoked the state which they eventually broadcast. It's not a _holder_ secret key and does
+	/// not allow the spending of any funds by itself (you need our holder revocation_secret to do
+	/// so).
+	///
+	/// `htlc` holds HTLC elements (hash, timelock), thus changing the format of the witness script
+	/// (which is committed to in the BIP 143 signatures).
+	fn sign_justice_revoked_htlc(&self, justice_tx: &Transaction, input: usize, amount: u64,
+		per_commitment_key: &SecretKey, htlc: &HTLCOutputInCommitment,
+		yuv_pixel: Option<Pixel>, secp_ctx: &Secp256k1<secp256k1::All>) -> Result<Signature, ()>;
+	/// Computes the signature for a commitment transaction's HTLC output used as an input within
+	/// `htlc_tx`, which spends the commitment transaction at index `input`. The signature returned
+	/// must be be computed using [`EcdsaSighashType::All`]. Note that this should only be used to
+	/// sign HTLC transactions from channels supporting anchor outputs after all additional
+	/// inputs/outputs have been added to the transaction.
+	///
+	/// [`EcdsaSighashType::All`]: bitcoin::blockdata::transaction::EcdsaSighashType::All
+	fn sign_holder_htlc_transaction(&self, htlc_tx: &Transaction, input: usize,
+		htlc_descriptor: &HTLCDescriptor, secp_ctx: &Secp256k1<secp256k1::All>
+	) -> Result<Signature, ()>;
+	/// Create a signature for a claiming transaction for a HTLC output on a counterparty's commitment
+	/// transaction, either offered or received.
+	///
+	/// Such a transaction may claim multiples offered outputs at same time if we know the
+	/// preimage for each when we create it, but only the input at index `input` should be
+	/// signed for here. It may be called multiple times for same output(s) if a fee-bump is
+	/// needed with regards to an upcoming timelock expiration.
+	///
+	/// `witness_script` is either an offered or received script as defined in BOLT3 for HTLC
+	/// outputs.
+	///
+	/// `amount` is value of the output spent by this input, committed to in the BIP 143 signature.
+	///
+	/// `per_commitment_point` is the dynamic point corresponding to the channel state
+	/// detected onchain. It has been generated by our counterparty and is used to derive
+	/// channel state keys, which are then included in the witness script and committed to in the
+	/// BIP 143 signature.
+	fn sign_counterparty_htlc_transaction(&self, htlc_tx: &Transaction, input: usize, amount: u64,
+		per_commitment_point: &PublicKey, htlc: &HTLCOutputInCommitment,
+		yuv_pixel: Option<Pixel>, secp_ctx: &Secp256k1<secp256k1::All>) -> Result<Signature, ()>;
+	/// Create a signature for a (proposed) closing transaction.
+	///
+	/// Note that, due to rounding, there may be one "missing" satoshi, and either party may have
+	/// chosen to forgo their output as dust.
+	fn sign_closing_transaction(
+		&self,
+		closing_tx: &ClosingTransaction,
+		funding_yuv_pixel: Option<&Pixel>,
+		is_holders_key_tweaked: bool,
+		secp_ctx: &Secp256k1<secp256k1::All>,
+	) -> Result<Signature, ()>;
+	/// Computes the signature for a commitment transaction's anchor output used as an
+	/// input within `anchor_tx`, which spends the commitment transaction, at index `input`.
+	fn sign_holder_anchor_input(
+		&self, anchor_tx: &Transaction, input: usize, secp_ctx: &Secp256k1<secp256k1::All>,
+	) -> Result<Signature, ()>;
+	/// Signs a channel announcement message with our funding key proving it comes from one of the
+	/// channel participants.
+	///
+	/// Channel announcements also require a signature from each node's network key. Our node
+	/// signature is computed through [`NodeSigner::sign_gossip_message`].
+	///
+	/// Note that if this fails or is rejected, the channel will not be publicly announced and
+	/// our counterparty may (though likely will not) close the channel on us for violating the
+	/// protocol.
+	fn sign_channel_announcement_with_funding_key(
+		&self, msg: &UnsignedChannelAnnouncement, secp_ctx: &Secp256k1<secp256k1::All>
+	) -> Result<Signature, ()>;
+}
+
+/// A writeable signer.
+///
+/// There will always be two instances of a signer per channel, one occupied by the
+/// [`ChannelManager`] and another by the channel's [`ChannelMonitor`].
+///
+/// [`ChannelManager`]: crate::ln::channelmanager::ChannelManager
+/// [`ChannelMonitor`]: crate::chain::channelmonitor::ChannelMonitor
+pub trait WriteableEcdsaChannelSigner: EcdsaChannelSigner + Writeable {}
+
 /// Specifies the recipient of an invoice.
 ///
 /// This indicates to [`NodeSigner::sign_invoice`] what node secret key should be used to sign
@@ -1490,14 +1625,9 @@ impl InMemorySigner {
 		rand_bytes_unique_start: [u8; 32],
 		destination_pubkey: PublicKey,
 	) -> InMemorySigner {
-		let holder_channel_pubkeys = InMemorySigner::make_holder_keys(
-			secp_ctx,
-			&funding_key,
-			&revocation_base_key,
-			&payment_key,
-			&delayed_payment_base_key,
-			&htlc_base_key,
-		);
+		let holder_channel_pubkeys =
+			InMemorySigner::make_holder_keys(secp_ctx, &funding_key, &revocation_base_key,
+				&payment_key, &delayed_payment_base_key, &htlc_base_key, Some(destination_pubkey));
 		InMemorySigner {
 			funding_key,
 			revocation_base_key,
@@ -1513,19 +1643,23 @@ impl InMemorySigner {
 		}
 	}
 
-	fn make_holder_keys<C: Signing>(
-		secp_ctx: &Secp256k1<C>, funding_key: &SecretKey, revocation_base_key: &SecretKey,
-		payment_key: &SecretKey, delayed_payment_base_key: &SecretKey, htlc_base_key: &SecretKey,
+	fn make_holder_keys<C: Signing>(secp_ctx: &Secp256k1<C>,
+			funding_key: &SecretKey,
+			revocation_base_key: &SecretKey,
+			payment_key: &SecretKey,
+			delayed_payment_base_key: &SecretKey,
+			htlc_base_key: &SecretKey,
+			destination_pubkey: Option<PublicKey>,
 	) -> ChannelPublicKeys {
 		let from_secret = |s: &SecretKey| PublicKey::from_secret_key(secp_ctx, s);
 		ChannelPublicKeys {
 			funding_pubkey: from_secret(&funding_key),
 			revocation_basepoint: RevocationBasepoint::from(from_secret(&revocation_base_key)),
 			payment_point: from_secret(&payment_key),
-			delayed_payment_basepoint: DelayedPaymentBasepoint::from(from_secret(
-				&delayed_payment_base_key,
-			)),
-			htlc_basepoint: HtlcBasepoint::from(from_secret(&htlc_base_key)),
+			delayed_payment_basepoint: from_secret(&delayed_payment_base_key),
+			htlc_basepoint: from_secret(&htlc_base_key),
+			funding_yuv_pixel_key: None,
+			destination_pubkey,
 		}
 	}
 
@@ -1603,10 +1737,7 @@ impl InMemorySigner {
 	/// or if an output descriptor `script_pubkey` does not match the one we can spend.
 	///
 	/// [`descriptor.outpoint`]: StaticPaymentOutputDescriptor::outpoint
-	pub fn sign_counterparty_payment_input<C: Signing>(
-		&self, spend_tx: &Transaction, input_idx: usize,
-		descriptor: &StaticPaymentOutputDescriptor, secp_ctx: &Secp256k1<C>,
-	) -> Result<Witness, ()> {
+	pub fn sign_counterparty_payment_input<C: Signing>(&self, spend_tx: &Transaction, input_idx: usize, descriptor: &StaticPaymentOutputDescriptor, yuv_pixel: Option<&Pixel>, secp_ctx: &Secp256k1<C>) -> Result<Vec<Vec<u8>>, ()> {
 		// TODO: We really should be taking the SigHashCache as a parameter here instead of
 		// spend_tx, but ideally the SigHashCache would expose the transaction's inputs read-only
 		// so that we can check them. This requires upstream rust-bitcoin changes (as well as
@@ -1635,17 +1766,8 @@ impl InMemorySigner {
 		} else {
 			ScriptBuf::new_p2pkh(&remotepubkey.pubkey_hash())
 		};
-		let sighash = hash_to_message!(
-			&sighash::SighashCache::new(spend_tx)
-				.segwit_signature_hash(
-					input_idx,
-					&witness_script,
-					descriptor.output.value,
-					EcdsaSighashType::All
-				)
-				.unwrap()[..]
-		);
-		let remotesig = sign_with_aux_rand(secp_ctx, &sighash, &self.payment_key, &self);
+		let sighash = hash_to_message!(&sighash::SighashCache::new(spend_tx).segwit_signature_hash(input_idx, &witness_script, descriptor.output.value, EcdsaSighashType::All).unwrap()[..]);
+		let remotesig = sign_with_aux_rand(secp_ctx, &sighash, &self.payment_key.maybe_tweak(yuv_pixel), &self);
 		let payment_script = if supports_anchors_zero_fee_htlc_tx {
 			witness_script.to_v0_p2wsh()
 		} else {
@@ -1677,10 +1799,7 @@ impl InMemorySigner {
 	///
 	/// [`descriptor.outpoint`]: DelayedPaymentOutputDescriptor::outpoint
 	/// [`descriptor.to_self_delay`]: DelayedPaymentOutputDescriptor::to_self_delay
-	pub fn sign_dynamic_p2wsh_input<C: Signing>(
-		&self, spend_tx: &Transaction, input_idx: usize,
-		descriptor: &DelayedPaymentOutputDescriptor, secp_ctx: &Secp256k1<C>,
-	) -> Result<Witness, ()> {
+	pub fn sign_dynamic_p2wsh_input<C: Signing>(&self, spend_tx: &Transaction, input_idx: usize, descriptor: &DelayedPaymentOutputDescriptor, yuv_pixel: Option<&Pixel>, secp_ctx: &Secp256k1<C>) -> Result<Vec<Vec<u8>>, ()> {
 		// TODO: We really should be taking the SigHashCache as a parameter here instead of
 		// spend_tx, but ideally the SigHashCache would expose the transaction's inputs read-only
 		// so that we can check them. This requires upstream rust-bitcoin changes (as well as
@@ -1699,34 +1818,14 @@ impl InMemorySigner {
 			return Err(());
 		}
 
-		let delayed_payment_key = chan_utils::derive_private_key(
-			&secp_ctx,
-			&descriptor.per_commitment_point,
-			&self.delayed_payment_base_key,
-		);
-		let delayed_payment_pubkey =
-			DelayedPaymentKey::from_secret_key(&secp_ctx, &delayed_payment_key);
-		let witness_script = chan_utils::get_revokeable_redeemscript(
-			&descriptor.revocation_pubkey,
-			descriptor.to_self_delay,
-			&delayed_payment_pubkey,
-		);
-		let sighash = hash_to_message!(
-			&sighash::SighashCache::new(spend_tx)
-				.segwit_signature_hash(
-					input_idx,
-					&witness_script,
-					descriptor.output.value,
-					EcdsaSighashType::All
-				)
-				.unwrap()[..]
-		);
-		let local_delayedsig = EcdsaSignature {
-			sig: sign_with_aux_rand(secp_ctx, &sighash, &delayed_payment_key, &self),
-			hash_ty: EcdsaSighashType::All,
-		};
-		let payment_script =
-			bitcoin::Address::p2wsh(&witness_script, Network::Bitcoin).script_pubkey();
+		let revocation_key = descriptor.revocation_pubkey.maybe_tweak(yuv_pixel);
+
+		let delayed_payment_key = chan_utils::derive_private_key(&secp_ctx, &descriptor.per_commitment_point, &self.delayed_payment_base_key);
+		let delayed_payment_pubkey = PublicKey::from_secret_key(&secp_ctx, &delayed_payment_key);
+		let witness_script = chan_utils::get_revokeable_redeemscript(&revocation_key, descriptor.to_self_delay, &delayed_payment_pubkey);
+		let sighash = hash_to_message!(&sighash::SighashCache::new(spend_tx).segwit_signature_hash(input_idx, &witness_script, descriptor.output.value, EcdsaSighashType::All).unwrap()[..]);
+		let local_delayedsig = sign_with_aux_rand(secp_ctx, &sighash, &delayed_payment_key, &self);
+		let payment_script = bitcoin::Address::p2wsh(&witness_script, Network::Bitcoin).script_pubkey();
 
 		if descriptor.output.script_pubkey != payment_script {
 			return Err(());
@@ -1798,25 +1897,33 @@ const MISSING_PARAMS_ERR: &'static str =
 
 impl EcdsaChannelSigner for InMemorySigner {
 	fn sign_counterparty_commitment(
-		&self, commitment_tx: &CommitmentTransaction,
-		_inbound_htlc_preimages: Vec<PaymentPreimage>,
-		_outbound_htlc_preimages: Vec<PaymentPreimage>, secp_ctx: &Secp256k1<secp256k1::All>,
+		&self,
+		commitment_tx: &CommitmentTransaction,
+		_preimages: Vec<PaymentPreimage>,
+		funding_yuv_pixel: Option<&Pixel>,
+		secp_ctx: &Secp256k1<secp256k1::All>,
 	) -> Result<(Signature, Vec<Signature>), ()> {
 		let trusted_tx = commitment_tx.trust();
 		let keys = trusted_tx.keys();
 
 		let funding_pubkey = PublicKey::from_secret_key(secp_ctx, &self.funding_key);
 		let counterparty_keys = self.counterparty_pubkeys().expect(MISSING_PARAMS_ERR);
-		let channel_funding_redeemscript =
-			make_funding_redeemscript(&funding_pubkey, &counterparty_keys.funding_pubkey);
+		let channel_funding_redeemscript = make_funding_redeemscript(
+			&funding_pubkey,
+			&counterparty_keys.funding_pubkey,
+			funding_yuv_pixel,
+		);
+
+		// If channel uses YUV payments and holder's key is tweaked in multisig we have to sign tx
+		// using private pixel key. Here, countersignatory_yuv_pixel_key is a holder's public key,
+		// because it is counterparty's transaction.
+		let mut funding_key = self.funding_key;
+		if keys.countersignatory_yuv_pixel_key.is_some() {
+			funding_key = funding_key.maybe_tweak(funding_yuv_pixel);
+		}
 
 		let built_tx = trusted_tx.built_transaction();
-		let commitment_sig = built_tx.sign_counterparty_commitment(
-			&self.funding_key,
-			&channel_funding_redeemscript,
-			self.channel_value_satoshis,
-			secp_ctx,
-		);
+		let commitment_sig = built_tx.sign_counterparty_commitment(&funding_key, &channel_funding_redeemscript, self.channel_value_satoshis, secp_ctx);
 		let commitment_txid = built_tx.txid;
 
 		let mut htlc_sigs = Vec::with_capacity(commitment_tx.htlcs().len());
@@ -1828,57 +1935,57 @@ impl EcdsaChannelSigner for InMemorySigner {
 			let holder_selected_contest_delay =
 				self.holder_selected_contest_delay().expect(MISSING_PARAMS_ERR);
 			let chan_type = &channel_parameters.channel_type_features;
-			let htlc_tx = chan_utils::build_htlc_transaction(
-				&commitment_txid,
-				commitment_tx.feerate_per_kw(),
-				holder_selected_contest_delay,
-				htlc,
-				chan_type,
-				&keys.broadcaster_delayed_payment_key,
-				&keys.revocation_key,
-			);
-			let htlc_redeemscript = chan_utils::get_htlc_redeemscript(&htlc, chan_type, &keys);
-			let htlc_sighashtype = if chan_type.supports_anchors_zero_fee_htlc_tx() {
-				EcdsaSighashType::SinglePlusAnyoneCanPay
-			} else {
-				EcdsaSighashType::All
-			};
-			let htlc_sighash = hash_to_message!(
-				&sighash::SighashCache::new(&htlc_tx)
-					.segwit_signature_hash(
-						0,
-						&htlc_redeemscript,
-						htlc.amount_msat / 1000,
-						htlc_sighashtype
-					)
-					.unwrap()[..]
-			);
+			let revocation_key = keys.revocation_key.maybe_tweak(htlc_yuv_pixel);
+			let htlc_tx = chan_utils::build_htlc_transaction(&commitment_txid, commitment_tx.feerate_per_kw(), holder_selected_contest_delay, htlc, chan_type, &keys.broadcaster_delayed_payment_key, &revocation_key);
+			let htlc_redeemscript = chan_utils::get_htlc_redeemscript(&htlc, chan_type, &keys, htlc_yuv_pixel.as_ref());
+			let htlc_sighashtype = if chan_type.supports_anchors_zero_fee_htlc_tx() { EcdsaSighashType::SinglePlusAnyoneCanPay } else { EcdsaSighashType::All };
+			let htlc_sighash = hash_to_message!(&sighash::SighashCache::new(&htlc_tx).segwit_signature_hash(0, &htlc_redeemscript, htlc.amount_msat / 1000, htlc_sighashtype).unwrap()[..]);
 			let holder_htlc_key = chan_utils::derive_private_key(
 				&secp_ctx,
 				&keys.per_commitment_point,
 				&self.htlc_base_key,
-			);
+			).maybe_tweak(htlc_yuv_pixel);
 			htlc_sigs.push(sign(secp_ctx, &htlc_sighash, &holder_htlc_key));
 		}
 
 		Ok((commitment_sig, htlc_sigs))
 	}
 
-	fn sign_holder_commitment(
-		&self, commitment_tx: &HolderCommitmentTransaction, secp_ctx: &Secp256k1<secp256k1::All>,
-	) -> Result<Signature, ()> {
+	fn validate_counterparty_revocation(&self, _idx: u64, _secret: &SecretKey) -> Result<(), ()> {
+		Ok(())
+	}
+
+	fn sign_holder_commitment_and_htlcs(
+		&self, commitment_tx:
+		&HolderCommitmentTransaction,
+		funding_yuv_pixel: Option<&Pixel>,
+		secp_ctx: &Secp256k1<secp256k1::All>,
+	) -> Result<(Signature, Vec<Signature>), ()> {
 		let funding_pubkey = PublicKey::from_secret_key(secp_ctx, &self.funding_key);
 		let counterparty_keys = self.counterparty_pubkeys().expect(MISSING_PARAMS_ERR);
-		let funding_redeemscript =
-			make_funding_redeemscript(&funding_pubkey, &counterparty_keys.funding_pubkey);
+		let funding_redeemscript = make_funding_redeemscript(
+			&funding_pubkey,
+			&counterparty_keys.funding_pubkey,
+			funding_yuv_pixel,
+		);
+
+		let mut funding_key = self.funding_key;
+		if funding_pubkey.serialize() < counterparty_keys.funding_pubkey.serialize() {
+			funding_key = funding_key.maybe_tweak(funding_yuv_pixel)
+		}
+
 		let trusted_tx = commitment_tx.trust();
-		Ok(trusted_tx.built_transaction().sign_holder_commitment(
-			&self.funding_key,
-			&funding_redeemscript,
-			self.channel_value_satoshis,
+		let sig = trusted_tx.built_transaction().sign_holder_commitment(&funding_key, &funding_redeemscript, self.channel_value_satoshis, &self, secp_ctx);
+		let channel_parameters = self.get_channel_parameters().expect(MISSING_PARAMS_ERR);
+		let yuv_chroma_opt = funding_yuv_pixel.map(|yuv_pixel| yuv_pixel.chroma);
+		let htlc_sigs = trusted_tx.get_htlc_sigs(
+			&self.htlc_base_key,
+			&channel_parameters.as_holder_broadcastable(),
 			&self,
+			yuv_chroma_opt,
 			secp_ctx,
-		))
+		)?;
+		Ok((sig, htlc_sigs))
 	}
 
 	#[cfg(any(test, feature = "unsafe_revoked_tx_signing"))]
@@ -1887,33 +1994,27 @@ impl EcdsaChannelSigner for InMemorySigner {
 	) -> Result<Signature, ()> {
 		let funding_pubkey = PublicKey::from_secret_key(secp_ctx, &self.funding_key);
 		let counterparty_keys = self.counterparty_pubkeys().expect(MISSING_PARAMS_ERR);
-		let funding_redeemscript =
-			make_funding_redeemscript(&funding_pubkey, &counterparty_keys.funding_pubkey);
+		let funding_redeemscript = make_funding_redeemscript(&funding_pubkey, &counterparty_keys.funding_pubkey, None);
 		let trusted_tx = commitment_tx.trust();
-		Ok(trusted_tx.built_transaction().sign_holder_commitment(
-			&self.funding_key,
-			&funding_redeemscript,
-			self.channel_value_satoshis,
-			&self,
-			secp_ctx,
-		))
+		let sig = trusted_tx.built_transaction().sign_holder_commitment(&self.funding_key, &funding_redeemscript, self.channel_value_satoshis, &self, secp_ctx);
+		let channel_parameters = self.get_channel_parameters().expect(MISSING_PARAMS_ERR);
+		let htlc_sigs = trusted_tx.get_htlc_sigs(&self.htlc_base_key, &channel_parameters.as_holder_broadcastable(), &self, None, secp_ctx)?;
+		Ok((sig, htlc_sigs))
 	}
 
-	fn sign_justice_revoked_output(
-		&self, justice_tx: &Transaction, input: usize, amount: u64, per_commitment_key: &SecretKey,
-		secp_ctx: &Secp256k1<secp256k1::All>,
-	) -> Result<Signature, ()> {
+	fn sign_justice_revoked_output(&self, justice_tx: &Transaction, input: usize, amount: u64, per_commitment_key: &SecretKey, yuv_pixel: Option<Pixel>, secp_ctx: &Secp256k1<secp256k1::All>) -> Result<Signature, ()> {
 		let revocation_key = chan_utils::derive_private_revocation_key(
 			&secp_ctx,
 			&per_commitment_key,
 			&self.revocation_base_key,
-		);
+		).maybe_tweak(yuv_pixel);
+
 		let per_commitment_point = PublicKey::from_secret_key(secp_ctx, &per_commitment_key);
-		let revocation_pubkey = RevocationKey::from_basepoint(
-			&secp_ctx,
+		let revocation_pubkey = chan_utils::derive_public_revocation_key(
+			&secp_ctx, &per_commitment_point,
 			&self.pubkeys().revocation_basepoint,
-			&per_commitment_point,
-		);
+		).maybe_tweak(yuv_pixel);
+
 		let witness_script = {
 			let counterparty_keys = self.counterparty_pubkeys().expect(MISSING_PARAMS_ERR);
 			let holder_selected_contest_delay =
@@ -1939,14 +2040,16 @@ impl EcdsaChannelSigner for InMemorySigner {
 	}
 
 	fn sign_justice_revoked_htlc(
-		&self, justice_tx: &Transaction, input: usize, amount: u64, per_commitment_key: &SecretKey,
-		htlc: &HTLCOutputInCommitment, secp_ctx: &Secp256k1<secp256k1::All>,
+		&self,
+		justice_tx: &Transaction,
+		input: usize,
+		amount: u64,
+		per_commitment_key: &SecretKey,
+		htlc: &HTLCOutputInCommitment,
+		yuv_pixel: Option<Pixel>,
+		secp_ctx: &Secp256k1<secp256k1::All>,
 	) -> Result<Signature, ()> {
-		let revocation_key = chan_utils::derive_private_revocation_key(
-			&secp_ctx,
-			&per_commitment_key,
-			&self.revocation_base_key,
-		);
+		let revocation_key = chan_utils::derive_private_revocation_key(&secp_ctx, &per_commitment_key, &self.revocation_base_key);
 		let per_commitment_point = PublicKey::from_secret_key(secp_ctx, &per_commitment_key);
 		let revocation_pubkey = RevocationKey::from_basepoint(
 			&secp_ctx,
@@ -1955,16 +2058,12 @@ impl EcdsaChannelSigner for InMemorySigner {
 		);
 		let witness_script = {
 			let counterparty_keys = self.counterparty_pubkeys().expect(MISSING_PARAMS_ERR);
-			let counterparty_htlcpubkey = HtlcKey::from_basepoint(
+			let counterparty_htlcpubkey = chan_utils::derive_public_key(&secp_ctx, &per_commitment_point, &counterparty_keys.htlc_basepoint);
+			let holder_htlcpubkey = chan_utils::derive_public_key(
 				&secp_ctx,
-				&counterparty_keys.htlc_basepoint,
 				&per_commitment_point,
-			);
-			let holder_htlcpubkey = HtlcKey::from_basepoint(
-				&secp_ctx,
-				&self.pubkeys().htlc_basepoint,
-				&per_commitment_point,
-			);
+				&self.pubkeys().htlc_basepoint
+			).maybe_tweak(yuv_pixel);
 			let chan_type = self.channel_type_features().expect(MISSING_PARAMS_ERR);
 			chan_utils::get_htlc_redeemscript_with_explicit_keys(
 				&htlc,
@@ -2006,24 +2105,20 @@ impl EcdsaChannelSigner for InMemorySigner {
 	}
 
 	fn sign_counterparty_htlc_transaction(
-		&self, htlc_tx: &Transaction, input: usize, amount: u64, per_commitment_point: &PublicKey,
-		htlc: &HTLCOutputInCommitment, secp_ctx: &Secp256k1<secp256k1::All>,
+		&self,
+		htlc_tx: &Transaction,
+		input: usize,
+		amount: u64,
+		per_commitment_point: &PublicKey,
+		htlc: &HTLCOutputInCommitment,
+		yuv_pixel: Option<Pixel>,
+		secp_ctx: &Secp256k1<secp256k1::All>,
 	) -> Result<Signature, ()> {
-		let htlc_key =
-			chan_utils::derive_private_key(&secp_ctx, &per_commitment_point, &self.htlc_base_key);
-		let revocation_pubkey = RevocationKey::from_basepoint(
-			&secp_ctx,
-			&self.pubkeys().revocation_basepoint,
-			&per_commitment_point,
-		);
+		let htlc_key = chan_utils::derive_private_key(&secp_ctx, &per_commitment_point, &self.htlc_base_key).maybe_tweak(yuv_pixel);
+		let revocation_pubkey = chan_utils::derive_public_revocation_key(&secp_ctx, &per_commitment_point, &self.pubkeys().revocation_basepoint);
 		let counterparty_keys = self.counterparty_pubkeys().expect(MISSING_PARAMS_ERR);
-		let counterparty_htlcpubkey = HtlcKey::from_basepoint(
-			&secp_ctx,
-			&counterparty_keys.htlc_basepoint,
-			&per_commitment_point,
-		);
-		let htlc_basepoint = self.pubkeys().htlc_basepoint;
-		let htlcpubkey = HtlcKey::from_basepoint(&secp_ctx, &htlc_basepoint, &per_commitment_point);
+		let counterparty_htlcpubkey = chan_utils::derive_public_key(&secp_ctx, &per_commitment_point, &counterparty_keys.htlc_basepoint);
+		let htlcpubkey = chan_utils::derive_public_key(&secp_ctx, &per_commitment_point, &self.pubkeys().htlc_basepoint).maybe_tweak(yuv_pixel);
 		let chan_type = self.channel_type_features().expect(MISSING_PARAMS_ERR);
 		let witness_script = chan_utils::get_htlc_redeemscript_with_explicit_keys(
 			&htlc,
@@ -2041,20 +2136,28 @@ impl EcdsaChannelSigner for InMemorySigner {
 		Ok(sign_with_aux_rand(secp_ctx, &sighash, &htlc_key, &self))
 	}
 
+	/// If YUV Pixel is provided, it will be used to tweak the holder's private key.
 	fn sign_closing_transaction(
-		&self, closing_tx: &ClosingTransaction, secp_ctx: &Secp256k1<secp256k1::All>,
+		&self,
+		closing_tx: &ClosingTransaction,
+		funding_yuv_pixel: Option<&Pixel>,
+		is_holders_key_tweaked: bool,
+		secp_ctx: &Secp256k1<secp256k1::All>,
 	) -> Result<Signature, ()> {
+		let mut funding_key = self.funding_key;
+		if is_holders_key_tweaked {
+			funding_key = self.funding_key.maybe_tweak(funding_yuv_pixel);
+		}
+
 		let funding_pubkey = PublicKey::from_secret_key(secp_ctx, &self.funding_key);
-		let counterparty_funding_key =
-			&self.counterparty_pubkeys().expect(MISSING_PARAMS_ERR).funding_pubkey;
-		let channel_funding_redeemscript =
-			make_funding_redeemscript(&funding_pubkey, counterparty_funding_key);
-		Ok(closing_tx.trust().sign(
-			&self.funding_key,
-			&channel_funding_redeemscript,
-			self.channel_value_satoshis,
-			secp_ctx,
-		))
+		let counterparty_funding_key = &self.counterparty_pubkeys().expect(MISSING_PARAMS_ERR).funding_pubkey;
+		let channel_funding_redeemscript = make_funding_redeemscript(
+			&funding_pubkey,
+			counterparty_funding_key,
+			funding_yuv_pixel,
+		);
+
+		Ok(closing_tx.trust().sign(&funding_key, &channel_funding_redeemscript, self.channel_value_satoshis, secp_ctx))
 	}
 
 	fn sign_holder_anchor_input(
@@ -2189,14 +2292,6 @@ where
 		let counterparty_channel_data = Readable::read(reader)?;
 		let channel_value_satoshis = Readable::read(reader)?;
 		let secp_ctx = Secp256k1::signing_only();
-		let holder_channel_pubkeys = InMemorySigner::make_holder_keys(
-			&secp_ctx,
-			&funding_key,
-			&revocation_base_key,
-			&payment_key,
-			&delayed_payment_base_key,
-			&htlc_base_key,
-		);
 		let keys_id = Readable::read(reader)?;
 
 		let mut destination_pubkey: Option<PublicKey> = None;
@@ -2248,7 +2343,8 @@ pub struct KeysManager {
 	node_secret: SecretKey,
 	node_id: PublicKey,
 	inbound_payment_key: KeyMaterial,
-	destination_script: ScriptBuf,
+	destination_script: Script,
+	destination_pubkey: PublicKey,
 	shutdown_pubkey: PublicKey,
 	channel_master_key: ExtendedPrivKey,
 	channel_child_index: AtomicUsize,
@@ -2288,19 +2384,15 @@ impl KeysManager {
 					.expect("Your RNG is busted")
 					.private_key;
 				let node_id = PublicKey::from_secret_key(&secp_ctx, &node_secret);
-				let destination_script = match master_key
-					.ckd_priv(&secp_ctx, ChildNumber::from_hardened_idx(1).unwrap())
-				{
+				let (destination_script, destination_pubkey) = match master_key.ckd_priv(&secp_ctx, ChildNumber::from_hardened_idx(1).unwrap()) {
 					Ok(destination_key) => {
-						let wpubkey_hash = WPubkeyHash::hash(
-							&ExtendedPubKey::from_priv(&secp_ctx, &destination_key)
-								.to_pub()
-								.to_bytes(),
-						);
-						Builder::new()
+						let destination_pubkey = ExtendedPubKey::from_priv(&secp_ctx, &destination_key).to_pub();
+						let wpubkey_hash = WPubkeyHash::hash(&destination_pubkey.to_bytes());
+						let destination_script = Builder::new()
 							.push_opcode(opcodes::all::OP_PUSHBYTES_0)
-							.push_slice(&wpubkey_hash.to_byte_array())
-							.into_script()
+							.push_slice(&wpubkey_hash.into_inner())
+							.into_script();
+						(destination_script, destination_pubkey.inner)
 					},
 					Err(_) => panic!("Your RNG is busted"),
 				};
@@ -2462,12 +2554,7 @@ impl KeysManager {
 						}
 						keys_cache = Some((signer, descriptor.channel_keys_id));
 					}
-					let witness = keys_cache.as_ref().unwrap().0.sign_counterparty_payment_input(
-						&psbt.unsigned_tx,
-						input_idx,
-						&descriptor,
-						&secp_ctx,
-					)?;
+					let witness = Witness::from_vec(keys_cache.as_ref().unwrap().0.sign_counterparty_payment_input(&psbt.unsigned_tx, input_idx, &descriptor, None, &secp_ctx)?);
 					psbt.inputs[input_idx].final_script_witness = Some(witness);
 				},
 				SpendableOutputDescriptor::DelayedPaymentOutput(descriptor) => {
@@ -2483,12 +2570,7 @@ impl KeysManager {
 							descriptor.channel_keys_id,
 						));
 					}
-					let witness = keys_cache.as_ref().unwrap().0.sign_dynamic_p2wsh_input(
-						&psbt.unsigned_tx,
-						input_idx,
-						&descriptor,
-						&secp_ctx,
-					)?;
+					let witness = Witness::from_vec(keys_cache.as_ref().unwrap().0.sign_dynamic_p2wsh_input(&psbt.unsigned_tx, input_idx, &descriptor, None, &secp_ctx)?);
 					psbt.inputs[input_idx].final_script_witness = Some(witness);
 				},
 				SpendableOutputDescriptor::StaticOutput { ref outpoint, ref output, .. } => {
@@ -2548,6 +2630,276 @@ impl KeysManager {
 		}
 
 		Ok(psbt)
+	}
+
+	/// Creates a [`Transaction`] which spends the given descriptors to the given outputs, plus an
+	/// output to the given change destination (if sufficient change value remains). The
+	/// transaction will have a feerate, at least, of the given value.
+	///
+	/// The `locktime` argument is used to set the transaction's locktime. If `None`, the
+	/// transaction will have a locktime of 0. It it recommended to set this to the current block
+	/// height to avoid fee sniping, unless you have some specific reason to use a different
+	/// locktime.
+	///
+	/// Returns `Err(())` if the output value is greater than the input value minus required fee,
+	/// if a descriptor was duplicated, or if an output descriptor `script_pubkey`
+	/// does not match the one we can spend.
+	///
+	/// We do not enforce that outputs meet the dust limit or that any output scripts are standard.
+	///
+	/// May panic if the [`SpendableOutputDescriptor`]s were not generated by channels which used
+	/// this [`KeysManager`] or one of the [`InMemorySigner`] created by this [`KeysManager`].
+	pub fn spend_spendable_outputs<C: Signing>(&self, descriptors: &[&SpendableOutputDescriptor], outputs: Vec<TxOut>, change_destination_script: Script, feerate_sat_per_1000_weight: u32, locktime: Option<PackedLockTime>, secp_ctx: &Secp256k1<C>) -> Result<Transaction, ()> {
+		let (mut psbt, expected_max_weight) = SpendableOutputDescriptor::create_spendable_outputs_psbt(descriptors, outputs, change_destination_script, feerate_sat_per_1000_weight, locktime)?;
+		psbt = self.sign_spendable_outputs_psbt(descriptors, psbt, secp_ctx)?;
+
+		let spend_tx = psbt.extract_tx();
+
+		debug_assert!(expected_max_weight >= spend_tx.weight());
+		// Note that witnesses with a signature vary somewhat in size, so allow
+		// `expected_max_weight` to overshoot by up to 3 bytes per input.
+		debug_assert!(expected_max_weight <= spend_tx.weight() + descriptors.len() * 3);
+
+		Ok(spend_tx)
+	}
+
+	/// Creates a [`Transaction`] which spends the given descriptors to the given destination
+	/// public key.
+	pub fn spend_yuv_spendable_outputs<C: Signing>(
+		&self,
+		descriptors: &[&SpendableOutputDescriptor],
+		feerate_sat_per_1000_weight: u32,
+		change_pubkey: PublicKey,
+		destination_public_key: PublicKey,
+		locktime: Option<PackedLockTime>,
+		secp_ctx: &Secp256k1<C>,
+	) -> Result<Vec<YuvTransaction>, SpendYuvOutputsError> {
+		let psbts = SpendableOutputDescriptor::create_yuv_spendable_outputs_psbt(
+			descriptors,
+			feerate_sat_per_1000_weight,
+			change_pubkey,
+			destination_public_key,
+			locktime,
+		)?;
+
+		if psbts.is_empty() {
+			return Ok(Vec::new())
+		}
+
+		let spend_txs = self.sign_spendable_yuv_psbts(psbts, secp_ctx)?;
+
+		Ok(spend_txs)
+	}
+
+	/// Signs formed YUV transactions with corresponding YUV pixel private key.
+	pub fn sign_spendable_yuv_psbts<C: Signing>(
+		&self,
+		psbts: Vec<YuvPsbtWithDescriptors>,
+		secp_ctx: &Secp256k1<C>,
+	) -> Result<Vec<YuvTransaction>, SpendYuvOutputsError> {
+		let mut yuv_txs = Vec::<YuvTransaction>::new();
+
+		for mut psbt_with_desc in psbts {
+			let YuvTxType::Transfer { input_proofs, .. } = &psbt_with_desc.yuv_proofs else {
+				return Err(SpendYuvOutputsError::InvalidYuvTxType)
+			};
+
+			for (input_idx, input_proof) in input_proofs {
+				let idx = (*input_idx) as usize;
+				self.sign_yuv_input(
+					&psbt_with_desc.descriptors[idx],
+					&psbt_with_desc.psbt.unsigned_tx,
+					&mut psbt_with_desc.psbt.inputs[idx],
+					*input_idx,
+					input_proof,
+					secp_ctx,
+				)?;
+			}
+
+			yuv_txs.push(YuvTransaction {
+				bitcoin_tx: psbt_with_desc.psbt.extract_tx(),
+				tx_type: psbt_with_desc.yuv_proofs,
+			});
+		}
+
+		Ok(yuv_txs)
+	}
+
+	/// Sign a YUV input of specific YUV tx with corresponding YUV pixel private key.
+	fn sign_yuv_input<C: Signing>(
+		&self,
+		descriptor: &SpendableOutputDescriptor,
+		unsigned_tx: &Transaction,
+		psbt_input: &mut Input,
+		input_idx: u32,
+		input_proof: &PixelProof,
+		secp_ctx: &Secp256k1<C>,
+	) -> Result<(), SpendYuvOutputsError> {
+		match descriptor {
+			SpendableOutputDescriptor::YuvStaticOutput { .. } => {
+				self.sign_yuv_static_output(
+					unsigned_tx,
+					psbt_input,
+					input_idx,
+					input_proof,
+					secp_ctx,
+				)
+			},
+			SpendableOutputDescriptor::DelayedYuvPaymentOutput( delayed_descriptor ) => {
+				self.sign_yuv_delayed_output(
+					&delayed_descriptor,
+					unsigned_tx,
+					psbt_input,
+					input_idx,
+					input_proof,
+					secp_ctx,
+				)
+			},
+			SpendableOutputDescriptor::StaticYuvPaymentOutput( payment_descriptor ) => {
+				self.sign_yuv_payment_output(
+					payment_descriptor,
+					unsigned_tx,
+					psbt_input,
+					input_idx,
+					input_proof,
+					secp_ctx,
+				)
+			}
+			_ => return Err(SpendYuvOutputsError::NonYuvDescriptor),
+		}.map_err(|_| SpendYuvOutputsError::SignYuvInput(descriptor.clone()))?;
+
+		Ok(())
+	}
+
+	fn sign_yuv_payment_output<C: Signing>(
+		&self,
+	   	descriptor: &StaticYuvPaymentOutputDescriptor,
+		unsigned_tx: &Transaction,
+		psbt_input: &mut Input,
+		input_idx: u32,
+		input_proof: &PixelProof,
+		secp_ctx: &Secp256k1<C>,
+	) -> Result<(), ()> {
+		let PixelProof::Sig(commitment_proofs) = input_proof else {
+			return Err(())
+		};
+
+		let channel_value_satoshis = descriptor.inner.channel_value_satoshis;
+		let channel_keys_id = &descriptor.inner.channel_keys_id;
+		let channel_keys = self.derive_channel_keys(channel_value_satoshis, channel_keys_id);
+
+		let witness = Witness::from_vec(
+			channel_keys.sign_counterparty_payment_input(
+				&unsigned_tx,
+				input_idx as usize,
+				&descriptor.inner,
+				Some(&commitment_proofs.pixel),
+				&secp_ctx,
+			)?,
+		);
+
+		psbt_input.final_script_witness = Some(witness);
+
+		Ok(())
+	}
+
+	/// Sign a YUV static output.
+	fn sign_yuv_static_output<C: Signing>(
+		&self,
+		unsigned_tx: &Transaction,
+		psbt_input: &mut Input,
+		input_idx: u32,
+		input_proof: &PixelProof,
+		secp_ctx: &Secp256k1<C>,
+	) -> Result<(), ()> {
+		let PixelProof::Sig(sig_pixel_proof) = input_proof else {
+			return Err(())
+		};
+
+		let output_script = Builder::new()
+			.push_opcode(opcodes::all::OP_PUSHBYTES_0)
+			.push_slice(&WPubkeyHash::hash(&sig_pixel_proof.inner_key.serialize()).into_inner())
+			.into_script();
+
+		// If it is paid to destination key - derive destination key with index `1`, otherwise
+		// derive shutdown key with index `2`.
+		let derivation_idx = if output_script == self.destination_script {
+            1
+        } else {
+            2
+        };
+
+		let privkey = ExtendedPrivKey::new_master(Network::Testnet, &self.seed)
+			.expect("Your RNG is busted")
+			.ckd_priv(
+				secp_ctx,
+				ChildNumber::from_hardened_idx(derivation_idx).expect("Key space exhausted"),
+			)
+			.expect("Your RNG is busted")
+			.private_key
+			.tweak(&sig_pixel_proof.pixel);
+		let pubkey_bytes = &privkey.public_key(secp_ctx).serialize();
+
+		let witness_script = Script::new_p2pkh(&PubkeyHash::hash(pubkey_bytes));
+		let input_satoshis_value = psbt_input.witness_utxo.as_ref().unwrap().value;
+		let sighash = hash_to_message!(&sighash::SighashCache::new(unsigned_tx)
+			.segwit_signature_hash(
+				input_idx as usize,
+				&witness_script,
+				input_satoshis_value,
+				EcdsaSighashType::All,
+			).unwrap()[..]
+		);
+
+		let sig = sign_with_aux_rand(
+			secp_ctx,
+			&sighash,
+			&privkey,
+			&self,
+		);
+		let mut sig_ser = sig.serialize_der().to_vec();
+		sig_ser.push(EcdsaSighashType::All as u8);
+
+		let witness = Witness::from_vec(
+			vec![sig_ser, pubkey_bytes.to_vec()],
+		);
+
+		psbt_input.final_script_witness = Some(witness);
+
+		Ok(())
+	}
+
+	/// Sign a YUV delayed output.
+	fn sign_yuv_delayed_output<C: Signing>(
+		&self,
+		descriptor: &DelayedYuvPaymentOutputDescriptor,
+		unsigned_tx: &Transaction,
+		psbt_input: &mut Input,
+		input_idx: u32,
+		input_proof: &PixelProof,
+		secp_ctx: &Secp256k1<C>,
+	) -> Result<(), ()> {
+		let PixelProof::Lightning(commitment_proofs) = input_proof else {
+			return Err(())
+		};
+
+		let channel_value_satoshis = descriptor.inner.channel_value_satoshis;
+		let channel_keys_id = &descriptor.inner.channel_keys_id;
+		let channel_keys = self.derive_channel_keys(channel_value_satoshis, channel_keys_id);
+
+		let witness = Witness::from_vec(
+			channel_keys.sign_dynamic_p2wsh_input(
+				unsigned_tx,
+				input_idx as usize,
+				&descriptor.inner,
+				Some(&commitment_proofs.pixel),
+				&secp_ctx,
+			)?
+		);
+
+		psbt_input.final_script_witness = Some(witness);
+
+		Ok(())
 	}
 }
 

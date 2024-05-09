@@ -6,7 +6,7 @@ YUV-Lightning
 [![Safety Dance](https://img.shields.io/badge/unsafe-forbidden-success.svg)](https://github.com/rust-secure-code/safety-dance/)
 [![Security Audit](https://github.com/lightningdevkit/rust-lightning/actions/workflows/audit.yml/badge.svg)](https://github.com/lightningdevkit/rust-lightning/actions/workflows/audit.yml)
 
-[LDK](https://lightningdevkit.org)/`rust-lightning` is a highly performant and flexible
+[LDK](https://lightningdevkit.org)/`yuv-lightning` is a highly performant and flexible 
 implementation of the Lightning Network protocol.
 
 The primary crate, `lightning`, is runtime-agnostic. Data persistence, chain interactions,

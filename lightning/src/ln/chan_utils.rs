@@ -48,11 +48,8 @@ use yuv_pixels::{Chroma, HtlcScriptKind, LightningCommitmentProof, LightningHtlc
 use yuv_types::YuvTxType;
 use crate::chain;
 use crate::ln::features::ChannelTypeFeatures;
-use crate::crypto::utils::{sign, sign_with_aux_rand};
-use super::channel_keys::{DelayedPaymentBasepoint, DelayedPaymentKey, HtlcKey, HtlcBasepoint, RevocationKey, RevocationBasepoint};
-
-#[allow(unused_imports)]
-use crate::prelude::*;
+use crate::routing::gossip::NodeId;
+use crate::util::crypto::{sign, sign_with_aux_rand};
 
 /// Maximum number of one-way in-flight HTLC (protocol-level value).
 pub const MAX_HTLCS: u16 = 483;
@@ -190,7 +187,18 @@ pub fn build_commitment_secret(commitment_seed: &[u8; 32], idx: u64) -> [u8; 32]
 }
 
 /// Build a closing transaction
-pub fn build_closing_transaction(to_holder_value_sat: u64, to_counterparty_value_sat: u64, to_holder_script: ScriptBuf, to_counterparty_script: ScriptBuf, funding_outpoint: OutPoint) -> Transaction {
+pub fn build_closing_transaction(
+	to_holder_value_sat: u64,
+	to_counterparty_value_sat: u64,
+	to_holder_script: Script,
+	to_counterparty_script: Script,
+	funding_outpoint: OutPoint,
+	funding_yuv_proofs: Option<&YuvTxType>,
+	to_holder_pixel: Option<&Pixel>,
+	to_counterparty_pixel: Option<&Pixel>,
+	holder_inner_key: Option<PublicKey>,
+	counterparty_inner_key: Option<PublicKey>,
+) -> (Transaction, Option<YuvTxType>) {
 	let txins = {
 		let mut ins: Vec<TxIn> = Vec::new();
 		ins.push(TxIn {
@@ -459,7 +467,12 @@ pub struct TxCreationKeys {
 	/// Countersignatory's HTLC Key
 	pub countersignatory_htlc_key: HtlcKey,
 	/// Broadcaster's Payment Key (which isn't allowed to be spent from for some delay)
-	pub broadcaster_delayed_payment_key: DelayedPaymentKey,
+	pub broadcaster_delayed_payment_key: PublicKey,
+	/// The YUV Pixel Key that is used by countersignatory for 2-of-2 multisig if YUV payments is
+	/// used for the channel.
+	///
+	/// It is Some only if it is lexicographically smaller then holder's PublicKey.
+	pub countersignatory_yuv_pixel_key: Option<PublicKey>,
 }
 
 impl_writeable_tlv_based!(TxCreationKeys, {
@@ -492,7 +505,18 @@ pub struct ChannelPublicKeys {
 	pub delayed_payment_basepoint: DelayedPaymentBasepoint,
 	/// The base point which is used (with derive_public_key) to derive a per-commitment public key
 	/// which is used to encumber HTLC-in-flight outputs.
-	pub htlc_basepoint: HtlcBasepoint,
+	pub htlc_basepoint: PublicKey,
+	/// The YUV Pixel Key that is used for 2-of-2 multisig if YUV payments is used for this channel.
+	///
+	/// It is Some only in channel's context and if it is lexicographically smaller then
+	/// counterparties PublicKey.
+	pub funding_yuv_pixel_key: Option<PublicKey>,
+	/// The destination public key that is useful for YUV payments to generate destination script
+	/// with using YUV Pixel Key.
+	///
+	/// Presented only in channels that opened since YUV Payments were introduced. And only for
+	/// holder.
+	pub destination_pubkey: Option<PublicKey>,
 }
 
 impl_writeable_tlv_based!(ChannelPublicKeys, {
@@ -508,13 +532,22 @@ impl_writeable_tlv_based!(ChannelPublicKeys, {
 impl TxCreationKeys {
 	/// Create per-state keys from channel base points and the per-commitment point.
 	/// Key set is asymmetric and can't be used as part of counter-signatory set of transactions.
-	pub fn derive_new<T: secp256k1::Signing + secp256k1::Verification>(secp_ctx: &Secp256k1<T>, per_commitment_point: &PublicKey, broadcaster_delayed_payment_base: &DelayedPaymentBasepoint, broadcaster_htlc_base: &HtlcBasepoint, countersignatory_revocation_base: &RevocationBasepoint, countersignatory_htlc_base: &HtlcBasepoint) -> TxCreationKeys {
+	pub fn derive_new<T: secp256k1::Signing + secp256k1::Verification>(
+		secp_ctx: &Secp256k1<T>,
+		per_commitment_point: &PublicKey,
+		broadcaster_delayed_payment_base: &PublicKey,
+		broadcaster_htlc_base: &PublicKey,
+		countersignatory_revocation_base: &PublicKey,
+		countersignatory_htlc_base: &PublicKey,
+		countersignatory_yuv_pixel_key: Option<PublicKey>,
+	) -> TxCreationKeys {
 		TxCreationKeys {
 			per_commitment_point: per_commitment_point.clone(),
-			revocation_key: RevocationKey::from_basepoint(&secp_ctx, &countersignatory_revocation_base, &per_commitment_point),
-			broadcaster_htlc_key: HtlcKey::from_basepoint(&secp_ctx, &broadcaster_htlc_base, &per_commitment_point),
-			countersignatory_htlc_key: HtlcKey::from_basepoint(&secp_ctx, &countersignatory_htlc_base, &per_commitment_point),
-			broadcaster_delayed_payment_key: DelayedPaymentKey::from_basepoint(&secp_ctx, &broadcaster_delayed_payment_base, &per_commitment_point),
+			revocation_key: derive_public_revocation_key(&secp_ctx, &per_commitment_point, &countersignatory_revocation_base),
+			broadcaster_htlc_key: derive_public_key(&secp_ctx, &per_commitment_point, &broadcaster_htlc_base),
+			countersignatory_htlc_key: derive_public_key(&secp_ctx, &per_commitment_point, &countersignatory_htlc_base),
+			broadcaster_delayed_payment_key: derive_public_key(&secp_ctx, &per_commitment_point, &broadcaster_delayed_payment_base),
+			countersignatory_yuv_pixel_key,
 		}
 	}
 
@@ -714,15 +747,22 @@ pub(crate) fn get_htlc_redeemscript_with_explicit_keys(htlc: &HTLCOutputInCommit
 /// `yuv_payment` - is required for YUV protocol, when the YuvPayment feature is used for the channel, skip it for non-YUV payments.
 /// If it is `Some` the remote_htlcpubkey key will be tweaked by the pixel value.
 #[inline]
-pub fn get_htlc_redeemscript(htlc: &HTLCOutputInCommitment, channel_type_features: &ChannelTypeFeatures, keys: &TxCreationKeys) -> ScriptBuf {
-	get_htlc_redeemscript_with_explicit_keys(htlc, channel_type_features, &keys.broadcaster_htlc_key, &keys.countersignatory_htlc_key, &keys.revocation_key)
+pub fn get_htlc_redeemscript(htlc: &HTLCOutputInCommitment, channel_type_features: &ChannelTypeFeatures, keys: &TxCreationKeys, yuv_pixel: Option<&Pixel>) -> Script {
+	// Tweak revocation key if YUV payment is used.
+	let countersignatory_htlc_key = keys.countersignatory_htlc_key.clone().maybe_tweak(yuv_pixel);
+
+	get_htlc_redeemscript_with_explicit_keys(htlc, channel_type_features, &keys.broadcaster_htlc_key, &countersignatory_htlc_key, &keys.revocation_key)
 }
 
 /// Gets the redeemscript for a funding output from the two funding public keys.
 /// Note that the order of funding public keys does not matter.
-pub fn make_funding_redeemscript(broadcaster: &PublicKey, countersignatory: &PublicKey) -> ScriptBuf {
-	let broadcaster_funding_key = broadcaster.serialize();
-	let countersignatory_funding_key = countersignatory.serialize();
+pub fn make_funding_redeemscript(
+	broadcaster: &PublicKey,
+	countersignatory: &PublicKey,
+	funding_yuv_pixel: Option<&Pixel>,
+) -> Script {
+	let mut first_key = *broadcaster;
+	let mut second_key = *countersignatory;
 
 	if second_key.serialize() < first_key.serialize() {
 		swap(&mut first_key, &mut second_key);
@@ -740,15 +780,19 @@ pub fn make_funding_redeemscript(broadcaster: &PublicKey, countersignatory: &Pub
 	builder.into_script()
 }
 
-pub(crate) fn make_funding_redeemscript_from_slices(broadcaster_funding_key: &[u8; 33], countersignatory_funding_key: &[u8; 33]) -> ScriptBuf {
-	let builder = Builder::new().push_opcode(opcodes::all::OP_PUSHNUM_2);
-	if broadcaster_funding_key[..] < countersignatory_funding_key[..] {
-		builder.push_slice(broadcaster_funding_key)
-			.push_slice(countersignatory_funding_key)
-	} else {
-		builder.push_slice(countersignatory_funding_key)
-			.push_slice(broadcaster_funding_key)
-	}.push_opcode(opcodes::all::OP_PUSHNUM_2).push_opcode(opcodes::all::OP_CHECKMULTISIG).into_script()
+pub(crate) fn make_funding_redeemscript_from_node_ids(
+	broadcaster_node_id: &NodeId,
+	countersignatory_node_id: &NodeId,
+	funding_yuv_pixel: Option<&Pixel>,
+) -> Result<Script, secp256k1::Error> {
+	let broadcaster_fundin_key = broadcaster_node_id.as_pubkey()?;
+	let countersignatory_fundin_key = countersignatory_node_id.as_pubkey()?;
+
+	Ok(make_funding_redeemscript(
+		&broadcaster_fundin_key,
+		&countersignatory_fundin_key,
+		funding_yuv_pixel,
+	))
 }
 
 /// Builds an unsigned HTLC-Success or HTLC-Timeout transaction from the given channel and HTLC
@@ -884,8 +928,18 @@ pub fn get_to_countersignatory_with_anchors_redeemscript(payment_point: &PublicK
 /// <>
 /// (empty vector required to satisfy compliance with MINIMALIF-standard rule)
 #[inline]
-pub fn get_anchor_redeemscript(funding_pubkey: &PublicKey) -> ScriptBuf {
-	Builder::new().push_slice(funding_pubkey.serialize())
+pub fn get_anchor_redeemscript(funding_pubkey: &PublicKey) -> Script {
+	get_anchor_reedeemscript_with_yuv(funding_pubkey, None)
+}
+
+/// See [`get_anchor_reedeemscript`] for details.
+///
+/// Additionally
+#[inline]
+pub fn get_anchor_reedeemscript_with_yuv(funding_pubkey: &PublicKey, yuv_pixel: Option<Pixel>) -> Script {
+	let funding_pubkey = funding_pubkey.maybe_tweak(yuv_pixel);
+
+	Builder::new().push_slice(&funding_pubkey.serialize()[..])
 		.push_opcode(opcodes::all::OP_CHECKSIG)
 		.push_opcode(opcodes::all::OP_IFDUP)
 		.push_opcode(opcodes::all::OP_NOTIF)
@@ -1139,17 +1193,20 @@ impl HolderCommitmentTransaction {
 
 		let keys = TxCreationKeys {
 			per_commitment_point: dummy_key.clone(),
-			revocation_key: RevocationKey::from_basepoint(&secp_ctx, &RevocationBasepoint::from(dummy_key), &dummy_key),
-			broadcaster_htlc_key: HtlcKey::from_basepoint(&secp_ctx, &HtlcBasepoint::from(dummy_key), &dummy_key),
-			countersignatory_htlc_key: HtlcKey::from_basepoint(&secp_ctx, &HtlcBasepoint::from(dummy_key), &dummy_key),
-			broadcaster_delayed_payment_key: DelayedPaymentKey::from_basepoint(&secp_ctx, &DelayedPaymentBasepoint::from(dummy_key), &dummy_key),
+			revocation_key: dummy_key.clone(),
+			broadcaster_htlc_key: dummy_key.clone(),
+			countersignatory_htlc_key: dummy_key.clone(),
+			broadcaster_delayed_payment_key: dummy_key.clone(),
+			countersignatory_yuv_pixel_key: None,
 		};
 		let channel_pubkeys = ChannelPublicKeys {
 			funding_pubkey: dummy_key.clone(),
 			revocation_basepoint: RevocationBasepoint::from(dummy_key),
 			payment_point: dummy_key.clone(),
-			delayed_payment_basepoint: DelayedPaymentBasepoint::from(dummy_key.clone()),
-			htlc_basepoint: HtlcBasepoint::from(dummy_key.clone())
+			delayed_payment_basepoint: dummy_key.clone(),
+			htlc_basepoint: dummy_key.clone(),
+			funding_yuv_pixel_key: None,
+			destination_pubkey: None,
 		};
 		let channel_parameters = ChannelTransactionParameters {
 			holder_pubkeys: channel_pubkeys.clone(),
@@ -2099,40 +2156,71 @@ impl<'a> TrustedCommitmentTransaction<'a> {
 		Ok(ret)
 	}
 
-	/// Builds the second-level holder HTLC transaction for the HTLC with index `htlc_index`.
-	pub(crate) fn build_unsigned_htlc_tx(
-		&self, channel_parameters: &DirectedChannelTransactionParameters, htlc_index: usize,
+	/// Gets a signed HTLC transaction given a preimage (for !htlc.offered) and the holder HTLC transaction signature.
+	pub(crate) fn get_signed_htlc_tx(
+		&self,
+		channel_parameters: &DirectedChannelTransactionParameters,
+		htlc_index: usize,
+		counterparty_signature: &Signature,
+		signature: &Signature,
 		preimage: &Option<PaymentPreimage>,
-	) -> Transaction {
-		let keys = &self.inner.keys;
-		let this_htlc = &self.inner.htlcs[htlc_index];
+	) -> (Transaction, Option<YuvTxType>) {
+		let inner = self.inner;
+		let keys = &inner.keys;
+		let txid = inner.built.txid;
+		let this_htlc = &inner.htlcs[htlc_index];
 		assert!(this_htlc.transaction_output_index.is_some());
 		// if we don't have preimage for an HTLC-Success, we can't generate an HTLC transaction.
 		if !this_htlc.offered && preimage.is_none() { unreachable!(); }
 		// Further, we should never be provided the preimage for an HTLC-Timeout transaction.
 		if  this_htlc.offered && preimage.is_some() { unreachable!(); }
 
-		build_htlc_transaction(
-			&self.inner.built.txid, self.inner.feerate_per_kw, channel_parameters.contest_delay(), &this_htlc,
-			&self.channel_type_features, &keys.broadcaster_delayed_payment_key, &keys.revocation_key
-		)
-	}
+		let (htlc_yuv_pixel_opt, pixel_proofs) = inner.yuv_proofs.as_ref()
+			.and_then(|yuv_proofs| yuv_proofs.output_proofs())
+			.and_then(|output_proofs| output_proofs.get(&(htlc_index as u32)).cloned())
+			.map_or((None, None), |input_proof| {
+				let yuv_pixel = input_proof.pixel();
 
+				let (output_proof_opt, _) = get_lightning_yuv_proof(
+					channel_parameters.contest_delay(), Some(yuv_pixel), keys,
+				);
 
-	/// Builds the witness required to spend the input for the HTLC with index `htlc_index` in a
-	/// second-level holder HTLC transaction.
-	pub(crate) fn build_htlc_input_witness(
-		&self, htlc_index: usize, counterparty_signature: &Signature, signature: &Signature,
-		preimage: &Option<PaymentPreimage>
-	) -> Witness {
-		let keys = &self.inner.keys;
-		let htlc_redeemscript = get_htlc_redeemscript_with_explicit_keys(
-			&self.inner.htlcs[htlc_index], &self.channel_type_features, &keys.broadcaster_htlc_key,
-			&keys.countersignatory_htlc_key, &keys.revocation_key
+				let output_proof = output_proof_opt
+					.expect("yuv_pixel is presented, so it must be valid");
+				let pixel_proofs = YuvTxType::Transfer {
+					input_proofs: BTreeMap::from([(0, input_proof.clone())]),
+					output_proofs: BTreeMap::from([(0, output_proof)]),
+				};
+
+				(Some(yuv_pixel), Some(pixel_proofs))
+			});
+
+		let counterparty_htlc_key = keys.countersignatory_htlc_key.maybe_tweak(htlc_yuv_pixel_opt);
+		let revocation_key = keys.revocation_key.maybe_tweak(htlc_yuv_pixel_opt);
+
+		let mut htlc_tx = build_htlc_transaction(
+			&txid,
+			inner.feerate_per_kw,
+			channel_parameters.contest_delay(),
+			&this_htlc,
+			&self.channel_type_features,
+			&keys.broadcaster_delayed_payment_key,
+			&revocation_key,
 		);
-		chan_utils::build_htlc_input_witness(
+
+		let htlc_redeemscript = get_htlc_redeemscript_with_explicit_keys(
+			&this_htlc,
+			&self.channel_type_features,
+			&keys.broadcaster_htlc_key,
+			&counterparty_htlc_key,
+			&keys.revocation_key,
+		);
+
+		htlc_tx.input[0].witness = build_htlc_input_witness(
 			signature, counterparty_signature, preimage, &htlc_redeemscript, &self.channel_type_features,
-		)
+		);
+
+		(htlc_tx, pixel_proofs)
 	}
 
 	/// Returns the index of the revokeable output, i.e. the `to_local` output sending funds to
@@ -2386,11 +2474,11 @@ mod tests {
 		let tx = builder.build(3000, 0);
 		let keys = &builder.keys.clone();
 		assert_eq!(tx.built.transaction.output.len(), 3);
-		assert_eq!(tx.built.transaction.output[0].script_pubkey, get_htlc_redeemscript(&received_htlc, &ChannelTypeFeatures::only_static_remote_key(), &keys).to_v0_p2wsh());
-		assert_eq!(tx.built.transaction.output[1].script_pubkey, get_htlc_redeemscript(&offered_htlc, &ChannelTypeFeatures::only_static_remote_key(), &keys).to_v0_p2wsh());
-		assert_eq!(get_htlc_redeemscript(&received_htlc, &ChannelTypeFeatures::only_static_remote_key(), &keys).to_v0_p2wsh().to_hex_string(),
+		assert_eq!(tx.built.transaction.output[0].script_pubkey, get_htlc_redeemscript(&received_htlc, &ChannelTypeFeatures::only_static_remote_key(), &keys, None).to_v0_p2wsh());
+		assert_eq!(tx.built.transaction.output[1].script_pubkey, get_htlc_redeemscript(&offered_htlc, &ChannelTypeFeatures::only_static_remote_key(), &keys, None).to_v0_p2wsh());
+		assert_eq!(get_htlc_redeemscript(&received_htlc, &ChannelTypeFeatures::only_static_remote_key(), &keys, None).to_v0_p2wsh().to_hex(),
 				   "0020e43a7c068553003fe68fcae424fb7b28ec5ce48cd8b6744b3945631389bad2fb");
-		assert_eq!(get_htlc_redeemscript(&offered_htlc, &ChannelTypeFeatures::only_static_remote_key(), &keys).to_v0_p2wsh().to_hex_string(),
+		assert_eq!(get_htlc_redeemscript(&offered_htlc, &ChannelTypeFeatures::only_static_remote_key(), &keys, None).to_v0_p2wsh().to_hex(),
 				   "0020215d61bba56b19e9eadb6107f5a85d7f99c40f65992443f69229c290165bc00d");
 
 		// Generate broadcaster output and received and offered HTLC outputs,  with anchors
@@ -2398,11 +2486,11 @@ mod tests {
 		builder.htlcs_with_aux = vec![(received_htlc.clone(), ()), (offered_htlc.clone(), ())];
 		let tx = builder.build(3000, 0);
 		assert_eq!(tx.built.transaction.output.len(), 5);
-		assert_eq!(tx.built.transaction.output[2].script_pubkey, get_htlc_redeemscript(&received_htlc, &ChannelTypeFeatures::anchors_zero_htlc_fee_and_dependencies(), &keys).to_v0_p2wsh());
-		assert_eq!(tx.built.transaction.output[3].script_pubkey, get_htlc_redeemscript(&offered_htlc, &ChannelTypeFeatures::anchors_zero_htlc_fee_and_dependencies(), &keys).to_v0_p2wsh());
-		assert_eq!(get_htlc_redeemscript(&received_htlc, &ChannelTypeFeatures::anchors_zero_htlc_fee_and_dependencies(), &keys).to_v0_p2wsh().to_hex_string(),
+		assert_eq!(tx.built.transaction.output[2].script_pubkey, get_htlc_redeemscript(&received_htlc, &ChannelTypeFeatures::anchors_zero_htlc_fee_and_dependencies(), &keys, None).to_v0_p2wsh());
+		assert_eq!(tx.built.transaction.output[3].script_pubkey, get_htlc_redeemscript(&offered_htlc, &ChannelTypeFeatures::anchors_zero_htlc_fee_and_dependencies(), &keys, None).to_v0_p2wsh());
+		assert_eq!(get_htlc_redeemscript(&received_htlc, &ChannelTypeFeatures::anchors_zero_htlc_fee_and_dependencies(), &keys, None).to_v0_p2wsh().to_hex(),
 				   "0020b70d0649c72b38756885c7a30908d912a7898dd5d79457a7280b8e9a20f3f2bc");
-		assert_eq!(get_htlc_redeemscript(&offered_htlc, &ChannelTypeFeatures::anchors_zero_htlc_fee_and_dependencies(), &keys).to_v0_p2wsh().to_hex_string(),
+		assert_eq!(get_htlc_redeemscript(&offered_htlc, &ChannelTypeFeatures::anchors_zero_htlc_fee_and_dependencies(), &keys, None).to_v0_p2wsh().to_hex(),
 				   "002087a3faeb1950a469c0e2db4a79b093a41b9526e5a6fc6ef5cb949bde3be379c7");
 	}
 

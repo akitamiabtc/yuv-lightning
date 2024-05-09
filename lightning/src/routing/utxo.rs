@@ -13,10 +13,9 @@
 //! channel matches a UTXO on-chain, requiring at least some marginal on-chain transacting in
 //! order to announce a channel. This module handles that checking.
 
-use bitcoin::TxOut;
-use bitcoin::blockdata::constants::ChainHash;
-
-use hex::DisplayHex;
+use bitcoin::{BlockHash, TxOut};
+use bitcoin::hashes::hex::ToHex;
+use yuv_pixels::Pixel;
 
 use crate::events::MessageSendEvent;
 use crate::ln::chan_utils::make_funding_redeemscript_from_node_ids;
@@ -106,7 +105,10 @@ pub trait UtxoLookup {
 	/// unknown.
 	///
 	/// [`short_channel_id`]: https://github.com/lightning/bolts/blob/master/07-routing-gossip.md#definition-of-short_channel_id
-	fn get_utxo(&self, chain_hash: &ChainHash, short_channel_id: u64) -> UtxoResult;
+	fn get_utxo(&self, genesis_hash: &BlockHash, short_channel_id: u64) -> UtxoResult;
+
+	/// The same as [`UtxoLookup::get_utxo`], but also returns the Pixel attached to the UTXO in [`UtxoEntry`].
+	fn get_utxo_with_yuv(&self, genesis_hash: &BlockHash, short_channel_id: u64) -> UtxoResult;
 }
 
 enum ChannelAnnouncement {
@@ -544,9 +546,17 @@ impl PendingChecks {
 	) -> Result<CheckAnnouncementResult, msgs::LightningError> where U::Target: UtxoLookup {
 		let handle_result = |res| {
 			match res {
-				Ok(TxOut { value, script_pubkey }) => {
-					let expected_script =
-						make_funding_redeemscript_from_slices(msg.bitcoin_key_1.as_array(), msg.bitcoin_key_2.as_array()).to_v0_p2wsh();
+				Ok(UtxoEntry { txout: TxOut { value, script_pubkey }, pixel } ) => {
+					let expected_script = make_funding_redeemscript_from_node_ids(
+						&msg.bitcoin_key_1, &msg.bitcoin_key_2, pixel.as_ref(),
+					).map_err(|err| {
+						LightningError {
+							err: format!("Error creating redeem script: {}", err),
+							action: ErrorAction::IgnoreError,
+						}
+					})?.to_v0_p2wsh();
+
+
 					if script_pubkey != expected_script {
 						return Err(LightningError{
 							err: format!("Channel announcement key ({}) didn't match on-chain script ({})",

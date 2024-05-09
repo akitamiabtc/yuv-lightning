@@ -2850,7 +2850,7 @@ mod tests {
 		});
 		assert_eq!(scorer.channel_penalty_msat(&candidate, usage, &params), 128);
 
-		scorer.payment_path_failed(&Path { hops: path, blinded_tail: None }, 43, Duration::ZERO);
+		scorer.payment_path_failed(&Path { hops: path, blinded_tail: None, chroma: None, }, 43);
 
 		let channel = network_graph.read_only().channel(42).unwrap().to_owned();
 		let (info, _) = channel.as_directed_from(&node_a).unwrap();
@@ -3022,7 +3022,48 @@ mod tests {
 		let usage = ChannelUsage { amount_msat: 0, ..usage };
 		assert_eq!(scorer.channel_penalty_msat(&candidate, usage, &params), 0);
 		let usage = ChannelUsage { amount_msat: 1_024, ..usage };
-		assert_eq!(scorer.channel_penalty_msat(&candidate, usage, &params), u64::max_value());
+		assert_eq!(scorer.channel_penalty_msat(42, &source, &target, usage, &params), u64::max_value());
+	}
+
+	#[test]
+	fn decays_liquidity_bounds_without_shift_overflow() {
+		let logger = TestLogger::new();
+		let network_graph = network_graph(&logger);
+		let params = ProbabilisticScoringFeeParameters {
+			liquidity_penalty_multiplier_msat: 1_000,
+			..ProbabilisticScoringFeeParameters::zero_penalty()
+		};
+		let decay_params = ProbabilisticScoringDecayParameters {
+			liquidity_offset_half_life: Duration::from_secs(10),
+			..ProbabilisticScoringDecayParameters::default()
+		};
+		let mut scorer = ProbabilisticScorer::new(decay_params, &network_graph, &logger);
+		let source = source_node_id();
+		let target = target_node_id();
+		let usage = ChannelUsage {
+			amount_msat: 256,
+			inflight_htlc_msat: 0,
+			yuv_amount: None,
+			inflight_yuv: None,
+			effective_capacity: EffectiveCapacity::Total {
+				capacity_msat: 1_024,
+				htlc_maximum_msat: 1_000,
+				capacity_yuv: None,
+				htlc_maximum_yuv: None,
+			},
+		};
+		assert_eq!(scorer.channel_penalty_msat(42, &source, &target, usage, &params), 125);
+
+		scorer.payment_path_failed(&payment_path_for_amount(512), 42);
+		assert_eq!(scorer.channel_penalty_msat(42, &source, &target, usage, &params), 281);
+
+		// An unchecked right shift 64 bits or more in DirectedChannelLiquidity::decayed_offset_msat
+		// would cause an overflow.
+		SinceEpoch::advance(Duration::from_secs(10 * 64));
+		assert_eq!(scorer.channel_penalty_msat(42, &source, &target, usage, &params), 125);
+
+		SinceEpoch::advance(Duration::from_secs(10));
+		assert_eq!(scorer.channel_penalty_msat(42, &source, &target, usage, &params), 125);
 	}
 
 	#[test]
@@ -3575,15 +3616,14 @@ mod tests {
 				short_channel_id: 42,
 			});
 
-			assert_eq!(scorer.channel_penalty_msat(&candidate, usage, &params), 2050);
-
-			let usage = ChannelUsage {
-				amount_msat: 1,
-				inflight_htlc_msat: 0,
-				effective_capacity: EffectiveCapacity::AdvertisedMaxHTLC { amount_msat: 0 },
-			};
-			assert_eq!(scorer.channel_penalty_msat(&candidate, usage, &params), 2048);
-		}
+		let usage = ChannelUsage {
+			amount_msat: 1,
+			inflight_htlc_msat: 0,
+			yuv_amount: None,
+			inflight_yuv: None,
+			effective_capacity: EffectiveCapacity::AdvertisedMaxHTLC { amount_msat: 0, amount_yuv: None },
+		};
+		assert_eq!(scorer.channel_penalty_msat(42, &target, &source, usage, &params), 2048);
 
 		// Advance to decay all liquidity offsets to zero.
 		scorer.time_passed(Duration::from_secs(10 * (16 + 60 * 60)));
@@ -3600,7 +3640,7 @@ mod tests {
 			path_hop(source_pubkey(), 42, 1),
 			path_hop(sender_pubkey(), 41, 0),
 		];
-		scorer.payment_path_failed(&Path { hops: path, blinded_tail: None }, 42, Duration::from_secs(10 * (16 + 60 * 60)));
+		scorer.payment_path_failed(&Path { hops: path, blinded_tail: None, chroma: None, }, 42);
 	}
 
 	#[test]

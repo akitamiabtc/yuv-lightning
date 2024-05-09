@@ -41,6 +41,19 @@ use crate::sync::Mutex;
 /// [`ChannelManager::timer_tick_occurred`]: crate::ln::channelmanager::ChannelManager::timer_tick_occurred
 pub(crate) const IDEMPOTENCY_TIMEOUT_TICKS: u8 = 7;
 
+/// The number of ticks of [`ChannelManager::timer_tick_occurred`] until an invoice request without
+/// a response is timed out.
+///
+/// [`ChannelManager::timer_tick_occurred`]: crate::ln::channelmanager::ChannelManager::timer_tick_occurred
+const INVOICE_REQUEST_TIMEOUT_TICKS: u8 = 3;
+
+pub(crate) struct YuvPendingRetryablePayment {
+	/// Asset type of the payment.
+	pub(crate) pending_yuv_pixel: Pixel,
+	/// The total payment amount across all paths in YUV or msats.
+	pub(crate) total_amount: u128,
+}
+
 /// Stores the session_priv for each part of a payment that is still pending. For versions 0.0.102
 /// and later, also stores information for retrying the payment.
 pub(crate) enum PendingOutboundPayment {

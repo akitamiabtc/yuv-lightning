@@ -10,14 +10,17 @@
 //! A bunch of useful utilities for building networks of nodes and exchanging messages between
 //! nodes for functional tests.
 
-use crate::chain::{BestBlock, ChannelMonitorUpdateStatus, Confirm, Listen, Watch, chainmonitor::Persist};
+use crate::chain::{BestBlock, ChannelMonitorUpdateStatus, Confirm, Listen, Watch, chainmonitor::Persist, YuvConfirm};
+use crate::sign::EntropySource;
 use crate::chain::channelmonitor::ChannelMonitor;
 use crate::chain::transaction::OutPoint;
 use crate::events::{ClaimedHTLC, ClosureReason, Event, HTLCDestination, MessageSendEvent, MessageSendEventsProvider, PathFailure, PaymentPurpose, PaymentFailureReason};
 use crate::events::bump_transaction::{BumpTransactionEvent, BumpTransactionEventHandler, Wallet, WalletSource};
-use crate::ln::types::{ChannelId, PaymentPreimage, PaymentHash, PaymentSecret};
-use crate::ln::channelmanager::{AChannelManager, ChainParameters, ChannelManager, ChannelManagerReadArgs, RAACommitmentOrder, PaymentSendFailure, RecipientOnionFields, PaymentId, MIN_CLTV_EXPIRY_DELTA};
-use crate::ln::features::InitFeatures;
+use crate::ln::{ChannelId, PaymentPreimage, PaymentHash, PaymentSecret};
+use crate::ln::channelmanager::{AChannelManager, ChainParameters, ChannelManager, ChannelManagerReadArgs, RAACommitmentOrder, PaymentSendFailure, RecipientOnionFields, PaymentId, MIN_CLTV_EXPIRY_DELTA, UpdateBalance};
+use crate::routing::gossip::{P2PGossipSync, NetworkGraph, NetworkUpdate};
+use crate::routing::router::{self, PaymentParameters, Route, RouteParameters};
+use crate::ln::features::{Bolt11InvoiceFeatures, InitFeatures};
 use crate::ln::msgs;
 use crate::ln::msgs::{ChannelMessageHandler, OnionMessageHandler, RoutingMessageHandler};
 use crate::ln::peer_handler::IgnoringMessageHandler;
@@ -42,8 +45,7 @@ use bitcoin::hash_types::{BlockHash, TxMerkleNode};
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash as _;
 use bitcoin::network::constants::Network;
-use bitcoin::pow::CompactTarget;
-use bitcoin::secp256k1::{PublicKey, SecretKey};
+use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
 
 use alloc::rc::Rc;
 use core::cell::RefCell;
@@ -52,7 +54,18 @@ use core::mem;
 use core::ops::Deref;
 use crate::io;
 use crate::prelude::*;
+use core::cell::RefCell;
+use alloc::rc::Rc;
+use alloc::collections::BTreeMap;
 use crate::sync::{Arc, Mutex, LockTestExt, RwLock};
+use core::mem;
+use core::iter::repeat;
+use bitcoin::{PackedLockTime, secp256k1, TxIn, TxMerkleNode};
+use yuv_pixels::{Chroma, Luma, MultisigPixelProof, Pixel, PixelProof};
+use yuv_types::{YuvTransaction, YuvTxType};
+use crate::chain::chaininterface::YuvBroadcaster;
+use crate::ln::chan_utils::make_funding_redeemscript_from_node_ids;
+use crate::ln::channel::{UpdateBalanceRequest, YuvPayment};
 
 pub const CHAN_CONFIRM_DEPTH: u32 = 10;
 
@@ -1334,7 +1347,7 @@ pub fn open_zero_conf_channel<'a, 'b, 'c, 'd>(initiator: &'a Node<'b, 'c, 'd>, r
 	(tx, as_channel_ready.channel_id)
 }
 
-pub fn exchange_open_accept_chan<'a, 'b, 'c>(node_a: &Node<'a, 'b, 'c>, node_b: &Node<'a, 'b, 'c>, channel_value: u64, push_msat: u64) -> ChannelId {
+pub fn create_chan_between_nodes_with_value_init<'a, 'b, 'c>(node_a: &Node<'a, 'b, 'c>, node_b: &Node<'a, 'b, 'c>, channel_value: u64, push_msat: u64) -> Transaction {
 	let create_chan_id = node_a.node.create_channel(node_b.node.get_our_node_id(), channel_value, push_msat, 42, None, None).unwrap();
 	let open_channel_msg = get_event_msg!(node_a, MessageSendEvent::SendOpenChannel, node_b.node.get_our_node_id());
 	assert_eq!(open_channel_msg.common_fields.temporary_channel_id, create_chan_id);
@@ -2349,8 +2362,8 @@ pub fn expect_payment_forwarded<CM: AChannelManager, H: NodeHolder<CM=CM>>(
 ) -> Option<u64> {
 	match event {
 		Event::PaymentForwarded {
-			prev_channel_id, next_channel_id, prev_user_channel_id, next_user_channel_id,
-			total_fee_earned_msat, skimmed_fee_msat, claim_from_onchain_tx, ..
+			fee_earned_msat, prev_channel_id, claim_from_onchain_tx, next_channel_id,
+			outbound_amount_forwarded_msat: _, ..
 		} => {
 			if allow_1_msat_fee_overpay {
 				// Aggregating fees for blinded paths may result in a rounding error, causing slight
@@ -3071,8 +3084,16 @@ fn _route_payment<'a, 'b, 'c>(origin_node: &Node<'a, 'b, 'c>, expected_route: &[
 	};
 
 	let payment_params = PaymentParameters::from_node_id(expected_route.last().unwrap().node.get_our_node_id(), TEST_FINAL_CLTV)
-		.with_bolt11_features(expected_route.last().unwrap().node.bolt11_invoice_features()).unwrap();
-	let route_params = RouteParameters::from_payment_params_and_value(payment_params, recv_value);
+		.with_bolt11_features(invoice_features).unwrap();
+	let mut route_params = RouteParameters::from_payment_params_and_value(payment_params, recv_value);
+
+	if let Some(amount) = yuv_amount {
+		let secp_ctx = Secp256k1::new();
+		let pixel = new_test_pixel(Some(amount.into()), None, &secp_ctx);
+
+		route_params = route_params.with_yuv(pixel);
+	}
+
 	let route = get_route(origin_node, &route_params).unwrap();
 	assert_eq!(route.paths.len(), 1);
 	assert_eq!(route.paths[0].hops.len(), expected_route.len());
@@ -3943,9 +3964,7 @@ pub fn create_batch_channel_funding<'a, 'b, 'c>(
 	for (other_node, channel_value_satoshis, push_msat, user_channel_id, override_config) in params {
 		// Initialize channel opening.
 		let temp_chan_id = funding_node.node.create_channel(
-			other_node.node.get_our_node_id(), *channel_value_satoshis, *push_msat, *user_channel_id,
-			None,
-			*override_config,
+			other_node.node.get_our_node_id(), *channel_value_satoshis, *push_msat, *user_channel_id, None, *override_config,
 		).unwrap();
 		let open_channel_msg = get_event_msg!(funding_node, MessageSendEvent::SendOpenChannel, other_node.node.get_our_node_id());
 		other_node.node.handle_open_channel(&funding_node.node.get_our_node_id(), &open_channel_msg);

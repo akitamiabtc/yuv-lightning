@@ -185,8 +185,8 @@ impl chain::Watch<TestChannelSigner> for TestChainMonitor {
 		let mut map_lock = self.latest_monitors.lock().unwrap();
 		let map_entry = map_lock.get_mut(&funding_txo).expect("Didn't have monitor on update call");
 		let deserialized_monitor = <(BlockHash, channelmonitor::ChannelMonitor<TestChannelSigner>)>::
-			read(&mut Cursor::new(&map_entry.1), (&*self.keys, &*self.keys)).unwrap().1;
-		deserialized_monitor.update_monitor(update, &&TestBroadcaster{}, &&FuzzEstimator { ret_val: atomic::AtomicU32::new(253) }, &self.logger).unwrap();
+			read(&mut Cursor::new(&map_entry.get().1), (&*self.keys, &*self.keys)).unwrap().1;
+		deserialized_monitor.update_monitor(update, &&TestBroadcaster{}, &Some(&TestYuvBroadcaster{}), &&FuzzEstimator { ret_val: atomic::AtomicU32::new(253) }, &self.logger).unwrap();
 		let mut ser = VecWriter(Vec::new());
 		deserialized_monitor.write(&mut ser).unwrap();
 		*map_entry = (update.update_id, ser.0);

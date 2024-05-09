@@ -155,17 +155,19 @@ pub trait KVStore {
 }
 
 /// Trait that handles persisting a [`ChannelManager`], [`NetworkGraph`], and [`WriteableScore`] to disk.
-///
-/// [`ChannelManager`]: crate::ln::channelmanager::ChannelManager
-pub trait Persister<'a, CM: Deref, L: Deref, S: WriteableScore<'a>>
-where
-	CM::Target: 'static + AChannelManager,
-	L::Target: 'static + Logger,
+pub trait Persister<'a, M: Deref, T: Deref, YT: Deref, ES: Deref, NS: Deref, SP: Deref, F: Deref, R: Deref, L: Deref, S: WriteableScore<'a>>
+	where M::Target: 'static + chain::Watch<<SP::Target as SignerProvider>::Signer>,
+		T::Target: 'static + BroadcasterInterface,
+		YT::Target: 'static + YuvBroadcaster,
+		ES::Target: 'static + EntropySource,
+		NS::Target: 'static + NodeSigner,
+		SP::Target: 'static + SignerProvider,
+		F::Target: 'static + FeeEstimator,
+		R::Target: 'static + Router,
+		L::Target: 'static + Logger,
 {
 	/// Persist the given ['ChannelManager'] to disk, returning an error if persistence failed.
-	///
-	/// [`ChannelManager`]: crate::ln::channelmanager::ChannelManager
-	fn persist_manager(&self, channel_manager: &CM) -> Result<(), io::Error>;
+	fn persist_manager(&self, channel_manager: &ChannelManager<M, T, YT, ES, NS, SP, F, R, L>) -> Result<(), io::Error>;
 
 	/// Persist the given [`NetworkGraph`] to disk, returning an error if persistence failed.
 	fn persist_graph(&self, network_graph: &NetworkGraph<L>) -> Result<(), io::Error>;
@@ -175,12 +177,19 @@ where
 }
 
 
-impl<'a, A: KVStore + ?Sized, CM: Deref, L: Deref, S: WriteableScore<'a>> Persister<'a, CM, L, S> for A
-where
-	CM::Target: 'static + AChannelManager,
-	L::Target: 'static + Logger,
+impl<'a, A: KVStore, M: Deref, T: Deref, YT: Deref, ES: Deref, NS: Deref, SP: Deref, F: Deref, R: Deref, L: Deref, S: WriteableScore<'a>> Persister<'a, M, T, YT, ES, NS, SP, F, R, L, S> for A
+	where M::Target: 'static + chain::Watch<<SP::Target as SignerProvider>::Signer>,
+		T::Target: 'static + BroadcasterInterface,
+		YT::Target: 'static + YuvBroadcaster,
+		ES::Target: 'static + EntropySource,
+		NS::Target: 'static + NodeSigner,
+		SP::Target: 'static + SignerProvider,
+		F::Target: 'static + FeeEstimator,
+		R::Target: 'static + Router,
+		L::Target: 'static + Logger,
 {
-	fn persist_manager(&self, channel_manager: &CM) -> Result<(), io::Error> {
+	/// Persist the given [`ChannelManager`] to disk, returning an error if persistence failed.
+	fn persist_manager(&self, channel_manager: &ChannelManager<M, T, YT, ES, NS, SP, F, R, L>) -> Result<(), io::Error> {
 		self.write(CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
 			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
 			CHANNEL_MANAGER_PERSISTENCE_KEY,
@@ -455,9 +464,9 @@ where
 	/// It is extremely important that your [`KVStore::read`] implementation uses the
 	/// [`io::ErrorKind::NotFound`] variant correctly. For more information, please see the
 	/// documentation for [`MonitorUpdatingPersister`].
-	pub fn read_all_channel_monitors_with_updates<B: Deref, F: Deref>(
-		&self, broadcaster: &B, fee_estimator: &F,
-	) -> Result<Vec<(BlockHash, ChannelMonitor<<SP::Target as SignerProvider>::EcdsaSigner>)>, io::Error>
+	pub fn read_all_channel_monitors_with_updates<B: Deref, YB: Deref, F: Deref>(
+		&self, broadcaster: &B, yuv_broadcaster: Option<YB>, fee_estimator: &F,
+	) -> Result<Vec<(BlockHash, ChannelMonitor<<SP::Target as SignerProvider>::Signer>)>, io::Error>
 	where
 		B::Target: BroadcasterInterface,
 		YB::Target: YuvBroadcaster,
@@ -496,9 +505,9 @@ where
 	///
 	/// Loading a large number of monitors will be faster if done in parallel. You can use this
 	/// function to accomplish this. Take care to limit the number of parallel readers.
-	pub fn read_channel_monitor_with_updates<B: Deref, F: Deref>(
-		&self, broadcaster: &B, fee_estimator: &F, monitor_key: String,
-	) -> Result<(BlockHash, ChannelMonitor<<SP::Target as SignerProvider>::EcdsaSigner>), io::Error>
+	pub fn read_channel_monitor_with_updates<B: Deref, YB: Deref, F: Deref>(
+		&self, broadcaster: &B, yuv_broadcaster: Option<YB>, fee_estimator: &F, monitor_key: String,
+	) -> Result<(BlockHash, ChannelMonitor<<SP::Target as SignerProvider>::Signer>), io::Error>
 	where
 		B::Target: BroadcasterInterface,
 		YB::Target: YuvBroadcaster,

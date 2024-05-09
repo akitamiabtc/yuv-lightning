@@ -9,7 +9,10 @@
 
 //! The router finds paths within a [`NetworkGraph`] for a payment.
 
-use bitcoin::secp256k1::{PublicKey, Secp256k1, self};
+use bitcoin::secp256k1::PublicKey;
+use bitcoin::hashes::Hash;
+use bitcoin::hashes::sha256::Hash as Sha256;
+use yuv_pixels::{Pixel, Chroma};
 
 use crate::blinded_path::{BlindedHop, BlindedPath, Direction, IntroductionNode};
 use crate::blinded_path::payment::{ForwardNode, ForwardTlvs, PaymentConstraints, PaymentRelay, ReceiveTlvs};
@@ -555,7 +558,8 @@ impl Writeable for Route {
 			(1, self.route_params.as_ref().map(|p| &p.payment_params), option),
 			(2, blinded_tails, optional_vec),
 			(3, self.route_params.as_ref().map(|p| p.final_value_msat), option),
-			(5, self.route_params.as_ref().and_then(|p| p.max_total_routing_fee_msat), option),
+			(5, self.route_params.as_ref().map(|p| p.max_total_routing_fee_msat), option),
+			(6, self.route_params.as_ref().map(|p| p.yuv_pixel.as_ref()), option),
 		});
 		Ok(())
 	}
@@ -1427,17 +1431,24 @@ impl<'a> CandidateRouteHop<'a> {
 	/// cached!
 	fn effective_capacity(&self) -> EffectiveCapacity {
 		match self {
-			CandidateRouteHop::FirstHop(hop) => EffectiveCapacity::ExactLiquidity {
-				liquidity_msat: hop.details.next_outbound_htlc_limit_msat,
+			CandidateRouteHop::FirstHop { details } => EffectiveCapacity::ExactLiquidity {
+				liquidity_msat: details.next_outbound_htlc_limit_msat,
+				liquidity_yuv: details.yuv_holder_pixel.map(|pixel| pixel.luma.amount),
 			},
-			CandidateRouteHop::PublicHop(hop) => hop.info.effective_capacity(),
-			CandidateRouteHop::PrivateHop(PrivateHopCandidate { hint: RouteHintHop { htlc_maximum_msat: Some(max), .. }, .. }) =>
-				EffectiveCapacity::HintMaxHTLC { amount_msat: *max },
-			CandidateRouteHop::PrivateHop(PrivateHopCandidate { hint: RouteHintHop { htlc_maximum_msat: None, .. }, .. }) =>
+			CandidateRouteHop::PublicHop { info, .. } => info.effective_capacity(),
+			CandidateRouteHop::PrivateHop {hint: RouteHintHop { htlc_maximum_msat: Some(max), htlc_maximum_yuv, .. }} =>
+				EffectiveCapacity::HintMaxHTLC {
+					amount_msat: *max,
+					amount_yuv: *htlc_maximum_yuv,
+				},
+			CandidateRouteHop::PrivateHop { hint: RouteHintHop { htlc_maximum_msat: None, .. }} =>
 				EffectiveCapacity::Infinite,
-			CandidateRouteHop::Blinded(hop) =>
-				EffectiveCapacity::HintMaxHTLC { amount_msat: hop.hint.0.htlc_maximum_msat },
-			CandidateRouteHop::OneHopBlinded(_) => EffectiveCapacity::Infinite,
+			CandidateRouteHop::Blinded { hint, .. } =>
+				EffectiveCapacity::HintMaxHTLC {
+					amount_msat: hint.0.htlc_maximum_msat,
+					amount_yuv: None,
+				},
+			CandidateRouteHop::OneHopBlinded { .. } => EffectiveCapacity::Infinite,
 		}
 	}
 
@@ -1959,9 +1970,13 @@ where L::Target: Logger {
 		return Err(LightningError{err: "Cannot send a payment of 0 msat".to_owned(), action: ErrorAction::IgnoreError});
 	}
 
-	let introduction_node_id_cache = payment_params.payee.blinded_route_hints().iter()
-		.map(|(_, path)| path.public_introduction_node_id(network_graph))
-		.collect::<Vec<_>>();
+	if final_pixel_yuv.map_or(false, |p| p.luma.amount == 0) {
+		return Err(LightningError {
+			err: "Cannot send a payment of 0 yuv tokens".to_owned(),
+			action: ErrorAction::IgnoreError,
+		})
+	}
+
 	match &payment_params.payee {
 		Payee::Clear { route_hints, node_id, .. } => {
 			for route in route_hints.iter() {
@@ -2179,7 +2194,9 @@ where L::Target: Logger {
 	// is used. Hence, liquidity used in one direction will not offset any used in the opposite
 	// direction.
 	let mut used_liquidities: HashMap<CandidateHopId, u64> =
-		hash_map_with_capacity(network_nodes.len());
+		HashMap::with_capacity(network_nodes.len());
+	let mut used_liquidities_yuv: HashMap<CandidateHopId, u128> =
+		HashMap::with_capacity(network_nodes.len());
 
 	// Keeping track of how much value we already collected across other paths. Helps to decide
 	// when we want to stop looking for new paths.
@@ -2213,8 +2230,9 @@ where L::Target: Logger {
 		// Adds entry which goes from $candidate.source() to $candidate.target() over the $candidate hop.
 		// $next_hops_fee_msat represents the fees paid for using all the channels *after* this one,
 		// since that value has to be transferred over this channel.
-		// Returns the contribution amount of $candidate if the channel caused an update to `targets`.
-		( $candidate: expr, $next_hops_fee_msat: expr,
+		// Returns the contribution amount of $candidate if the channel caused an update to `targets`
+		// and optionaly the contribution amount of $candidate in YUV amount.
+		( $candidate: expr, $src_node_id: expr, $dest_node_id: expr, $next_hops_fee_msat: expr,
 			$next_hops_value_contribution: expr, $next_hops_path_htlc_minimum_msat: expr,
 			$next_hops_path_penalty_msat: expr, $next_hops_cltv_delta: expr, $next_hops_path_length: expr,
 			$next_hops_value_contribution_yuv: expr
@@ -2396,7 +2414,8 @@ where L::Target: Logger {
 
 						let path_htlc_minimum_msat = compute_fees_saturating(curr_min, $candidate.fees())
 							.saturating_add(curr_min);
-						let hm_entry = dist.entry(src_node_id);
+
+						let hm_entry = dist.entry($src_node_id);
 						let old_entry = hm_entry.or_insert_with(|| {
 							// If there was previously no known way to access the source node
 							// (recall it goes payee-to-payer) of short_channel_id, first add a
@@ -2461,12 +2480,23 @@ where L::Target: Logger {
 									inflight_htlc_msat: used_liquidity_msat,
 									effective_capacity,
 								};
-								let channel_penalty_msat =
-									scorer.channel_penalty_msat($candidate,
-										channel_usage,
-										score_params);
+								let channel_penalty_msat = scid_opt.map_or(0,
+									|scid| scorer.channel_penalty_msat(scid, &$src_node_id, &$dest_node_id,
+										channel_usage, score_params));
+
 								let path_penalty_msat = $next_hops_path_penalty_msat
 									.saturating_add(channel_penalty_msat);
+
+								let new_graph_node = RouteGraphNode {
+									node_id: $src_node_id,
+									lowest_fee_to_node: total_fee_msat,
+									total_cltv_delta: hop_total_cltv_delta,
+									value_contribution_msat,
+									path_htlc_minimum_msat,
+									path_penalty_msat,
+									path_length_to_node,
+									value_contribution_yuv,
+								};
 
 								// Update the way of reaching $candidate.source()
 								// with the given short_channel_id (from $candidate.target()),
@@ -2573,11 +2603,11 @@ where L::Target: Logger {
 	// meaning how much will be paid in fees after this node (to the best of our knowledge).
 	// This data can later be helpful to optimize routing (pay lower fees).
 	macro_rules! add_entries_to_cheapest_to_target_node {
-		( $node: expr, $node_id: expr, $next_hops_value_contribution: expr,
-		  $next_hops_cltv_delta: expr, $next_hops_path_length: expr ) => {
-			let fee_to_target_msat;
-			let next_hops_path_htlc_minimum_msat;
-			let next_hops_path_penalty_msat;
+		( $node: expr, $node_id: expr, $fee_to_target_msat: expr, $next_hops_value_contribution: expr,
+		  $next_hops_path_htlc_minimum_msat: expr, $next_hops_path_penalty_msat: expr,
+		  $next_hops_cltv_delta: expr, $next_hops_path_length: expr,
+		  $next_hops_value_yuv_contribution: expr
+		) => {
 			let skip_node = if let Some(elem) = dist.get_mut(&$node_id) {
 				let was_processed = elem.was_processed;
 				elem.was_processed = true;
@@ -2599,13 +2629,15 @@ where L::Target: Logger {
 			if !skip_node {
 				if let Some(first_channels) = first_hop_targets.get(&$node_id) {
 					for details in first_channels {
-						let candidate = CandidateRouteHop::FirstHop(FirstHopCandidate {
-							details, payer_node_id: &our_node_id,
-						});
-						add_entry!(&candidate, fee_to_target_msat,
-							$next_hops_value_contribution,
-							next_hops_path_htlc_minimum_msat, next_hops_path_penalty_msat,
-							$next_hops_cltv_delta, $next_hops_path_length);
+						let candidate = CandidateRouteHop::FirstHop { details };
+						if !check_chroma(final_pixel_yuv.as_ref(), &candidate, details.yuv_counterparty_pixel.as_ref().map(|p| p.chroma), &logger) {
+							continue;
+						}
+						add_entry!(candidate, our_node_id, $node_id, $fee_to_target_msat,
+								   $next_hops_value_contribution,
+								   $next_hops_path_htlc_minimum_msat, $next_hops_path_penalty_msat,
+								   $next_hops_cltv_delta, $next_hops_path_length,
+								   $next_hops_value_yuv_contribution);
 					}
 				}
 
@@ -2625,13 +2657,20 @@ where L::Target: Logger {
 										let candidate = CandidateRouteHop::PublicHop(PublicHopCandidate {
 											info: directed_channel,
 											short_channel_id: *chan_id,
-										});
-										add_entry!(&candidate,
-											fee_to_target_msat,
-											$next_hops_value_contribution,
-											next_hops_path_htlc_minimum_msat,
-											next_hops_path_penalty_msat,
-											$next_hops_cltv_delta, $next_hops_path_length);
+										};
+
+										if !check_chroma(final_pixel_yuv.as_ref(), &candidate, chan.yuv_data.as_ref().map(|d| d.chroma), &logger) {
+											continue;
+										}
+
+										add_entry!(candidate, *source, $node_id,
+											   $fee_to_target_msat,
+											   $next_hops_value_contribution,
+											   $next_hops_path_htlc_minimum_msat,
+											   $next_hops_path_penalty_msat,
+											   $next_hops_cltv_delta, $next_hops_path_length,
+											   $next_hops_value_yuv_contribution
+										);
 									}
 								}
 							}
@@ -2656,11 +2695,17 @@ where L::Target: Logger {
 		// place where it could be added.
 		payee_node_id_opt.map(|payee| first_hop_targets.get(&payee).map(|first_channels| {
 			for details in first_channels {
-				let candidate = CandidateRouteHop::FirstHop(FirstHopCandidate {
-					details, payer_node_id: &our_node_id,
-				});
-				let added = add_entry!(&candidate, 0, path_value_msat,
-									0, 0u64, 0, 0).is_some();
+				let candidate = CandidateRouteHop::FirstHop { details };
+
+				if !check_chroma(final_pixel_yuv.as_ref(), &candidate, details.yuv_counterparty_pixel.as_ref().map(|p| p.chroma), &logger) {
+					return;
+				}
+
+				let (contribution_msat, contribution_yuv) = add_entry!(
+					candidate, our_node_id, payee, 0, path_value_msat, 0, 0u64, 0, 0, path_value_yuv
+				);
+
+				let added = contribution_msat.is_some() && (contribution_yuv.is_some() == is_yuv_enabled);
 				log_trace!(logger, "{} direct route to payee via {}",
 						if added { "Added" } else { "Skipped" }, LoggedCandidateHop(&candidate));
 			}
@@ -2675,7 +2720,7 @@ where L::Target: Logger {
 			// If not, targets.pop() will not even let us enter the loop in step 2.
 			None => {},
 			Some(node) => {
-				add_entries_to_cheapest_to_target_node!(node, payee, path_value_msat, 0, 0);
+				add_entries_to_cheapest_to_target_node!(node, payee, 0, path_value_msat, 0, 0u64, 0, 0, path_value_yuv);
 			},
 		});
 
@@ -2684,35 +2729,19 @@ where L::Target: Logger {
 		// earlier than general path finding, they will be somewhat prioritized, although currently
 		// it matters only if the fees are exactly the same.
 		for (hint_idx, hint) in payment_params.payee.blinded_route_hints().iter().enumerate() {
-			// Only add the hops in this route to our candidate set if either
-			// we have a direct channel to the first hop or the first hop is
-			// in the regular network graph.
-			let source_node_id = match introduction_node_id_cache[hint_idx] {
-				Some(node_id) => node_id,
-				None => match &hint.1.introduction_node {
-					IntroductionNode::NodeId(pubkey) => {
-						let node_id = NodeId::from_pubkey(&pubkey);
-						match first_hop_targets.get_key_value(&node_id).map(|(key, _)| key) {
-							Some(node_id) => node_id,
-							None => continue,
-						}
-					},
-					IntroductionNode::DirectedShortChannelId(direction, scid) => {
-						let first_hop = first_hop_targets.iter().find(|(_, channels)|
-							channels
-								.iter()
-								.any(|details| Some(*scid) == details.get_outbound_payment_scid())
-						);
-						match first_hop {
-							Some((counterparty_node_id, _)) => {
-								direction.select_node_id(&our_node_id, counterparty_node_id)
-							},
-							None => continue,
-						}
-					},
-				},
-			};
-			if our_node_id == *source_node_id { continue }
+			if is_yuv_enabled {
+				log_trace!(logger, "Skipping possible blinded path as it's not supported for YUV");
+				continue;
+			}
+
+			let intro_node_id = NodeId::from_pubkey(&hint.1.introduction_node_id);
+			let have_intro_node_in_graph =
+				// Only add the hops in this route to our candidate set if either
+				// we have a direct channel to the first hop or the first hop is
+				// in the regular network graph.
+				first_hop_targets.get(&intro_node_id).is_some() ||
+					network_nodes.get(&intro_node_id).is_some();
+			if !have_intro_node_in_graph || our_node_id == intro_node_id { continue }
 			let candidate = if hint.1.blinded_hops.len() == 1 {
 				CandidateRouteHop::OneHopBlinded(
 					OneHopBlindedPathCandidate { source_node_id, hint, hint_idx }
@@ -2721,16 +2750,13 @@ where L::Target: Logger {
 				CandidateRouteHop::Blinded(BlindedPathCandidate { source_node_id, hint, hint_idx })
 			};
 			let mut path_contribution_msat = path_value_msat;
-			if let Some(hop_used_msat) = add_entry!(&candidate,
-				0, path_contribution_msat, 0, 0_u64, 0, 0)
+			if let (Some(hop_used_msat), _hop_used_yuv) = add_entry!(candidate, intro_node_id, maybe_dummy_payee_node_id,
+				0, path_contribution_msat, 0, 0_u64, 0, 0, None)
 			{
 				path_contribution_msat = hop_used_msat;
 			} else { continue }
-			if let Some(first_channels) = first_hop_targets.get(source_node_id) {
-				let mut first_channels = first_channels.clone();
-				sort_first_hop_channels(
-					&mut first_channels, &used_liquidities, recommended_value_msat, our_node_pubkey
-				);
+			if let Some(first_channels) = first_hop_targets.get_mut(&NodeId::from_pubkey(&hint.1.introduction_node_id)) {
+				sort_first_hop_channels(first_channels, &used_liquidities, recommended_value_msat, our_node_pubkey);
 				for details in first_channels {
 					let first_hop_candidate = CandidateRouteHop::FirstHop(FirstHopCandidate {
 						details, payer_node_id: &our_node_id,
@@ -2793,11 +2819,18 @@ where L::Target: Logger {
 						}))
 						.unwrap_or_else(|| CandidateRouteHop::PrivateHop(PrivateHopCandidate { hint: hop, target_node_id: target }));
 
-					if let Some(hop_used_msat) = add_entry!(&candidate,
-						aggregate_next_hops_fee_msat, aggregate_path_contribution_msat,
-						aggregate_next_hops_path_htlc_minimum_msat, aggregate_next_hops_path_penalty_msat,
-						aggregate_next_hops_cltv_delta, aggregate_next_hops_path_length)
-					{
+					let (hop_used_msat_opt, hop_used_yuv_opt) = add_entry!(
+						candidate, source, target,
+						aggregate_next_hops_fee_msat,
+						aggregate_path_contribution_msat,
+						aggregate_next_hops_path_htlc_minimum_msat,
+						aggregate_next_hops_path_penalty_msat,
+						aggregate_next_hops_cltv_delta,
+						aggregate_next_hops_path_length,
+						aggregate_path_contribution_yuv
+					);
+
+					if let Some(hop_used_msat) = hop_used_msat_opt {
 						aggregate_path_contribution_msat = hop_used_msat;
 						aggregate_path_contribution_yuv = hop_used_yuv_opt;
 					} else {
@@ -2843,13 +2876,19 @@ where L::Target: Logger {
 							&mut first_channels, &used_liquidities, recommended_value_msat, our_node_pubkey
 						);
 						for details in first_channels {
-							let first_hop_candidate = CandidateRouteHop::FirstHop(FirstHopCandidate {
-								details, payer_node_id: &our_node_id,
-							});
-							add_entry!(&first_hop_candidate,
-								aggregate_next_hops_fee_msat, aggregate_path_contribution_msat,
-								aggregate_next_hops_path_htlc_minimum_msat, aggregate_next_hops_path_penalty_msat,
-								aggregate_next_hops_cltv_delta, aggregate_next_hops_path_length);
+							let first_hop_candidate = CandidateRouteHop::FirstHop { details };
+							add_entry!(
+								first_hop_candidate,
+								our_node_id,
+								target,
+								aggregate_next_hops_fee_msat,
+								aggregate_path_contribution_msat,
+								aggregate_next_hops_path_htlc_minimum_msat,
+								aggregate_next_hops_path_penalty_msat,
+								aggregate_next_hops_cltv_delta,
+								aggregate_next_hops_path_length,
+								aggregate_path_contribution_yuv
+							);
 						}
 					}
 
@@ -2926,8 +2965,17 @@ where L::Target: Logger {
 		// Both these cases (and other cases except reaching recommended_value_msat) mean that
 		// paths_collection will be stopped because found_new_path==false.
 		// This is not necessarily a routing failure.
-		'path_construction: while let Some(RouteGraphNode { node_id, total_cltv_delta, mut value_contribution_msat, path_length_to_node, .. }) = targets.pop() {
-
+		'path_construction: while let Some(RouteGraphNode {
+		   node_id,
+		   lowest_fee_to_node,
+		   total_cltv_delta,
+		   mut value_contribution_msat,
+		   path_htlc_minimum_msat,
+		   path_penalty_msat,
+		   path_length_to_node,
+		   mut value_contribution_yuv,
+		   ..
+	   }) = targets.pop() {
 			// Since we're going payee-to-payer, hitting our node as a target means we should stop
 			// traversing the graph and arrange the path out of what we found.
 			if node_id == our_node_id {
@@ -3101,9 +3149,10 @@ where L::Target: Logger {
 			match network_nodes.get(&node_id) {
 				None => {},
 				Some(node) => {
-					add_entries_to_cheapest_to_target_node!(node, node_id,
-						value_contribution_msat,
-						total_cltv_delta, path_length_to_node);
+					add_entries_to_cheapest_to_target_node!(node, node_id, lowest_fee_to_node,
+						value_contribution_msat, path_htlc_minimum_msat, path_penalty_msat,
+						total_cltv_delta, path_length_to_node, value_contribution_yuv
+					);
 				},
 			}
 		}
@@ -3511,9 +3560,10 @@ fn build_route_from_hops_internal<L: Deref>(
 
 #[cfg(test)]
 mod tests {
-	use crate::blinded_path::{BlindedHop, BlindedPath, IntroductionNode};
-	use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, EffectiveCapacity};
-	use crate::routing::utxo::UtxoResult;
+	use crate::blinded_path::{BlindedHop, BlindedPath};
+	use crate::ln::functional_test_utils::new_test_pixel;
+use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, EffectiveCapacity};
+	use crate::routing::utxo::{UtxoEntry, UtxoResult};
 	use crate::routing::router::{get_route, build_route_from_hops_internal, add_random_cltv_offset, default_node_features,
 		BlindedTail, InFlightHtlcs, Path, PaymentParameters, Route, RouteHint, RouteHintHop, RouteHop, RoutingFees,
 		DEFAULT_MAX_TOTAL_CLTV_EXPIRY_DELTA, MAX_PATH_LENGTH_ESTIMATE, RouteParameters, CandidateRouteHop, PublicHopCandidate};
@@ -3539,7 +3589,10 @@ mod tests {
 	use bitcoin::blockdata::script::Builder;
 	use bitcoin::blockdata::opcodes;
 	use bitcoin::blockdata::transaction::TxOut;
-	use bitcoin::hashes::hex::FromHex;
+
+	use bitcoin::XOnlyPublicKey;
+	use hex;
+
 	use bitcoin::secp256k1::{PublicKey,SecretKey};
 	use bitcoin::secp256k1::Secp256k1;
 	use yuv_pixels::Chroma;
@@ -3547,6 +3600,9 @@ mod tests {
 	use crate::io::Cursor;
 	use crate::prelude::*;
 	use crate::sync::Arc;
+
+	use core::convert::TryInto;
+	use core::str::FromStr;
 
 	fn get_channel_details(short_channel_id: Option<u64>, node_id: PublicKey,
 			features: InitFeatures, outbound_capacity_msat: u64) -> channelmanager::ChannelDetails {
@@ -3583,8 +3639,10 @@ mod tests {
 			config: None,
 			feerate_sat_per_1000_weight: None,
 			channel_shutdown_state: Some(channelmanager::ChannelShutdownState::NotShuttingDown),
-			pending_inbound_htlcs: Vec::new(),
-			pending_outbound_htlcs: Vec::new(),
+			yuv_holder_pixel: None,
+			yuv_counterparty_pixel: None,
+			pending_update_balance: None,
+			update_balance_amounts: None,
 		}
 	}
 
@@ -8915,8 +8973,8 @@ pub(crate) mod bench_utils {
 			config: None,
 			feerate_sat_per_1000_weight: None,
 			channel_shutdown_state: Some(channelmanager::ChannelShutdownState::NotShuttingDown),
-			pending_inbound_htlcs: Vec::new(),
-			pending_outbound_htlcs: Vec::new(),
+			pending_update_balance: None,
+			update_balance_amounts: None,
 		}
 	}
 

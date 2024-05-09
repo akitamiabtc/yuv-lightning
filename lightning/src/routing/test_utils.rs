@@ -9,7 +9,7 @@
 
 use crate::routing::gossip::{NetworkGraph, NodeAlias, P2PGossipSync};
 use crate::ln::features::{ChannelFeatures, NodeFeatures};
-use crate::ln::msgs::{ChannelAnnouncement, ChannelUpdate, MAX_VALUE_MSAT, NodeAnnouncement, RoutingMessageHandler, SocketAddress, UnsignedChannelAnnouncement, UnsignedChannelUpdate, UnsignedNodeAnnouncement};
+use crate::ln::msgs::{ChannelAnnouncement, ChannelUpdate, NodeAnnouncement, RoutingMessageHandler, UnsignedChannelAnnouncement, UnsignedChannelUpdate, UnsignedNodeAnnouncement, MAX_VALUE_MSAT};
 use crate::util::test_utils;
 use crate::util::ser::Writeable;
 

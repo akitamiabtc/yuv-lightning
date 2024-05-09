@@ -96,7 +96,23 @@ impl AddChangeOutputResult {
 /// Assumes at least one input will have a witness (ie spends a segwit output).
 /// Returns an Err(()) if the requested feerate cannot be met.
 /// Returns the expected maximum weight of the fully signed transaction on success.
-pub(crate) fn maybe_add_change_output(tx: &mut Transaction, input_value: u64, witness_max_weight: u64, feerate_sat_per_1000_weight: u32, change_destination_script: ScriptBuf) -> Result<u64, ()> {
+pub(crate) fn maybe_add_change_output(tx: &mut Transaction, input_value: u64, witness_max_weight: usize, feerate_sat_per_1000_weight: u32, change_destination_script: Script) -> Result<usize, ()> {
+	maybe_add_change_output_internal(
+		tx, input_value,
+		witness_max_weight,
+		feerate_sat_per_1000_weight,
+		change_destination_script,
+	).map(|res| res.weight)
+}
+
+/// For more info see [`maybe_add_change_output`] and [`AddChangeOutputResult`].
+fn maybe_add_change_output_internal(
+	tx: &mut Transaction,
+	input_value: u64,
+	witness_max_weight: usize,
+	feerate_sat_per_1000_weight: u32,
+	change_destination_script: Script
+) -> Result<AddChangeOutputResult, ()> {
 	if input_value > MAX_VALUE_MSAT / 1000 { return Err(()); }
 
 	const WITNESS_FLAG_BYTES: u64 = 2;
@@ -122,7 +138,8 @@ pub(crate) fn maybe_add_change_output(tx: &mut Transaction, input_value: u64, wi
 	if change_value >= dust_value.to_sat() as i64 {
 		change_output.value = change_value as u64;
 		tx.output.push(change_output);
-		Ok(weight_with_change as u64)
+
+		Ok(AddChangeOutputResult::new_added(weight_with_change as usize))
 	} else if (input_value - output_value) as i64 - (starting_weight as i64) * feerate_sat_per_1000_weight as i64 / 1000 < 0 {
 		Err(())
 	} else {

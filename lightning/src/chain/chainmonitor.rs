@@ -1,4 +1,4 @@
-// This file is Copyright its original authors, visible in version control
+/ This file is Copyright its original authors, visible in version control
 // history.
 //
 // This file is licensed under the Apache License, Version 2.0 <LICENSE-APACHE
@@ -28,8 +28,8 @@ use bitcoin::hash_types::{Txid, BlockHash};
 
 use crate::chain;
 use crate::chain::{ChannelMonitorUpdateStatus, Filter, WatchedOutput};
-use crate::chain::chaininterface::{BroadcasterInterface, FeeEstimator};
-use crate::chain::channelmonitor::{ChannelMonitor, ChannelMonitorUpdate, Balance, MonitorEvent, TransactionOutputs, WithChannelMonitor, LATENCY_GRACE_PERIOD_BLOCKS};
+use crate::chain::chaininterface::{BroadcasterInterface, FeeEstimator, YuvBroadcaster};
+use crate::chain::channelmonitor::{ChannelMonitor, ChannelMonitorUpdate, Balance, MonitorEvent, TransactionOutputs, LATENCY_GRACE_PERIOD_BLOCKS};
 use crate::chain::transaction::{OutPoint, TransactionData};
 use crate::ln::types::ChannelId;
 use crate::sign::ecdsa::WriteableEcdsaChannelSigner;
@@ -668,7 +668,10 @@ where C::Target: chain::Filter,
 		let monitors = self.monitors.read().unwrap();
 		for (_, monitor_holder) in &*monitors {
 			monitor_holder.monitor.rebroadcast_pending_claims(
-				&*self.broadcaster, &*self.fee_estimator, &self.logger
+				&*self.broadcaster,
+				self.yuv_broadcaster.as_deref(),
+				&*self.fee_estimator,
+				&*self.logger,
 			)
 		}
 	}
@@ -744,7 +747,8 @@ where
 		log_debug!(self.logger, "New best block {} at height {} provided via block_connected", header.block_hash(), height);
 		self.process_chain_data(header, Some(height), &txdata, |monitor, txdata| {
 			monitor.block_connected(
-				header, txdata, height, &*self.broadcaster, &*self.fee_estimator, &self.logger)
+				header, txdata, height, &*self.broadcaster, self.yuv_broadcaster.as_deref(), &*self.fee_estimator, &*self.logger,
+			)
 		});
 		// Assume we may have some new events and wake the event processor
 		self.event_notifier.notify();
@@ -755,7 +759,8 @@ where
 		log_debug!(self.logger, "Latest block {} at height {} removed via block_disconnected", header.block_hash(), height);
 		for monitor_state in monitor_states.values() {
 			monitor_state.monitor.block_disconnected(
-				header, height, &*self.broadcaster, &*self.fee_estimator, &self.logger);
+				header, height, &*self.broadcaster, self.yuv_broadcaster.as_deref(), &*self.fee_estimator, &*self.logger,
+			);
 		}
 	}
 }
@@ -774,7 +779,8 @@ where
 		log_debug!(self.logger, "{} provided transactions confirmed at height {} in block {}", txdata.len(), height, header.block_hash());
 		self.process_chain_data(header, None, txdata, |monitor, txdata| {
 			monitor.transactions_confirmed(
-				header, txdata, height, &*self.broadcaster, &*self.fee_estimator, &self.logger)
+				header, txdata, height, &*self.broadcaster, self.yuv_broadcaster.as_deref(), &*self.fee_estimator, &*self.logger,
+			)
 		});
 		// Assume we may have some new events and wake the event processor
 		self.event_notifier.notify();
@@ -784,7 +790,7 @@ where
 		log_debug!(self.logger, "Transaction {} reorganized out of chain", txid);
 		let monitor_states = self.monitors.read().unwrap();
 		for monitor_state in monitor_states.values() {
-			monitor_state.monitor.transaction_unconfirmed(txid, &*self.broadcaster, &*self.fee_estimator, &self.logger);
+			monitor_state.monitor.transaction_unconfirmed(txid, &*self.broadcaster, self.yuv_broadcaster.as_deref(), &*self.fee_estimator, &*self.logger);
 		}
 	}
 
@@ -795,7 +801,7 @@ where
 			// it's still possible if a chain::Filter implementation returns a transaction.
 			debug_assert!(txdata.is_empty());
 			monitor.best_block_updated(
-				header, height, &*self.broadcaster, &*self.fee_estimator, &self.logger
+				header, height, &*self.broadcaster, self.yuv_broadcaster.as_deref(), &*self.fee_estimator, &*self.logger,
 			)
 		});
 		// Assume we may have some new events and wake the event processor
@@ -941,9 +947,8 @@ where
 			},
 			Some(monitor_state) => {
 				let monitor = &monitor_state.monitor;
-				let logger = WithChannelMonitor::from(&self.logger, &monitor);
-				log_trace!(logger, "Updating ChannelMonitor to id {} for channel {}", update.update_id, log_funding_info!(monitor));
-				let update_res = monitor.update_monitor(update, &self.broadcaster, &self.fee_estimator, &self.logger);
+				log_trace!(self.logger, "Updating ChannelMonitor for channel {}", log_funding_info!(monitor));
+				let update_res = monitor.update_monitor(update, &self.broadcaster, self.yuv_broadcaster.as_deref(), &self.fee_estimator, &self.logger);
 
 				let update_id = MonitorUpdateId::from_monitor_update(update);
 				let mut pending_monitor_updates = monitor_state.pending_monitor_updates.lock().unwrap();

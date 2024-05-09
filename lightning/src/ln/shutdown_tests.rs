@@ -272,7 +272,7 @@ fn shutdown_on_unfunded_channel() {
 		.into_script();
 
 	nodes[0].node.handle_shutdown(&nodes[1].node.get_our_node_id(), &msgs::Shutdown {
-		channel_id: open_chan.common_fields.temporary_channel_id, scriptpubkey: script,
+		channel_id: open_chan.temporary_channel_id, scriptpubkey: script, yuv_inner_key: None,
 	});
 	check_closed_event!(nodes[0], 1, ClosureReason::CounterpartyCoopClosedUnfundedChannel, [nodes[1].node.get_our_node_id()], 1_000_000);
 }

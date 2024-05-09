@@ -79,12 +79,23 @@ mod tb;
 
 #[allow(unused_imports)]
 mod prelude {
+	#[cfg(feature = "hashbrown")]
+	extern crate hashbrown;
+
 	pub use alloc::{vec, vec::Vec, string::String};
+	#[cfg(not(feature = "hashbrown"))]
+	pub use std::collections::{HashMap, hash_map};
+	#[cfg(feature = "hashbrown")]
+	pub use self::hashbrown::{HashMap, hash_map};
 
 	pub use alloc::string::ToString;
 }
 
 use crate::prelude::*;
+
+/// Sync compat for std/no_std
+#[cfg(not(feature = "std"))]
+mod sync;
 
 /// Errors that indicate what is wrong with the invoice. They have some granularity for debug
 /// reasons, but should generally result in an "invalid BOLT11 invoice" message for the user.
@@ -1821,9 +1832,10 @@ impl<'de> Deserialize<'de> for Bolt11Invoice {
 
 #[cfg(test)]
 mod test {
-	use bitcoin::ScriptBuf;
-	use bitcoin::hashes::sha256;
-	use std::str::FromStr;
+	use bitcoin::Script;
+	use bitcoin_hashes::hex::FromHex;
+	use bitcoin_hashes::sha256;
+	use lightning::ln::functional_test_utils::new_test_pixel;
 
 	#[test]
 	fn test_system_time_bounds_assumptions() {

@@ -312,7 +312,8 @@ impl ChannelMessageHandler for ErroringMessageHandler {
 		features.set_channel_type_optional();
 		features.set_scid_privacy_optional();
 		features.set_zero_conf_optional();
-		features.set_route_blinding_optional();
+		features.set_yuv_payments_optional();
+
 		features
 	}
 
@@ -664,9 +665,8 @@ impl Peer {
 /// SimpleRefPeerManager is the more appropriate type. Defining these type aliases prevents
 /// issues such as overly long function definitions.
 ///
-/// This is not exported to bindings users as type aliases aren't supported in most languages.
-#[cfg(not(c_bindings))]
-pub type SimpleArcPeerManager<SD, M, T, F, C, L> = PeerManager<
+/// This is not exported to bindings users as `Arc`s don't make sense in bindings.
+pub type SimpleArcPeerManager<SD, M, T, YT, F, C, L> = PeerManager<
 	SD,
 	Arc<SimpleArcChannelManager<M, T, YT, F, L>>,
 	Arc<P2PGossipSync<Arc<NetworkGraph<Arc<L>>>, C, Arc<L>>>,
@@ -686,7 +686,7 @@ pub type SimpleArcPeerManager<SD, M, T, F, C, L> = PeerManager<
 /// This is not exported to bindings users as type aliases aren't supported in most languages.
 #[cfg(not(c_bindings))]
 pub type SimpleRefPeerManager<
-	'a, 'b, 'c, 'd, 'e, 'f, 'logger, 'h, 'i, 'j, 'graph, 'k, SD, M, T, F, C, L
+	'a, 'b, 'c, 'd, 'e, 'f, 'logger, 'h, 'i, 'j, 'graph, SD, M, T, YT, F, C, L
 > = PeerManager<
 	SD,
 	&'j SimpleRefChannelManager<'a, 'b, 'c, 'd, 'e, 'graph, 'logger, 'i, M, T, YT, F, L>,
@@ -2936,7 +2936,8 @@ mod tests {
 								node_id: peers[1].node_signer.get_node_id(Recipient::Node).unwrap(),
 								msg: msgs::Shutdown {
 									channel_id: ChannelId::new_zero(),
-									scriptpubkey: bitcoin::ScriptBuf::new(),
+									scriptpubkey: bitcoin::Script::new(),
+									yuv_inner_key: None,
 								},
 							});
 						cfgs[1].chan_handler.pending_events.lock().unwrap()
@@ -2944,7 +2945,8 @@ mod tests {
 								node_id: peers[0].node_signer.get_node_id(Recipient::Node).unwrap(),
 								msg: msgs::Shutdown {
 									channel_id: ChannelId::new_zero(),
-									scriptpubkey: bitcoin::ScriptBuf::new(),
+									scriptpubkey: bitcoin::Script::new(),
+									yuv_inner_key: None,
 								},
 							});
 
@@ -3072,7 +3074,11 @@ mod tests {
 
 		let their_id = peers[1].node_signer.get_node_id(Recipient::Node).unwrap();
 
-		let msg = msgs::Shutdown { channel_id: ChannelId::from_bytes([42; 32]), scriptpubkey: bitcoin::ScriptBuf::new() };
+		let msg = msgs::Shutdown {
+			channel_id: ChannelId::from_bytes([42; 32]),
+			scriptpubkey: bitcoin::Script::new(),
+			yuv_inner_key: None,
+		};
 		a_chan_handler.pending_events.lock().unwrap().push(events::MessageSendEvent::SendShutdown {
 			node_id: their_id, msg: msg.clone()
 		});

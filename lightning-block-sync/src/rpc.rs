@@ -6,7 +6,9 @@ use crate::http::{HttpClient, HttpEndpoint, HttpError, JsonResponse};
 use crate::gossip::{UtxoSource, YuvTransactionSource};
 
 use bitcoin::hash_types::BlockHash;
-use bitcoin::OutPoint;
+use bitcoin::hashes::hex::ToHex;
+use bitcoin::{OutPoint, Txid};
+use yuv_rpc_api::transactions::GetRawYuvTransactionResponse;
 
 use std::sync::Mutex;
 
