@@ -9,8 +9,7 @@
 
 use crate::routing::gossip::{NetworkGraph, NodeAlias, P2PGossipSync};
 use crate::ln::features::{ChannelFeatures, NodeFeatures};
-use crate::ln::msgs::{UnsignedChannelAnnouncement, ChannelAnnouncement, RoutingMessageHandler,
-	NodeAnnouncement, UnsignedNodeAnnouncement, ChannelUpdate, UnsignedChannelUpdate, MAX_VALUE_MSAT};
+use crate::ln::msgs::{ChannelAnnouncement, ChannelUpdate, NodeAnnouncement, RoutingMessageHandler, UnsignedChannelAnnouncement, UnsignedChannelUpdate, UnsignedNodeAnnouncement, MAX_VALUE_MSAT};
 use crate::util::test_utils;
 use crate::util::ser::Writeable;
 
@@ -23,6 +22,8 @@ use hex;
 
 use bitcoin::secp256k1::{PublicKey,SecretKey};
 use bitcoin::secp256k1::{Secp256k1, All};
+use yuv_pixels::{Chroma, Pixel};
+use crate::ln::chan_utils::make_funding_redeemscript_from_node_ids;
 
 use crate::prelude::*;
 use crate::sync::{self, Arc};
@@ -34,8 +35,33 @@ pub(super) fn add_channel(
 	gossip_sync: &P2PGossipSync<Arc<NetworkGraph<Arc<test_utils::TestLogger>>>, Arc<test_utils::TestChainSource>, Arc<test_utils::TestLogger>>,
 	secp_ctx: &Secp256k1<All>, node_1_privkey: &SecretKey, node_2_privkey: &SecretKey, features: ChannelFeatures, short_channel_id: u64
 ) {
+	add_channel_internal(gossip_sync, secp_ctx, node_1_privkey, node_2_privkey, features, short_channel_id, None, None);
+}
+
+pub(super) fn add_channel_internal(
+	gossip_sync: &P2PGossipSync<Arc<NetworkGraph<Arc<test_utils::TestLogger>>>, Arc<test_utils::TestChainSource>, Arc<test_utils::TestLogger>>,
+	secp_ctx: &Secp256k1<All>,
+	node_1_privkey: &SecretKey,
+	node_2_privkey: &SecretKey,
+	mut features: ChannelFeatures,
+	short_channel_id: u64,
+	yuv_pixel: Option<Pixel>,
+	chain_source: Option<Arc<test_utils::TestChainSource>>,
+) {
 	let node_id_1 = NodeId::from_pubkey(&PublicKey::from_secret_key(&secp_ctx, node_1_privkey));
 	let node_id_2 = NodeId::from_pubkey(&PublicKey::from_secret_key(&secp_ctx, node_2_privkey));
+
+	if let Some(chain_source) = chain_source.as_ref() {
+		let expected_script =
+			make_funding_redeemscript_from_node_ids(&node_id_1, &node_id_2, yuv_pixel.as_ref()).unwrap().to_v0_p2wsh();
+
+		chain_source.set_txout(expected_script, MAX_VALUE_MSAT / 1000);
+	}
+
+	if let Some(yuv_pixel) = yuv_pixel {
+		features.set_yuv_payments_required();
+		chain_source.as_ref().map(|chain_source| chain_source.set_yuv_pixel(yuv_pixel));
+	}
 
 	let unsigned_announcement = UnsignedChannelAnnouncement {
 		features,
@@ -101,7 +127,7 @@ pub(super) fn update_channel(
 
 	match gossip_sync.handle_channel_update(&valid_channel_update) {
 		Ok(res) => assert!(res),
-		Err(_) => panic!()
+		Err(err) => panic!("{:?}", err)
 	};
 }
 
@@ -163,7 +189,8 @@ pub(super) fn build_line_graph() -> (
 				htlc_maximum_msat: MAX_VALUE_MSAT,
 				fee_base_msat: 0,
 				fee_proportional_millionths: 0,
-				excess_data: Vec::new()
+				excess_data: Vec::new(),
+				htlc_maximum_yuv: None,
 			});
 			update_channel(&gossip_sync, &secp_ctx, &next_privkey, UnsignedChannelUpdate {
 				chain_hash: genesis_block(Network::Testnet).header.block_hash(),
@@ -175,7 +202,8 @@ pub(super) fn build_line_graph() -> (
 				htlc_maximum_msat: MAX_VALUE_MSAT,
 				fee_base_msat: 0,
 				fee_proportional_millionths: 0,
-				excess_data: Vec::new()
+				excess_data: Vec::new(),
+				htlc_maximum_yuv: None,
 			});
 			add_or_update_node(&gossip_sync, &secp_ctx, &next_privkey,
 				NodeFeatures::from_le_bytes(id_to_feature_flags(1)), 0);
@@ -191,11 +219,42 @@ pub(super) fn build_graph() -> (
 	sync::Arc<test_utils::TestChainSource>,
 	sync::Arc<test_utils::TestLogger>,
 ) {
+	build_graph_internal(None, false)
+}
+
+pub(super) fn build_graph_with_yuv(chroma: Chroma, use_chain_source: bool) -> (
+	Secp256k1<All>,
+	sync::Arc<NetworkGraph<Arc<test_utils::TestLogger>>>,
+	P2PGossipSync<sync::Arc<NetworkGraph<Arc<test_utils::TestLogger>>>, sync::Arc<test_utils::TestChainSource>, sync::Arc<test_utils::TestLogger>>,
+	sync::Arc<test_utils::TestChainSource>,
+	sync::Arc<test_utils::TestLogger>,
+) {
+	build_graph_internal(Some(chroma), use_chain_source)
+}
+
+pub(super) fn build_graph_internal(chroma: Option<Chroma>, use_chain_source: bool) -> (
+	Secp256k1<All>,
+	sync::Arc<NetworkGraph<Arc<test_utils::TestLogger>>>,
+	P2PGossipSync<sync::Arc<NetworkGraph<Arc<test_utils::TestLogger>>>, sync::Arc<test_utils::TestChainSource>, sync::Arc<test_utils::TestLogger>>,
+	sync::Arc<test_utils::TestChainSource>,
+	sync::Arc<test_utils::TestLogger>,
+) {
 	let secp_ctx = Secp256k1::new();
 	let logger = Arc::new(test_utils::TestLogger::new());
 	let chain_monitor = Arc::new(test_utils::TestChainSource::new(Network::Testnet));
+
+	let yuv_pixel = chroma.map(|chroma| {
+		let yuv_pixel = Pixel::new(u128::MAX, chroma);
+		chain_monitor.set_yuv_pixel(yuv_pixel);
+		yuv_pixel
+	});
+
+	let chain_source = if use_chain_source {
+		Some(chain_monitor.clone())
+	} else { None };
+
 	let network_graph = Arc::new(NetworkGraph::new(Network::Testnet, Arc::clone(&logger)));
-	let gossip_sync = P2PGossipSync::new(Arc::clone(&network_graph), None, Arc::clone(&logger));
+	let gossip_sync = P2PGossipSync::new(Arc::clone(&network_graph), chain_source, Arc::clone(&logger));
 	// Build network from our_id to node6:
 	//
 	//        -1(1)2-  node0  -1(3)2-
@@ -257,7 +316,9 @@ pub(super) fn build_graph() -> (
 
 	let (our_privkey, _, privkeys, _) = get_nodes(&secp_ctx);
 
-	add_channel(&gossip_sync, &secp_ctx, &our_privkey, &privkeys[0], ChannelFeatures::from_le_bytes(id_to_feature_flags(1)), 1);
+	const HTLC_MAXIMUM_YUV: u128 = u128::MAX;
+
+	add_channel_internal(&gossip_sync, &secp_ctx, &our_privkey, &privkeys[0], ChannelFeatures::from_le_bytes(id_to_feature_flags(1)), 1, yuv_pixel, Some(chain_monitor.clone()));
 	update_channel(&gossip_sync, &secp_ctx, &privkeys[0], UnsignedChannelUpdate {
 		chain_hash: genesis_block(Network::Testnet).header.block_hash(),
 		short_channel_id: 1,
@@ -268,12 +329,13 @@ pub(super) fn build_graph() -> (
 		htlc_maximum_msat: MAX_VALUE_MSAT,
 		fee_base_msat: 0,
 		fee_proportional_millionths: 0,
-		excess_data: Vec::new()
+		excess_data: Vec::new(),
+		htlc_maximum_yuv: Some(HTLC_MAXIMUM_YUV),
 	});
 
 	add_or_update_node(&gossip_sync, &secp_ctx, &privkeys[0], NodeFeatures::from_le_bytes(id_to_feature_flags(1)), 0);
 
-	add_channel(&gossip_sync, &secp_ctx, &our_privkey, &privkeys[1], ChannelFeatures::from_le_bytes(id_to_feature_flags(2)), 2);
+	add_channel_internal(&gossip_sync, &secp_ctx, &our_privkey, &privkeys[1], ChannelFeatures::from_le_bytes(id_to_feature_flags(2)), 2, yuv_pixel, Some(chain_monitor.clone()));
 	update_channel(&gossip_sync, &secp_ctx, &our_privkey, UnsignedChannelUpdate {
 		chain_hash: genesis_block(Network::Testnet).header.block_hash(),
 		short_channel_id: 2,
@@ -284,7 +346,8 @@ pub(super) fn build_graph() -> (
 		htlc_maximum_msat: MAX_VALUE_MSAT,
 		fee_base_msat: u32::max_value(),
 		fee_proportional_millionths: u32::max_value(),
-		excess_data: Vec::new()
+		excess_data: Vec::new(),
+		htlc_maximum_yuv: Some(HTLC_MAXIMUM_YUV),
 	});
 	update_channel(&gossip_sync, &secp_ctx, &privkeys[1], UnsignedChannelUpdate {
 		chain_hash: genesis_block(Network::Testnet).header.block_hash(),
@@ -296,12 +359,13 @@ pub(super) fn build_graph() -> (
 		htlc_maximum_msat: MAX_VALUE_MSAT,
 		fee_base_msat: 0,
 		fee_proportional_millionths: 0,
-		excess_data: Vec::new()
+		excess_data: Vec::new(),
+		htlc_maximum_yuv: Some(HTLC_MAXIMUM_YUV),
 	});
 
 	add_or_update_node(&gossip_sync, &secp_ctx, &privkeys[1], NodeFeatures::from_le_bytes(id_to_feature_flags(2)), 0);
 
-	add_channel(&gossip_sync, &secp_ctx, &our_privkey, &privkeys[7], ChannelFeatures::from_le_bytes(id_to_feature_flags(12)), 12);
+	add_channel_internal(&gossip_sync, &secp_ctx, &our_privkey, &privkeys[7], ChannelFeatures::from_le_bytes(id_to_feature_flags(12)), 12, yuv_pixel, Some(chain_monitor.clone()));
 	update_channel(&gossip_sync, &secp_ctx, &our_privkey, UnsignedChannelUpdate {
 		chain_hash: genesis_block(Network::Testnet).header.block_hash(),
 		short_channel_id: 12,
@@ -312,7 +376,8 @@ pub(super) fn build_graph() -> (
 		htlc_maximum_msat: MAX_VALUE_MSAT,
 		fee_base_msat: u32::max_value(),
 		fee_proportional_millionths: u32::max_value(),
-		excess_data: Vec::new()
+		excess_data: Vec::new(),
+		htlc_maximum_yuv: Some(HTLC_MAXIMUM_YUV),
 	});
 	update_channel(&gossip_sync, &secp_ctx, &privkeys[7], UnsignedChannelUpdate {
 		chain_hash: genesis_block(Network::Testnet).header.block_hash(),
@@ -324,12 +389,13 @@ pub(super) fn build_graph() -> (
 		htlc_maximum_msat: MAX_VALUE_MSAT,
 		fee_base_msat: 0,
 		fee_proportional_millionths: 0,
-		excess_data: Vec::new()
+		excess_data: Vec::new(),
+		htlc_maximum_yuv: Some(HTLC_MAXIMUM_YUV),
 	});
 
 	add_or_update_node(&gossip_sync, &secp_ctx, &privkeys[7], NodeFeatures::from_le_bytes(id_to_feature_flags(8)), 0);
 
-	add_channel(&gossip_sync, &secp_ctx, &privkeys[0], &privkeys[2], ChannelFeatures::from_le_bytes(id_to_feature_flags(3)), 3);
+	add_channel_internal(&gossip_sync, &secp_ctx, &privkeys[0], &privkeys[2], ChannelFeatures::from_le_bytes(id_to_feature_flags(3)), 3, yuv_pixel, Some(chain_monitor.clone()));
 	update_channel(&gossip_sync, &secp_ctx, &privkeys[0], UnsignedChannelUpdate {
 		chain_hash: genesis_block(Network::Testnet).header.block_hash(),
 		short_channel_id: 3,
@@ -340,7 +406,8 @@ pub(super) fn build_graph() -> (
 		htlc_maximum_msat: MAX_VALUE_MSAT,
 		fee_base_msat: 0,
 		fee_proportional_millionths: 0,
-		excess_data: Vec::new()
+		excess_data: Vec::new(),
+		htlc_maximum_yuv: Some(HTLC_MAXIMUM_YUV),
 	});
 	update_channel(&gossip_sync, &secp_ctx, &privkeys[2], UnsignedChannelUpdate {
 		chain_hash: genesis_block(Network::Testnet).header.block_hash(),
@@ -352,10 +419,11 @@ pub(super) fn build_graph() -> (
 		htlc_maximum_msat: MAX_VALUE_MSAT,
 		fee_base_msat: 100,
 		fee_proportional_millionths: 0,
-		excess_data: Vec::new()
+		excess_data: Vec::new(),
+		htlc_maximum_yuv: Some(HTLC_MAXIMUM_YUV),
 	});
 
-	add_channel(&gossip_sync, &secp_ctx, &privkeys[1], &privkeys[2], ChannelFeatures::from_le_bytes(id_to_feature_flags(4)), 4);
+	add_channel_internal(&gossip_sync, &secp_ctx, &privkeys[1], &privkeys[2], ChannelFeatures::from_le_bytes(id_to_feature_flags(4)), 4, yuv_pixel, Some(chain_monitor.clone()));
 	update_channel(&gossip_sync, &secp_ctx, &privkeys[1], UnsignedChannelUpdate {
 		chain_hash: genesis_block(Network::Testnet).header.block_hash(),
 		short_channel_id: 4,
@@ -366,7 +434,8 @@ pub(super) fn build_graph() -> (
 		htlc_maximum_msat: MAX_VALUE_MSAT,
 		fee_base_msat: 0,
 		fee_proportional_millionths: 1000000,
-		excess_data: Vec::new()
+		excess_data: Vec::new(),
+		htlc_maximum_yuv: Some(HTLC_MAXIMUM_YUV),
 	});
 	update_channel(&gossip_sync, &secp_ctx, &privkeys[2], UnsignedChannelUpdate {
 		chain_hash: genesis_block(Network::Testnet).header.block_hash(),
@@ -378,10 +447,11 @@ pub(super) fn build_graph() -> (
 		htlc_maximum_msat: MAX_VALUE_MSAT,
 		fee_base_msat: 0,
 		fee_proportional_millionths: 0,
-		excess_data: Vec::new()
+		excess_data: Vec::new(),
+		htlc_maximum_yuv: Some(HTLC_MAXIMUM_YUV),
 	});
 
-	add_channel(&gossip_sync, &secp_ctx, &privkeys[7], &privkeys[2], ChannelFeatures::from_le_bytes(id_to_feature_flags(13)), 13);
+	add_channel_internal(&gossip_sync, &secp_ctx, &privkeys[7], &privkeys[2], ChannelFeatures::from_le_bytes(id_to_feature_flags(13)), 13, yuv_pixel, Some(chain_monitor.clone()));
 	update_channel(&gossip_sync, &secp_ctx, &privkeys[7], UnsignedChannelUpdate {
 		chain_hash: genesis_block(Network::Testnet).header.block_hash(),
 		short_channel_id: 13,
@@ -392,7 +462,8 @@ pub(super) fn build_graph() -> (
 		htlc_maximum_msat: MAX_VALUE_MSAT,
 		fee_base_msat: 0,
 		fee_proportional_millionths: 2000000,
-		excess_data: Vec::new()
+		excess_data: Vec::new(),
+		htlc_maximum_yuv: Some(HTLC_MAXIMUM_YUV),
 	});
 	update_channel(&gossip_sync, &secp_ctx, &privkeys[2], UnsignedChannelUpdate {
 		chain_hash: genesis_block(Network::Testnet).header.block_hash(),
@@ -404,12 +475,13 @@ pub(super) fn build_graph() -> (
 		htlc_maximum_msat: MAX_VALUE_MSAT,
 		fee_base_msat: 0,
 		fee_proportional_millionths: 0,
-		excess_data: Vec::new()
+		excess_data: Vec::new(),
+		htlc_maximum_yuv: Some(HTLC_MAXIMUM_YUV),
 	});
 
 	add_or_update_node(&gossip_sync, &secp_ctx, &privkeys[2], NodeFeatures::from_le_bytes(id_to_feature_flags(3)), 0);
 
-	add_channel(&gossip_sync, &secp_ctx, &privkeys[2], &privkeys[4], ChannelFeatures::from_le_bytes(id_to_feature_flags(6)), 6);
+	add_channel_internal(&gossip_sync, &secp_ctx, &privkeys[2], &privkeys[4], ChannelFeatures::from_le_bytes(id_to_feature_flags(6)), 6, yuv_pixel, Some(chain_monitor.clone()));
 	update_channel(&gossip_sync, &secp_ctx, &privkeys[2], UnsignedChannelUpdate {
 		chain_hash: genesis_block(Network::Testnet).header.block_hash(),
 		short_channel_id: 6,
@@ -420,7 +492,8 @@ pub(super) fn build_graph() -> (
 		htlc_maximum_msat: MAX_VALUE_MSAT,
 		fee_base_msat: 0,
 		fee_proportional_millionths: 0,
-		excess_data: Vec::new()
+		excess_data: Vec::new(),
+		htlc_maximum_yuv: Some(HTLC_MAXIMUM_YUV),
 	});
 	update_channel(&gossip_sync, &secp_ctx, &privkeys[4], UnsignedChannelUpdate {
 		chain_hash: genesis_block(Network::Testnet).header.block_hash(),
@@ -433,9 +506,10 @@ pub(super) fn build_graph() -> (
 		fee_base_msat: 0,
 		fee_proportional_millionths: 0,
 		excess_data: Vec::new(),
+		htlc_maximum_yuv: Some(HTLC_MAXIMUM_YUV),
 	});
 
-	add_channel(&gossip_sync, &secp_ctx, &privkeys[4], &privkeys[3], ChannelFeatures::from_le_bytes(id_to_feature_flags(11)), 11);
+	add_channel_internal(&gossip_sync, &secp_ctx, &privkeys[4], &privkeys[3], ChannelFeatures::from_le_bytes(id_to_feature_flags(11)), 11, yuv_pixel, Some(chain_monitor.clone()));
 	update_channel(&gossip_sync, &secp_ctx, &privkeys[4], UnsignedChannelUpdate {
 		chain_hash: genesis_block(Network::Testnet).header.block_hash(),
 		short_channel_id: 11,
@@ -446,7 +520,8 @@ pub(super) fn build_graph() -> (
 		htlc_maximum_msat: MAX_VALUE_MSAT,
 		fee_base_msat: 0,
 		fee_proportional_millionths: 0,
-		excess_data: Vec::new()
+		excess_data: Vec::new(),
+		htlc_maximum_yuv: Some(HTLC_MAXIMUM_YUV),
 	});
 	update_channel(&gossip_sync, &secp_ctx, &privkeys[3], UnsignedChannelUpdate {
 		chain_hash: genesis_block(Network::Testnet).header.block_hash(),
@@ -458,14 +533,15 @@ pub(super) fn build_graph() -> (
 		htlc_maximum_msat: MAX_VALUE_MSAT,
 		fee_base_msat: 0,
 		fee_proportional_millionths: 0,
-		excess_data: Vec::new()
+		excess_data: Vec::new(),
+		htlc_maximum_yuv: Some(HTLC_MAXIMUM_YUV),
 	});
 
 	add_or_update_node(&gossip_sync, &secp_ctx, &privkeys[4], NodeFeatures::from_le_bytes(id_to_feature_flags(5)), 0);
 
 	add_or_update_node(&gossip_sync, &secp_ctx, &privkeys[3], NodeFeatures::from_le_bytes(id_to_feature_flags(4)), 0);
 
-	add_channel(&gossip_sync, &secp_ctx, &privkeys[2], &privkeys[5], ChannelFeatures::from_le_bytes(id_to_feature_flags(7)), 7);
+	add_channel_internal(&gossip_sync, &secp_ctx, &privkeys[2], &privkeys[5], ChannelFeatures::from_le_bytes(id_to_feature_flags(7)), 7, yuv_pixel, Some(chain_monitor.clone()));
 	update_channel(&gossip_sync, &secp_ctx, &privkeys[2], UnsignedChannelUpdate {
 		chain_hash: genesis_block(Network::Testnet).header.block_hash(),
 		short_channel_id: 7,
@@ -476,7 +552,8 @@ pub(super) fn build_graph() -> (
 		htlc_maximum_msat: MAX_VALUE_MSAT,
 		fee_base_msat: 0,
 		fee_proportional_millionths: 1000000,
-		excess_data: Vec::new()
+		excess_data: Vec::new(),
+		htlc_maximum_yuv: Some(HTLC_MAXIMUM_YUV),
 	});
 	update_channel(&gossip_sync, &secp_ctx, &privkeys[5], UnsignedChannelUpdate {
 		chain_hash: genesis_block(Network::Testnet).header.block_hash(),
@@ -488,7 +565,8 @@ pub(super) fn build_graph() -> (
 		htlc_maximum_msat: MAX_VALUE_MSAT,
 		fee_base_msat: 0,
 		fee_proportional_millionths: 0,
-		excess_data: Vec::new()
+		excess_data: Vec::new(),
+		htlc_maximum_yuv: Some(HTLC_MAXIMUM_YUV),
 	});
 
 	add_or_update_node(&gossip_sync, &secp_ctx, &privkeys[5], NodeFeatures::from_le_bytes(id_to_feature_flags(6)), 0);

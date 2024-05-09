@@ -26,6 +26,29 @@ pub struct ForwardNode {
 	pub node_id: PublicKey,
 	/// The maximum value, in msat, that may be accepted by this node.
 	pub htlc_maximum_msat: u64,
+	/// The maximum YUV amount that may be accepted by this node.
+	///
+	/// This field is not empty if the `YuvPayments` feature is enabled.
+	pub htlc_maximum_yuv: Option<u128>,
+}
+
+impl ForwardNode {
+	/// Create a new [`ForwardNode`] with the given parameters.
+	pub fn new(tlvs: ForwardTlvs, node_id: PublicKey, htlc_maximum_msat: u64) -> Self {
+		Self {
+			tlvs,
+			node_id,
+			htlc_maximum_msat,
+			htlc_maximum_yuv: None,
+		}
+	}
+
+	/// Set the maximum YUV amount that may be accepted by this node.
+	pub fn with_yuv(mut self, htlc_maximum_yuv: u128) -> Self {
+		self.htlc_maximum_yuv = Some(htlc_maximum_yuv);
+
+		self
+	}
 }
 
 /// Data to construct a [`BlindedHop`] for forwarding a payment.
@@ -44,6 +67,23 @@ pub struct ForwardTlvs {
 	pub features: BlindedHopFeatures,
 }
 
+impl ForwardTlvs {
+	/// Create a new [`ForwardTlvs`] with the given parameters.
+	pub fn new(
+		short_channel_id: u64,
+		payment_relay: PaymentRelay,
+		payment_constraints: PaymentConstraints,
+		features: BlindedHopFeatures,
+	) -> Self {
+		Self {
+			short_channel_id,
+			payment_relay,
+			payment_constraints,
+			features,
+		}
+	}
+}
+
 /// Data to construct a [`BlindedHop`] for receiving a payment. This payload is custom to LDK and
 /// may not be valid if received by another lightning implementation.
 #[derive(Clone, Debug)]
@@ -52,6 +92,16 @@ pub struct ReceiveTlvs {
 	pub payment_secret: PaymentSecret,
 	/// Constraints for the receiver of this payment.
 	pub payment_constraints: PaymentConstraints,
+}
+
+impl ReceiveTlvs {
+	/// Create a new [`ReceiveTlvs`] with the given parameters.
+	pub fn new(payment_secret: PaymentSecret, payment_constraints: PaymentConstraints) -> Self {
+		Self {
+			payment_secret,
+			payment_constraints,
+		}
+	}
 }
 
 /// Data to construct a [`BlindedHop`] for sending a payment over.
@@ -84,6 +134,21 @@ pub struct PaymentRelay {
 	pub fee_base_msat: u32,
 }
 
+impl PaymentRelay {
+	/// Create a new [`PaymentRelay`] with the given parameters.
+	pub fn new(
+		cltv_expiry_delta: u16,
+		fee_proportional_millionths: u32,
+		fee_base_msat: u32,
+	) -> Self {
+		Self {
+			cltv_expiry_delta,
+			fee_proportional_millionths,
+			fee_base_msat,
+		}
+	}
+}
+
 /// Constraints for relaying over a given [`BlindedHop`].
 ///
 /// [`BlindedHop`]: crate::blinded_path::BlindedHop
@@ -95,6 +160,16 @@ pub struct PaymentConstraints {
 	/// The minimum value, in msat, that may be accepted by the node corresponding to this
 	/// [`BlindedHop`].
 	pub htlc_minimum_msat: u64,
+}
+
+impl PaymentConstraints {
+	/// Create a new [`PaymentConstraints`] with the given parameters.
+	pub fn new(max_cltv_expiry: u32, htlc_minimum_msat: u64) -> Self {
+		Self {
+			max_cltv_expiry,
+			htlc_minimum_msat,
+		}
+	}
 }
 
 impl Writeable for ForwardTlvs {
@@ -282,10 +357,12 @@ impl_writeable_msg!(PaymentConstraints, {
 
 #[cfg(test)]
 mod tests {
-	use bitcoin::secp256k1::PublicKey;
-	use crate::blinded_path::payment::{ForwardNode, ForwardTlvs, ReceiveTlvs, PaymentConstraints, PaymentRelay};
-	use crate::ln::PaymentSecret;
+	use crate::blinded_path::payment::{
+		ForwardNode, ForwardTlvs, PaymentConstraints, PaymentRelay, ReceiveTlvs,
+	};
 	use crate::ln::features::BlindedHopFeatures;
+	use crate::ln::PaymentSecret;
+	use bitcoin::secp256k1::PublicKey;
 
 	#[test]
 	fn compute_payinfo() {
@@ -293,6 +370,7 @@ mod tests {
 		// https://github.com/lightning/bolts/blob/master/proposals/route-blinding.md#blinded-payments
 		let dummy_pk = PublicKey::from_slice(&[2; 33]).unwrap();
 		let intermediate_nodes = vec![ForwardNode {
+			htlc_maximum_yuv: None,
 			node_id: dummy_pk,
 			tlvs: ForwardTlvs {
 				short_channel_id: 0,
@@ -309,6 +387,7 @@ mod tests {
 			},
 			htlc_maximum_msat: u64::max_value(),
 		}, ForwardNode {
+			htlc_maximum_yuv: None,
 			node_id: dummy_pk,
 			tlvs: ForwardTlvs {
 				short_channel_id: 0,
@@ -365,6 +444,7 @@ mod tests {
 		let dummy_pk = PublicKey::from_slice(&[2; 33]).unwrap();
 		let intermediate_nodes = vec![ForwardNode {
 			node_id: dummy_pk,
+			htlc_maximum_yuv: None,
 			tlvs: ForwardTlvs {
 				short_channel_id: 0,
 				payment_relay: PaymentRelay {
@@ -380,6 +460,7 @@ mod tests {
 			},
 			htlc_maximum_msat: u64::max_value()
 		}, ForwardNode {
+			htlc_maximum_yuv: None,
 			node_id: dummy_pk,
 			tlvs: ForwardTlvs {
 				short_channel_id: 0,
@@ -414,6 +495,7 @@ mod tests {
 		// max (htlc_min - following_fees) along the path.
 		let dummy_pk = PublicKey::from_slice(&[2; 33]).unwrap();
 		let intermediate_nodes = vec![ForwardNode {
+			htlc_maximum_yuv: None,
 			node_id: dummy_pk,
 			tlvs: ForwardTlvs {
 				short_channel_id: 0,
@@ -430,6 +512,7 @@ mod tests {
 			},
 			htlc_maximum_msat: u64::max_value()
 		}, ForwardNode {
+			htlc_maximum_yuv: None,
 			node_id: dummy_pk,
 			tlvs: ForwardTlvs {
 				short_channel_id: 0,
@@ -468,6 +551,7 @@ mod tests {
 		// htlc ends up as the min (htlc_max - following_fees) along the path.
 		let dummy_pk = PublicKey::from_slice(&[2; 33]).unwrap();
 		let intermediate_nodes = vec![ForwardNode {
+			htlc_maximum_yuv: None,
 			node_id: dummy_pk,
 			tlvs: ForwardTlvs {
 				short_channel_id: 0,
@@ -484,6 +568,7 @@ mod tests {
 			},
 			htlc_maximum_msat: 5_000,
 		}, ForwardNode {
+			htlc_maximum_yuv: None,
 			node_id: dummy_pk,
 			tlvs: ForwardTlvs {
 				short_channel_id: 0,

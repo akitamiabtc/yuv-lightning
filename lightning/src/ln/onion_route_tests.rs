@@ -28,6 +28,7 @@ use crate::util::ser::{Writeable, Writer, BigSize};
 use crate::util::test_utils;
 use crate::util::config::{UserConfig, ChannelConfig, MaxDustHTLCExposure};
 use crate::util::errors::APIError;
+use crate::chain::chaininterface::YuvBroadcaster;
 
 use bitcoin::hash_types::BlockHash;
 
@@ -249,6 +250,7 @@ impl msgs::ChannelUpdate {
 				fee_base_msat: 0,
 				fee_proportional_millionths: 0,
 				excess_data: vec![],
+				htlc_maximum_yuv: None,
 			}
 		}
 	}
@@ -788,6 +790,7 @@ fn do_test_onion_failure_stale_channel_update(announced_channel: bool) {
 			cltv_expiry_delta: default_config.cltv_expiry_delta,
 			htlc_maximum_msat: None,
 			htlc_minimum_msat: None,
+			htlc_maximum_yuv: None,
 		}])];
 		let payment_params = PaymentParameters::from_node_id(*channel_to_update_counterparty, TEST_FINAL_CLTV)
 			.with_bolt11_features(nodes[2].node.invoice_features()).unwrap()
@@ -1059,6 +1062,7 @@ macro_rules! get_phantom_route {
 						cltv_expiry_delta: $channel.0.contents.cltv_expiry_delta,
 						htlc_minimum_msat: None,
 						htlc_maximum_msat: None,
+						htlc_maximum_yuv: None,
 					},
 					RouteHintHop {
 						src_node_id: phantom_route_hint.real_node_pubkey,
@@ -1070,6 +1074,7 @@ macro_rules! get_phantom_route {
 						cltv_expiry_delta: MIN_CLTV_EXPIRY_DELTA,
 						htlc_minimum_msat: None,
 						htlc_maximum_msat: None,
+						htlc_maximum_yuv: None,
 					}
 		])]).unwrap();
 		let scorer = test_utils::TestScorer::new();

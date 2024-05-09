@@ -127,23 +127,35 @@ impl Display for SignedRawBolt11Invoice {
 /// This is not exported to bindings users
 impl Display for RawHrp {
 	fn fmt(&self, f: &mut Formatter) -> Result<(), fmt::Error> {
-		let amount = match self.raw_amount {
-			Some(ref amt) => amt.to_string(),
-			None => String::new(),
+		write!(f, "ln{}", self.currency)?;
+
+		if let Some(raw_amount) = self.raw_amount {
+			f.write_str(&raw_amount.to_string())?
 		};
 
-		let si_prefix = match self.si_prefix {
-			Some(ref si) => si.to_string(),
-			None => String::new(),
+		if let Some(si_prefix) = self.si_prefix {
+			f.write_str(&si_prefix.to_string())?
 		};
 
-		write!(
-			f,
-			"ln{}{}{}",
-			self.currency,
-			amount,
-			si_prefix
-		)
+		if let Some(yuv_pixel) = self.yuv_pixel {
+			if yuv_pixel.luma.amount == 0 {
+				return Ok(())
+			}
+
+			// Write `y` to the prefix part to specify if YUV payments are used.
+			f.write_str("y")?;
+
+			// Write YUV pixel's amount.
+			f.write_str(&yuv_pixel.luma.amount.to_string())?;
+
+			// Write the YUV chroma encoded in P2TR address format, where the payload is the
+			// issuer's `x` of the public key or, actually, chroma itself.
+			let address = yuv_pixel.chroma.to_address(self.currency.into());
+
+			f.write_str(&address.to_string())?
+		}
+
+		Ok(())
 	}
 }
 
@@ -469,6 +481,8 @@ impl ToBase32 for Bolt11InvoiceSignature {
 #[cfg(test)]
 mod test {
 	use bech32::CheckBase32;
+	use secp256k1::{PublicKey, SecretKey};
+	use yuv_pixels::{Chroma, Pixel};
 
 	#[test]
 	fn test_currency_code() {
@@ -489,6 +503,43 @@ mod test {
 			currency: Currency::Bitcoin,
 			raw_amount: Some(100),
 			si_prefix: Some(SiPrefix::Micro),
+			yuv_pixel: None,
+		};
+
+		assert_eq!(hrp.to_string(), "lnbc100u");
+	}
+
+	#[test]
+	fn test_raw_hrp_with_yuv() {
+		use crate::{Currency, RawHrp, SiPrefix};
+
+		let chroma: Chroma = PublicKey::from_secret_key(
+			&secp256k1::Secp256k1::new(), &SecretKey::from_slice(&[42; 32]).unwrap(),
+		).x_only_public_key().0.into();
+
+		let hrp = RawHrp {
+			currency: Currency::Bitcoin,
+			raw_amount: Some(100),
+			si_prefix: Some(SiPrefix::Micro),
+			yuv_pixel: Some(Pixel::new(1234, chroma)),
+		};
+
+		assert_eq!(hrp.to_string(), "lnbc100uy1234bc1pt0j7j3uzp9n549hxpu0sxlmpwe2ql5qplgwkg628wrzk5acfcskq9ryxre");
+	}
+
+	#[test]
+	fn test_raw_hrp_with_yuv_zero_amount() {
+		use crate::{Currency, RawHrp, SiPrefix};
+
+		let chroma: Chroma = PublicKey::from_secret_key(
+			&secp256k1::Secp256k1::new(), &SecretKey::from_slice(&[42; 32]).unwrap(),
+		).x_only_public_key().0.into();
+
+		let hrp = RawHrp {
+			currency: Currency::Bitcoin,
+			raw_amount: Some(100),
+			si_prefix: Some(SiPrefix::Micro),
+			yuv_pixel: Some(Pixel::new(0, chroma)),
 		};
 
 		assert_eq!(hrp.to_string(), "lnbc100u");

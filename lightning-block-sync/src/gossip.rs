@@ -2,21 +2,25 @@
 //! current UTXO set. This module defines an implementation of the LDK API required to do so
 //! against a [`BlockSource`] which implements a few additional methods for accessing the UTXO set.
 
-use crate::{AsyncBlockSourceResult, BlockData, BlockSource, BlockSourceError};
+use crate::{AsyncBlockSourceResult, AsyncYuvSourceResult, BlockData, BlockSource, BlockSourceError};
 
 use bitcoin::blockdata::block::Block;
 use bitcoin::blockdata::transaction::{TxOut, OutPoint};
 use bitcoin::hash_types::BlockHash;
 
+use bitcoin::Txid;
 use lightning::sign::NodeSigner;
 
 use lightning::ln::peer_handler::{CustomMessageHandler, PeerManager, SocketDescriptor};
 use lightning::ln::msgs::{ChannelMessageHandler, OnionMessageHandler};
 
 use lightning::routing::gossip::{NetworkGraph, P2PGossipSync};
-use lightning::routing::utxo::{UtxoFuture, UtxoLookup, UtxoResult, UtxoLookupError};
+use lightning::routing::utxo::{UtxoEntry, UtxoFuture, UtxoLookup, UtxoLookupError, UtxoLookupYuvError, UtxoResult};
 
 use lightning::util::logger::Logger;
+
+use yuv_pixels::Pixel;
+use yuv_rpc_api::transactions::GetRawYuvTransactionResponse;
 
 use std::sync::{Arc, Mutex};
 use std::collections::VecDeque;
@@ -24,6 +28,11 @@ use std::future::Future;
 use std::ops::Deref;
 use std::pin::Pin;
 use std::task::Poll;
+
+/// Max number of retries to fetch the pixel from YUV node.
+// TODO: move to config
+#[cfg(feature = "tokio")]
+const MAX_YUV_TX_FETCH_RETRIES: usize = 10;
 
 /// A trait which extends [`BlockSource`] and can be queried to fetch the block at a given height
 /// as well as whether a given output is unspent (i.e. a member of the current UTXO set).
@@ -41,6 +50,12 @@ pub trait UtxoSource : BlockSource + 'static {
 	/// Returns true if the given output has *not* been spent, i.e. is a member of the current UTXO
 	/// set.
 	fn is_output_unspent<'a>(&'a self, outpoint: OutPoint) -> AsyncBlockSourceResult<'a, bool>;
+}
+
+/// A trait for fetching transactions from YUV node
+pub trait YuvTransactionSource: Send + Sync + 'static {
+	/// Fetches the transaction with the given txid.
+	fn yuv_transaction_by_id<'a>(&'a self, txid: &'a Txid) -> AsyncYuvSourceResult<'a, GetRawYuvTransactionResponse>;
 }
 
 /// A generic trait which is able to spawn futures in the background.
@@ -139,6 +154,7 @@ pub struct GossipVerifier<S: FutureSpawner,
 	OM: Deref + Send + Sync + 'static,
 	CMH: Deref + Send + Sync + 'static,
 	NS: Deref + Send + Sync + 'static,
+	YuvSource: Deref + Send + Sync + 'static + Clone,
 > where
 	Blocks::Target: UtxoSource,
 	L::Target: Logger,
@@ -146,31 +162,37 @@ pub struct GossipVerifier<S: FutureSpawner,
 	OM::Target: OnionMessageHandler,
 	CMH::Target: CustomMessageHandler,
 	NS::Target: NodeSigner,
+	YuvSource::Target: YuvTransactionSource,
 {
 	source: Blocks,
 	peer_manager: Arc<PeerManager<Descriptor, CM, Arc<P2PGossipSync<Arc<NetworkGraph<L>>, Self, L>>, OM, L, CMH, NS>>,
 	gossiper: Arc<P2PGossipSync<Arc<NetworkGraph<L>>, Self, L>>,
 	spawn: S,
 	block_cache: Arc<Mutex<VecDeque<(u32, Block)>>>,
+
+	/// Client to interact with YUV nodes to fetch information about new transactions.
+	yuv_source: Option<YuvSource>,
 }
 
 const BLOCK_CACHE_SIZE: usize = 5;
 
 impl<S: FutureSpawner,
-	Blocks: Deref + Send + Sync + Clone,
-	L: Deref + Send + Sync,
-	Descriptor: SocketDescriptor + Send + Sync,
-	CM: Deref + Send + Sync,
-	OM: Deref + Send + Sync,
-	CMH: Deref + Send + Sync,
-	NS: Deref + Send + Sync,
-> GossipVerifier<S, Blocks, L, Descriptor, CM, OM, CMH, NS> where
+	Blocks: Deref + Send + Sync + Clone + 'static,
+	L: Deref + Send + Sync + 'static,
+	Descriptor: SocketDescriptor + Send + Sync + 'static,
+	CM: Deref + Send + Sync + 'static,
+	OM: Deref + Send + Sync + 'static,
+	CMH: Deref + Send + Sync + 'static,
+	NS: Deref + Send + Sync + 'static,
+	YS: Deref + Send + Sync + Clone + 'static,
+> GossipVerifier<S, Blocks, L, Descriptor, CM, OM, CMH, NS, YS> where
 	Blocks::Target: UtxoSource,
 	L::Target: Logger,
 	CM::Target: ChannelMessageHandler,
 	OM::Target: OnionMessageHandler,
 	CMH::Target: CustomMessageHandler,
 	NS::Target: NodeSigner,
+	YS::Target: YuvTransactionSource,
 {
 	/// Constructs a new [`GossipVerifier`].
 	///
@@ -180,12 +202,33 @@ impl<S: FutureSpawner,
 		Self {
 			source, spawn, gossiper, peer_manager,
 			block_cache: Arc::new(Mutex::new(VecDeque::with_capacity(BLOCK_CACHE_SIZE))),
+			yuv_source: None,
+		}
+	}
+
+	/// The same as `new`, but with a YUV source.
+	pub fn with_yuv(
+		source: Blocks,
+		spawn: S,
+		gossiper: Arc<P2PGossipSync<Arc<NetworkGraph<L>>, Self, L>>,
+		peer_manager: Arc<PeerManager<Descriptor, CM, Arc<P2PGossipSync<Arc<NetworkGraph<L>>, Self, L>>, OM, L, CMH, NS>>,
+		yuv_source: Option<YS>,
+	) -> Self {
+		Self {
+			yuv_source,
+			..Self::new(source, spawn, gossiper, peer_manager)
 		}
 	}
 
 	async fn retrieve_utxo(
 		source: Blocks, block_cache: Arc<Mutex<VecDeque<(u32, Block)>>>, short_channel_id: u64
 	) -> Result<TxOut, UtxoLookupError> {
+		Self::retrieve_utxo_internal(source, block_cache, short_channel_id,  None).await.map(|utxo| utxo.txout)
+	}
+
+	async fn retrieve_utxo_internal(
+		source: Blocks, block_cache: Arc<Mutex<VecDeque<(u32, Block)>>>, short_channel_id: u64, yuv_source: Option<YS>
+	) -> Result<UtxoEntry, UtxoLookupError> {
 		let block_height = (short_channel_id >> 5 * 8) as u32; // block height is most significant three bytes
 		let transaction_index = ((short_channel_id >> 2 * 8) & 0xffffff) as u32;
 		let output_index = (short_channel_id & 0xffff) as u16;
@@ -258,10 +301,62 @@ impl<S: FutureSpawner,
 		let outpoint_unspent =
 			source.is_output_unspent(outpoint).await.map_err(|_| UtxoLookupError::UnknownTx)?;
 		if outpoint_unspent {
-			Ok(output)
+			let pixel = if let Some(yuv_source) = yuv_source {
+				Some(Self::fetch_pixel_until_attached(yuv_source.clone(), outpoint).await?)
+			} else { None };
+
+			Ok(UtxoEntry { txout: output, pixel })
 		} else {
 			Err(UtxoLookupError::UnknownTx)
 		}
+	}
+
+	/// Calls `fetch_pixel` until the pixel is not `None` or an error occurs.
+	///
+	/// Has maximum number of retries to avoid infinite loop and sleep between
+	/// retries if the `tokio` feature is enabled.
+	// FIXME: move parameters to config
+	async fn fetch_pixel_until_attached(yuv_source: YS, outpoint: OutPoint) -> Result<Pixel, UtxoLookupError> {
+		if let Some(pixel) = Self::fetch_pixel(yuv_source.clone(), outpoint).await? {
+			return Ok(pixel);
+		}
+
+		#[cfg(feature = "tokio")]
+		for _ in 0..MAX_YUV_TX_FETCH_RETRIES {
+			if let Some(pixel) = Self::fetch_pixel(yuv_source.clone(), outpoint).await? {
+				return Ok(pixel);
+			}
+
+			tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+		}
+
+		Err(UtxoLookupYuvError::AttachTimeout.into())
+	}
+
+	/// Fetch the pixel from the YUV node. Is `None` if there is pixel, but it
+	/// is not attached yet inside YUV node.
+	async fn fetch_pixel(yuv_source: YS, OutPoint { txid, vout }: OutPoint) -> Result<Option<Pixel>, UtxoLookupError> {
+		let response = yuv_source.yuv_transaction_by_id(&txid).await.map_err(|_| UtxoLookupError::UnknownTx)?;
+
+		use GetRawYuvTransactionResponse as TxStatus;
+		let tx = match response {
+			// If the transaction is not found, we can't look up the pixel
+			TxStatus::None => return Err(UtxoLookupYuvError::NoPixelAttached.into()),
+			// If the transaction is pending or checked, we can't look up the
+			// pixel, but it exists, so we may need to retry a little bit later
+			TxStatus::Pending | TxStatus::Checked => return Ok(None),
+			// If the transaction is attached, we can look up the pixel
+			TxStatus::Attached(tx) => tx,
+		};
+
+		let pixel = tx.tx_type
+			.output_proofs()
+			.ok_or(UtxoLookupYuvError::NoPixelAttached)?
+			.get(&vout)
+			.map(|proof| proof.pixel())
+			.ok_or(UtxoLookupYuvError::NoPixelAttached)?;
+
+		Ok(Some(pixel))
 	}
 }
 
@@ -273,13 +368,15 @@ impl<S: FutureSpawner,
 	OM: Deref + Send + Sync,
 	CMH: Deref + Send + Sync,
 	NS: Deref + Send + Sync,
-> Deref for GossipVerifier<S, Blocks, L, Descriptor, CM, OM, CMH, NS> where
+	YS: Deref + Send + Sync + Clone,
+> Deref for GossipVerifier<S, Blocks, L, Descriptor, CM, OM, CMH, NS, YS> where
 	Blocks::Target: UtxoSource,
 	L::Target: Logger,
 	CM::Target: ChannelMessageHandler,
 	OM::Target: OnionMessageHandler,
 	CMH::Target: CustomMessageHandler,
 	NS::Target: NodeSigner,
+	YS::Target: YuvTransactionSource,
 {
 	type Target = Self;
 	fn deref(&self) -> &Self { self }
@@ -294,13 +391,15 @@ impl<S: FutureSpawner,
 	OM: Deref + Send + Sync,
 	CMH: Deref + Send + Sync,
 	NS: Deref + Send + Sync,
-> UtxoLookup for GossipVerifier<S, Blocks, L, Descriptor, CM, OM, CMH, NS> where
+	YS: Deref + Send + Sync + Clone,
+> UtxoLookup for GossipVerifier<S, Blocks, L, Descriptor, CM, OM, CMH, NS, YS> where
 	Blocks::Target: UtxoSource,
 	L::Target: Logger,
 	CM::Target: ChannelMessageHandler,
 	OM::Target: OnionMessageHandler,
 	CMH::Target: CustomMessageHandler,
 	NS::Target: NodeSigner,
+	YS::Target: YuvTransactionSource,
 {
 	fn get_utxo(&self, _genesis_hash: &BlockHash, short_channel_id: u64) -> UtxoResult {
 		let res = UtxoFuture::new();
@@ -312,6 +411,22 @@ impl<S: FutureSpawner,
 		self.spawn.spawn(async move {
 			let res = Self::retrieve_utxo(source, block_cache, short_channel_id).await;
 			fut.resolve(gossiper.network_graph(), &*gossiper, res);
+			pm.process_events();
+		});
+		UtxoResult::Async(res)
+	}
+
+	fn get_utxo_with_yuv(&self, _genesis_hash: &BlockHash, short_channel_id: u64) -> UtxoResult {
+		let res = UtxoFuture::new();
+		let fut = res.clone();
+		let source = self.source.clone();
+		let gossiper = Arc::clone(&self.gossiper);
+		let block_cache = Arc::clone(&self.block_cache);
+		let pm = Arc::clone(&self.peer_manager);
+		let yuv_source = self.yuv_source.clone();
+		self.spawn.spawn(async move {
+			let res = Self::retrieve_utxo_internal(source, block_cache, short_channel_id, yuv_source).await;
+			fut.resolve_internal(gossiper.network_graph(), &*gossiper, res);
 			pm.process_events();
 		});
 		UtxoResult::Async(res)

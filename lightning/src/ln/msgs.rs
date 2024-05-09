@@ -27,7 +27,6 @@
 use bitcoin::blockdata::constants::ChainHash;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::secp256k1::ecdsa::Signature;
-use bitcoin::{secp256k1, Witness};
 use bitcoin::blockdata::script::Script;
 use bitcoin::hash_types::{Txid, BlockHash};
 
@@ -46,6 +45,9 @@ use core::fmt::Debug;
 use core::ops::Deref;
 #[cfg(feature = "std")]
 use core::str::FromStr;
+use bitcoin::{secp256k1, Witness};
+use yuv_pixels::{Luma, Pixel};
+use yuv_types::YuvTxType;
 use crate::io::{self, Cursor, Read};
 use crate::io_extras::read_to_end;
 
@@ -221,6 +223,11 @@ pub struct OpenChannel {
 	/// If this is `None`, we derive the channel type from the intersection of our
 	/// feature bits with our counterparty's feature bits from the [`Init`] message.
 	pub channel_type: Option<ChannelTypeFeatures>,
+	/// The YUV [`Pixel`] the funder adds to the channel.
+	///
+	/// If this is `None`, the channel doesn't contains any YUV tokens. If it is `Some` the Node
+	/// have to support `YuvPayments` feature.
+	pub yuv_pixel: Option<Pixel>,
 }
 
 /// An open_channel2 message to be sent by or received from the channel initiator.
@@ -403,7 +410,10 @@ pub struct FundingCreated {
 	pub partial_signature_with_nonce: Option<PartialSignatureWithNonce>,
 	#[cfg(taproot)]
 	/// Next nonce the channel acceptor should use to finalize the funding output signature
-	pub next_local_nonce: Option<musig2::types::PublicNonce>
+	pub next_local_nonce: Option<musig2::types::PublicNonce>,
+	/// The YUV proofs for funding transaction. It can be used to build commitment transactions
+	/// if the YUV payments feature is used for this channel.
+	pub yuv_funding_proofs: Option<YuvTxType>,
 }
 
 /// A [`funding_signed`] message to be sent to or received from a peer.
@@ -571,6 +581,9 @@ pub struct Shutdown {
 	///
 	/// Must be in one of these forms: P2PKH, P2SH, P2WPKH, P2WSH, P2TR.
 	pub scriptpubkey: Script,
+	/// The pixel's inner key for the YUV pixel proof. Must be presented if YUV feature is used for
+	/// the channel.
+	pub yuv_inner_key: Option<PublicKey>,
 }
 
 /// The minimum and maximum fees which the sender is willing to place on the closing transaction.
@@ -624,6 +637,9 @@ pub struct UpdateAddHTLC {
 	/// [`ChannelConfig::accept_underpaying_htlcs`]: crate::util::config::ChannelConfig::accept_underpaying_htlcs
 	pub skimmed_fee_msat: Option<u64>,
 	pub(crate) onion_routing_packet: OnionPacket,
+
+	/// Optional amount of YUV tokens to be sent with the HTLC.
+	pub yuv_amount: Option<u128>,
 }
 
  /// An onion message to be sent to or received from a peer.
@@ -752,6 +768,25 @@ pub struct AnnouncementSignatures {
 	pub node_signature: Signature,
 	/// A signature by the funding key
 	pub bitcoin_signature: Signature,
+}
+
+/// An [`update_balance`] message to be sent to or received from a peer.
+///
+/// This message proposes updated amounts of the channel balances to a counterparty. Unlike
+/// [`UpdateAddHTLC`] this message doesn't create a new HTLC. Instead, it directly updates the
+/// balances of the parties connected through a channel.
+///
+/// TODO(yuv): Add spec link for channel_announcement.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct UpdateBalance {
+	/// The channel ID
+	pub channel_id: ChannelId,
+	/// The new proposal msat balance of the sender. It includes reserve satoshis and the fee, but
+	/// doesn't include the HTLCs amounts.
+	pub new_balance_msat: u64,
+	/// The new proposal [`Luma`] of the sender. If it is `None`, the channel mustn't use the
+	/// `YuvPayments` feature.
+	pub new_yuv_pixel_luma: Option<Luma>,
 }
 
 /// An address which can be used to connect to a remote peer.
@@ -1138,6 +1173,10 @@ pub struct UnsignedChannelUpdate {
 	pub fee_base_msat: u32,
 	/// The amount to fee multiplier, in micro-satoshi
 	pub fee_proportional_millionths: u32,
+	/// The maximum HTLC value incoming to sender, in YUV tokens.
+	///
+	/// It can be `Some` only if YUV payments feature is enabled for the channel.
+	pub htlc_maximum_yuv: Option<u128>,
 	/// Excess data which was signed as a part of the message which we do not (yet) understand how
 	/// to decode.
 	///
@@ -1375,6 +1414,8 @@ pub trait ChannelMessageHandler : MessageSendEventsProvider {
 	fn handle_update_fail_htlc(&self, their_node_id: &PublicKey, msg: &UpdateFailHTLC);
 	/// Handle an incoming `update_fail_malformed_htlc` message from the given peer.
 	fn handle_update_fail_malformed_htlc(&self, their_node_id: &PublicKey, msg: &UpdateFailMalformedHTLC);
+	/// Handle an incoming `update_balance` message from the given peer.
+	fn handle_update_balance(&self, their_node_id: &PublicKey, msg: &UpdateBalance);
 	/// Handle an incoming `commitment_signed` message from the given peer.
 	fn handle_commitment_signed(&self, their_node_id: &PublicKey, msg: &CommitmentSigned);
 	/// Handle an incoming `revoke_and_ack` message from the given peer.
@@ -1854,7 +1895,9 @@ impl_writeable_msg!(FundingCreated, {
 	funding_txid,
 	funding_output_index,
 	signature
-}, {});
+}, {
+	(6, yuv_funding_proofs, option)
+});
 #[cfg(taproot)]
 impl_writeable_msg!(FundingCreated, {
 	temporary_channel_id,
@@ -1863,7 +1906,8 @@ impl_writeable_msg!(FundingCreated, {
 	signature
 }, {
 	(2, partial_signature_with_nonce, option),
-	(4, next_local_nonce, option)
+	(4, next_local_nonce, option),
+	(6, yuv_funding_proofs, option)
 });
 
 #[cfg(not(taproot))]
@@ -1941,6 +1985,7 @@ impl_writeable_msg!(OpenChannel, {
 }, {
 	(0, shutdown_scriptpubkey, (option, encoding: (Script, WithoutLength))), // Don't encode length twice.
 	(1, channel_type, option),
+	(2, yuv_pixel, option),
 });
 
 impl_writeable_msg!(OpenChannelV2, {
@@ -1987,8 +2032,10 @@ impl_writeable_msg!(RevokeAndACK, {
 
 impl_writeable_msg!(Shutdown, {
 	channel_id,
-	scriptpubkey
-}, {});
+	scriptpubkey,
+}, {
+	(0, yuv_inner_key, option)
+});
 
 impl_writeable_msg!(UpdateFailHTLC, {
 	channel_id,
@@ -2060,7 +2107,8 @@ impl_writeable_msg!(UpdateAddHTLC, {
 	cltv_expiry,
 	onion_routing_packet,
 }, {
-	(65537, skimmed_fee_msat, option)
+	(0, yuv_amount, option),
+	(65537, skimmed_fee_msat, option),
 });
 
 impl Readable for OnionMessage {
@@ -2317,6 +2365,10 @@ impl_writeable!(ChannelAnnouncement, {
 	contents
 });
 
+/// This prefix is needed to determine if the `UnsignedChannelUpdate` was sent by the node that
+/// supports YUV payments feature, and excess data contains the YUV amount.
+const YUV_UNSIGNED_CHANNEL_UPDATE_PREFIX: [u8; 4] = *b"yuv-";
+
 impl Writeable for UnsignedChannelUpdate {
 	fn write<W: Writer>(&self, w: &mut W) -> Result<(), io::Error> {
 		// `message_flags` used to indicate presence of `htlc_maximum_msat`, but was deprecated in the spec.
@@ -2331,14 +2383,21 @@ impl Writeable for UnsignedChannelUpdate {
 		self.fee_base_msat.write(w)?;
 		self.fee_proportional_millionths.write(w)?;
 		self.htlc_maximum_msat.write(w)?;
+
+		if self.htlc_maximum_yuv.is_some() {
+			YUV_UNSIGNED_CHANNEL_UPDATE_PREFIX.write(w)?;
+			self.htlc_maximum_yuv.write(w)?;
+		}
+
 		w.write_all(&self.excess_data[..])?;
+
 		Ok(())
 	}
 }
 
 impl Readable for UnsignedChannelUpdate {
 	fn read<R: Read>(r: &mut R) -> Result<Self, DecodeError> {
-		Ok(Self {
+		let mut result = Self {
 			chain_hash: Readable::read(r)?,
 			short_channel_id: Readable::read(r)?,
 			timestamp: Readable::read(r)?,
@@ -2352,8 +2411,40 @@ impl Readable for UnsignedChannelUpdate {
 			fee_base_msat: Readable::read(r)?,
 			fee_proportional_millionths: Readable::read(r)?,
 			htlc_maximum_msat: Readable::read(r)?,
-			excess_data: read_to_end(r)?,
-		})
+			htlc_maximum_yuv: None,
+			excess_data: Vec::new(),
+		};
+
+		let mut excess_data  = Vec::new();
+		r.read_to_end(&mut excess_data)?;
+
+		if !excess_data.is_empty() {
+			// We don't handle error here, because if it happened we don't know what is in the
+			// excess_data.
+			let _ = result.try_read_yuv_excess_data(excess_data);
+		}
+
+		Ok(result)
+	}
+}
+
+impl UnsignedChannelUpdate {
+	/// As the `UnsignedChannelUpdate`, accordingly to the BOLTs, doesn't have TLV fields we need
+	/// just to TRY read the excess_data, because we aren't sure if it's data that is related to
+	/// another protocol.
+	fn try_read_yuv_excess_data(&mut self, mut excess_data: Vec<u8>) -> Result<(), DecodeError> {
+		let mut r = Cursor::new(&mut excess_data);
+
+		let prefix: [u8;4] = Readable::read(&mut r)?;
+		if prefix == YUV_UNSIGNED_CHANNEL_UPDATE_PREFIX {
+			self.htlc_maximum_yuv = Readable::read(&mut r)?;
+			self.excess_data = read_to_end(&mut r)?;
+			return Ok(());
+		}
+
+		self.excess_data = excess_data;
+
+		Ok(())
 	}
 }
 
@@ -2654,7 +2745,7 @@ mod tests {
 	use crate::ln::{PaymentPreimage, PaymentHash, PaymentSecret};
 	use crate::ln::ChannelId;
 	use crate::ln::features::{ChannelFeatures, ChannelTypeFeatures, InitFeatures, NodeFeatures};
-	use crate::ln::msgs::{self, FinalOnionHopData, OnionErrorPacket};
+	use crate::ln::msgs::{self, FinalOnionHopData, OnionErrorPacket, UpdateBalance};
 	use crate::ln::msgs::SocketAddress;
 	use crate::routing::gossip::{NodeAlias, NodeId};
 	use crate::util::ser::{Writeable, Readable, ReadableArgs, Hostname, TransactionU16LenLimited};
@@ -2677,6 +2768,7 @@ mod tests {
 
 	#[cfg(feature = "std")]
 	use std::net::{Ipv4Addr, Ipv6Addr};
+	use yuv_pixels::Luma;
 	use crate::ln::msgs::SocketAddressParseError;
 
 	#[test]
@@ -2940,7 +3032,7 @@ mod tests {
 		do_encoding_node_announcement(false, false, true, false, true, false, false, false);
 	}
 
-	fn do_encoding_channel_update(direction: bool, disable: bool, excess_data: bool) {
+	fn do_encoding_channel_update(direction: bool, disable: bool, excess_data: bool, yuv_pixel: bool) {
 		let secp_ctx = Secp256k1::new();
 		let (privkey_1, _) = get_keys_from!("0101010101010101010101010101010101010101010101010101010101010101", secp_ctx);
 		let sig_1 = get_sig_on!(privkey_1, secp_ctx, String::from("01010101010101010101010101010101"));
@@ -2954,6 +3046,7 @@ mod tests {
 			htlc_maximum_msat: 131355275467161,
 			fee_base_msat: 10000,
 			fee_proportional_millionths: 20,
+			htlc_maximum_yuv: if yuv_pixel { Some(12345678987654321) } else { None },
 			excess_data: if excess_data { vec![0, 0, 0, 0, 59, 154, 202, 0] } else { Vec::new() }
 		};
 		let channel_update = msgs::ChannelUpdate {
@@ -2976,6 +3069,9 @@ mod tests {
 		}
 		target_value.append(&mut hex::decode("009000000000000f42400000271000000014").unwrap());
 		target_value.append(&mut hex::decode("0000777788889999").unwrap());
+		if yuv_pixel {
+			target_value.append(&mut hex::decode("7975762d110000000000000000002bdc546291f4b1").unwrap());
+		}
 		if excess_data {
 			target_value.append(&mut hex::decode("000000003b9aca00").unwrap());
 		}
@@ -2984,14 +3080,17 @@ mod tests {
 
 	#[test]
 	fn encoding_channel_update() {
-		do_encoding_channel_update(false, false, false);
-		do_encoding_channel_update(false, false, true);
-		do_encoding_channel_update(true, false, false);
-		do_encoding_channel_update(true, false, true);
-		do_encoding_channel_update(false, true, false);
-		do_encoding_channel_update(false, true, true);
-		do_encoding_channel_update(true, true, false);
-		do_encoding_channel_update(true, true, true);
+		do_encoding_channel_update(false, false, false, false);
+		do_encoding_channel_update(false, false, true, false);
+		do_encoding_channel_update(true, false, false, false);
+		do_encoding_channel_update(true, false, true, false);
+		do_encoding_channel_update(false, true, false, false);
+		do_encoding_channel_update(false, true, true, false);
+		do_encoding_channel_update(true, true, false, false);
+		do_encoding_channel_update(true, true, true, false);
+		do_encoding_channel_update(true, true, true, false);
+		do_encoding_channel_update(false, false, false, true);
+		do_encoding_channel_update(false, false, true, true);
 	}
 
 	fn do_encoding_open_channel(random_bit: bool, shutdown: bool, incl_chan_type: bool) {
@@ -3023,6 +3122,7 @@ mod tests {
 			channel_flags: if random_bit { 1 << 5 } else { 0 },
 			shutdown_scriptpubkey: if shutdown { Some(Address::p2pkh(&::bitcoin::PublicKey{compressed: true, inner: pubkey_1}, Network::Testnet).script_pubkey()) } else { None },
 			channel_type: if incl_chan_type { Some(ChannelTypeFeatures::empty()) } else { None },
+			yuv_pixel: None,
 		};
 		let encoded_value = open_channel.encode();
 		let mut target_value = Vec::new();
@@ -3260,6 +3360,7 @@ mod tests {
 			partial_signature_with_nonce: None,
 			#[cfg(taproot)]
 			next_local_nonce: None,
+			yuv_funding_proofs: None,
 		};
 		let encoded_value = funding_created.encode();
 		let target_value = hex::decode("02020202020202020202020202020202020202020202020202020202020202026e96fe9f8b0ddcd729ba03cfafa5a27b050b39d354dd980814268dfa9a44d4c200ffd977cb9b53d93a6ff64bb5f1e158b4094b66e798fb12911168a3ccdf80a83096340a6a95da0ae8d9f776528eecdbb747eb6b545495a4319ed5378e35b21e073a").unwrap();
@@ -3481,6 +3582,7 @@ mod tests {
 				else if script_type == 2 { Address::p2sh(&script, Network::Testnet).unwrap().script_pubkey() }
 				else if script_type == 3 { Address::p2wpkh(&::bitcoin::PublicKey{compressed: true, inner: pubkey_1}, Network::Testnet).unwrap().script_pubkey() }
 				else { Address::p2wsh(&script, Network::Testnet).script_pubkey() },
+			yuv_inner_key: None,
 		};
 		let encoded_value = shutdown.encode();
 		let mut target_value = hex::decode("0202020202020202020202020202020202020202020202020202020202020202").unwrap();
@@ -3554,6 +3656,7 @@ mod tests {
 			cltv_expiry: 821716,
 			onion_routing_packet,
 			skimmed_fee_msat: None,
+			yuv_amount: None,
 		};
 		let encoded_value = update_add_htlc.encode();
 		let target_value = hex::decode("020202020202020202020202020202020202020202020202020202020202020200083a840000034d32144668701144760101010101010101010101010101010101010101010101010101010101010101000c89d4ff031b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010202020202020202020202020202020202020202020202020202020202020202").unwrap();
@@ -4024,6 +4127,38 @@ mod tests {
 		assert_eq!(gossip_timestamp_filter.chain_hash, expected_chain_hash);
 		assert_eq!(gossip_timestamp_filter.first_timestamp, 1590000000);
 		assert_eq!(gossip_timestamp_filter.timestamp_range, 0xffff_ffff);
+	}
+
+	fn do_encoding_update_balance(yuv_luma: Option<Luma>, hex_encoded_luma: &str) {
+		let update_balance = UpdateBalance {
+			channel_id: ChannelId::from_bytes([2; 32]),
+			new_balance_msat: 1234,
+			new_yuv_pixel_luma: yuv_luma,
+		};
+
+		assert_eq!(update_balance.encode(), hex::decode(format!("020202020202020202020202020202020202020202020202020202020202020200000000000004d2{}", hex_encoded_luma)).unwrap());
+	}
+
+	#[test]
+	fn encoding_update_balance() {
+		do_encoding_update_balance(None, "00");
+		do_encoding_update_balance(Some(Luma::from(0)), "210000000000000000000000000000000000000000000000000000000000000000");
+		do_encoding_update_balance(Some(Luma::from(1234)), "21000000000000000000000000000004d200000000000000000000000000000000");
+	}
+
+	fn do_decoding_update_balance(yuv_luma: Option<Luma>, encoded_update_balance: &str) {
+		let update_balance = UpdateBalance::read(&mut Cursor::new(hex::decode(encoded_update_balance).unwrap())).unwrap();
+
+		assert_eq!(ChannelId::from_bytes([2; 32]), update_balance.channel_id);
+		assert_eq!(1234, update_balance.new_balance_msat);
+		assert_eq!(yuv_luma, update_balance.new_yuv_pixel_luma);
+	}
+
+	#[test]
+	fn decoding_update_balance() {
+		do_decoding_update_balance(None, "020202020202020202020202020202020202020202020202020202020202020200000000000004d200");
+		do_decoding_update_balance(Some(Luma::from(0)), "020202020202020202020202020202020202020202020202020202020202020200000000000004d22900000000000000000000000000000000000000000000000000000000000000000000000000000000");
+		do_decoding_update_balance(Some(Luma::from(1234)), "020202020202020202020202020202020202020202020202020202020202020200000000000004d229000000000000000000000000000004d2000000000000000000000000000000000000000000000000");
 	}
 
 	#[test]

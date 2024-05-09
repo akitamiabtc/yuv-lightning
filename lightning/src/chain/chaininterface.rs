@@ -15,12 +15,14 @@
 
 use core::{cmp, ops::Deref};
 use core::convert::TryInto;
+use alloc::string::String;
 
 use bitcoin::blockdata::transaction::Transaction;
+use yuv_types::YuvTransaction;
 
 // TODO: Define typed abstraction over feerates to handle their conversions.
 pub(crate) fn compute_feerate_sat_per_1000_weight(fee_sat: u64, weight: u64) -> u32 {
-	(fee_sat * 1000 / weight).try_into().unwrap_or(u32::max_value())
+	(fee_sat * 1000 / weight).try_into().unwrap_or(u32::MAX)
 }
 pub(crate) const fn fee_for_weight(feerate_sat_per_1000_weight: u32, weight: u64) -> u64 {
 	((feerate_sat_per_1000_weight as u64 * weight) + 1000 - 1) / 1000
@@ -113,6 +115,16 @@ impl<F: Deref> LowerBoundedFeeEstimator<F> where F::Target: FeeEstimator {
 			FEERATE_FLOOR_SATS_PER_KW,
 		)
 	}
+}
+
+/// An interface to send a transaction to the YUV Network.
+pub trait YuvBroadcaster {
+	/// Sends YUV Proof for YUV payments transaction to a YUV L1 Node.
+	fn broadcast_transactions_proofs(&self, yuv_tx: YuvTransaction);
+
+	/// Emulate transaction check and attach without actually broadcasting or mining it to the
+	/// network. Some contains reason why transaction is invalid. None means transaction is valid.
+	fn emulate_yuv_transaction(&self, yuv_tx: YuvTransaction) -> Option<String>;
 }
 
 #[cfg(test)]

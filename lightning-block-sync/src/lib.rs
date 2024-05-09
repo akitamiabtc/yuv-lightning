@@ -436,6 +436,27 @@ impl<'a, C: Cache, L: Deref> ChainNotifier<'a, C, L> where L::Target: chain::Lis
 	}
 }
 
+
+/// The error that may occur during the fethcing of YUV transaction from YUV
+/// node.
+pub enum YuvSourceError {
+	/// The error is due to the failure of the YUV node to provide the requested
+	/// transaction on the network.
+	Io(std::io::Error),
+}
+
+impl From<std::io::Error> for YuvSourceError {
+	fn from(err: std::io::Error) -> Self {
+		YuvSourceError::Io(err)
+	}
+}
+
+/// Result type for `YuvSource` requests.
+pub type YuvSourceResult<T> = Result<T, YuvSourceError>;
+
+/// Result type for asynchronous `YuvSource` requests.
+pub type AsyncYuvSourceResult<'a, T> = Pin<Box<dyn Future<Output = YuvSourceResult<T>> + 'a + Send>>;
+
 #[cfg(test)]
 mod spv_client_tests {
 	use crate::test_utils::{Blockchain, NullChainListener};

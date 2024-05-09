@@ -22,6 +22,7 @@ use super::{LockTestExt, LockHeldState};
 use {crate::prelude::hash_map, backtrace::Backtrace, std::sync::Once};
 
 #[cfg(not(feature = "backtrace"))]
+#[derive(Debug)]
 struct Backtrace{}
 #[cfg(not(feature = "backtrace"))]
 impl Backtrace { fn new() -> Backtrace { Backtrace {} } }
@@ -66,6 +67,7 @@ static mut LOCKS: Option<StdMutex<HashMap<String, Arc<LockMetadata>>>> = None;
 #[cfg(feature = "backtrace")]
 static LOCKS_INIT: Once = Once::new();
 
+#[derive(Debug)]
 /// Metadata about a single lock, by id, the set of things locked-before it, and the backtrace of
 /// when the Mutex itself was constructed.
 struct LockMetadata {
@@ -74,6 +76,7 @@ struct LockMetadata {
 	_lock_construction_bt: Backtrace,
 }
 
+#[derive(Debug)]
 struct LockDep {
 	lock: Arc<LockMetadata>,
 	/// lockdep_trace is unused unless we're building with `backtrace`, so we mark it _
@@ -220,6 +223,7 @@ impl LockMetadata {
 	}
 }
 
+#[derive(Debug)]
 pub struct Mutex<T: Sized> {
 	inner: StdMutex<T>,
 	deps: Arc<LockMetadata>,
@@ -301,6 +305,7 @@ impl<'a, T: 'a> LockTestExt<'a> for Mutex<T> {
 	}
 }
 
+#[derive(Debug)]
 pub struct RwLock<T: Sized> {
 	inner: StdRwLock<T>,
 	deps: Arc<LockMetadata>,

@@ -8,7 +8,7 @@
 // licenses.
 
 use crate::chain;
-use crate::chain::WatchedOutput;
+use crate::chain::{WatchedOutput, YuvConfirm};
 use crate::chain::chaininterface;
 use crate::chain::chaininterface::ConfirmationTarget;
 use crate::chain::chaininterface::FEERATE_FLOOR_SATS_PER_KW;
@@ -30,7 +30,7 @@ use crate::ln::script::ShutdownScript;
 use crate::offers::invoice::UnsignedBolt12Invoice;
 use crate::offers::invoice_request::UnsignedInvoiceRequest;
 use crate::routing::gossip::{EffectiveCapacity, NetworkGraph, NodeId};
-use crate::routing::utxo::{UtxoLookup, UtxoLookupError, UtxoResult};
+use crate::routing::utxo::{UtxoEntry, UtxoLookup, UtxoLookupError, UtxoResult};
 use crate::routing::router::{find_route, InFlightHtlcs, Path, Route, RouteParameters, Router, ScorerAccountingForInFlightHtlcs};
 use crate::routing::scoring::{ChannelUsage, ScoreUpdate, ScoreLookUp};
 use crate::sync::RwLock;
@@ -72,6 +72,9 @@ use crate::sign::{InMemorySigner, Recipient, EntropySource, NodeSigner, SignerPr
 #[cfg(feature = "std")]
 use std::time::{SystemTime, UNIX_EPOCH};
 use bitcoin::Sequence;
+
+use yuv_pixels::Pixel;
+use yuv_types::YuvTransaction;
 
 pub fn pubkey(byte: u8) -> PublicKey {
 	let secp_ctx = Secp256k1::new();
@@ -135,6 +138,8 @@ impl<'a> Router for TestRouter<'a> {
 							amount_msat: aggregate_msat,
 							inflight_htlc_msat: 0,
 							effective_capacity: EffectiveCapacity::Unknown,
+							yuv_amount: None,
+							inflight_yuv: None,
 						};
 
 						// Since the path is reversed, the last element in our iteration is the first
@@ -195,13 +200,15 @@ impl SignerProvider for OnlyReadsKeysInterface {
 
 	fn get_destination_script(&self) -> Result<Script, ()> { Err(()) }
 	fn get_shutdown_scriptpubkey(&self) -> Result<ShutdownScript, ()> { Err(()) }
+
+	fn get_shutdown_pixel_scriptpubkey(&self, _yuv_pixel: &Pixel) -> Result<(ShutdownScript, PublicKey), ()> { Err(()) }
 }
 
 pub struct TestChainMonitor<'a> {
 	pub added_monitors: Mutex<Vec<(OutPoint, channelmonitor::ChannelMonitor<TestChannelSigner>)>>,
 	pub monitor_updates: Mutex<HashMap<ChannelId, Vec<channelmonitor::ChannelMonitorUpdate>>>,
 	pub latest_monitor_update_id: Mutex<HashMap<ChannelId, (OutPoint, u64, MonitorUpdateId)>>,
-	pub chain_monitor: chainmonitor::ChainMonitor<TestChannelSigner, &'a TestChainSource, &'a chaininterface::BroadcasterInterface, &'a TestFeeEstimator, &'a TestLogger, &'a chainmonitor::Persist<TestChannelSigner>>,
+	pub chain_monitor: chainmonitor::ChainMonitor<TestChannelSigner, &'a TestChainSource, &'a chaininterface::BroadcasterInterface, &'a chaininterface::YuvBroadcaster, &'a TestFeeEstimator, &'a TestLogger, &'a chainmonitor::Persist<TestChannelSigner>>,
 	pub keys_manager: &'a TestKeysInterface,
 	/// If this is set to Some(), the next update_channel call (not watch_channel) must be a
 	/// ChannelForceClosed event for the given channel_id with should_broadcast set to the given
@@ -212,12 +219,12 @@ pub struct TestChainMonitor<'a> {
 	pub expect_monitor_round_trip_fail: Mutex<Option<ChannelId>>,
 }
 impl<'a> TestChainMonitor<'a> {
-	pub fn new(chain_source: Option<&'a TestChainSource>, broadcaster: &'a chaininterface::BroadcasterInterface, logger: &'a TestLogger, fee_estimator: &'a TestFeeEstimator, persister: &'a chainmonitor::Persist<TestChannelSigner>, keys_manager: &'a TestKeysInterface) -> Self {
+	pub fn new(chain_source: Option<&'a TestChainSource>, broadcaster: &'a chaininterface::BroadcasterInterface, yuv_broadcaster: Option<&'a chaininterface::YuvBroadcaster>, logger: &'a TestLogger, fee_estimator: &'a TestFeeEstimator, persister: &'a chainmonitor::Persist<TestChannelSigner>, keys_manager: &'a TestKeysInterface) -> Self {
 		Self {
 			added_monitors: Mutex::new(Vec::new()),
 			monitor_updates: Mutex::new(HashMap::new()),
 			latest_monitor_update_id: Mutex::new(HashMap::new()),
-			chain_monitor: chainmonitor::ChainMonitor::new(chain_source, broadcaster, logger, fee_estimator, persister),
+			chain_monitor: chainmonitor::ChainMonitor::new(chain_source, broadcaster, yuv_broadcaster, logger, fee_estimator, persister),
 			keys_manager,
 			expect_channel_force_closed: Mutex::new(None),
 			expect_monitor_round_trip_fail: Mutex::new(None),
@@ -256,7 +263,7 @@ impl<'a> chain::Watch<TestChannelSigner> for TestChainMonitor<'a> {
 		if let Some(exp) = self.expect_channel_force_closed.lock().unwrap().take() {
 			assert_eq!(funding_txo.to_channel_id(), exp.0);
 			assert_eq!(update.updates.len(), 1);
-			if let channelmonitor::ChannelMonitorUpdateStep::ChannelForceClosed { should_broadcast } = update.updates[0] {
+			if let channelmonitor::ChannelMonitorUpdateStep::ChannelForceClosed { should_broadcast, .. } = update.updates[0] {
 				assert_eq!(should_broadcast, exp.1);
 			} else { panic!(); }
 		}
@@ -283,6 +290,16 @@ impl<'a> chain::Watch<TestChannelSigner> for TestChainMonitor<'a> {
 
 	fn release_pending_monitor_events(&self) -> Vec<(OutPoint, Vec<MonitorEvent>, Option<PublicKey>)> {
 		return self.chain_monitor.release_pending_monitor_events();
+	}
+}
+
+impl<'a> YuvConfirm for TestChainMonitor<'a> {
+	fn yuv_transactions_confirmed(&self, txs: Vec<YuvTransaction>) {
+		self.chain_monitor.yuv_transactions_confirmed(txs)
+	}
+
+	fn get_pending_yuv_txs(&self) -> Vec<Txid> {
+		self.chain_monitor.get_pending_yuv_txs()
 	}
 }
 
@@ -576,6 +593,27 @@ impl chaininterface::BroadcasterInterface for TestBroadcaster {
 	}
 }
 
+pub struct TestYuvBroadcaster {
+	pub txn_broadcasted: Mutex<Vec<YuvTransaction>>,
+}
+
+impl TestYuvBroadcaster {
+	pub fn new() -> Self {
+		Self {
+			txn_broadcasted: Mutex::new(Vec::new()),
+		}
+	}
+}
+
+impl chaininterface::YuvBroadcaster for TestYuvBroadcaster {
+	fn broadcast_transactions_proofs(&self, yuv_tx: YuvTransaction) {
+		let txn_broadcasted = self.txn_broadcasted.lock();
+		txn_broadcasted.unwrap().push(yuv_tx);
+	}
+
+	fn emulate_yuv_transaction(&self, _yuv_tx: YuvTransaction) -> Option<String> {None}
+}
+
 pub struct TestChannelMessageHandler {
 	pub pending_events: Mutex<Vec<events::MessageSendEvent>>,
 	expected_recv_msgs: Mutex<Option<Vec<wire::Message<()>>>>,
@@ -657,6 +695,9 @@ impl msgs::ChannelMessageHandler for TestChannelMessageHandler {
 	}
 	fn handle_update_fail_malformed_htlc(&self, _their_node_id: &PublicKey, msg: &msgs::UpdateFailMalformedHTLC) {
 		self.received_msg(wire::Message::UpdateFailMalformedHTLC(msg.clone()));
+	}
+	fn handle_update_balance(&self, _their_node_id: &PublicKey, msg: &msgs::UpdateBalance) {
+		self.received_msg(wire::Message::UpdateBalance(msg.clone()));
 	}
 	fn handle_commitment_signed(&self, _their_node_id: &PublicKey, msg: &msgs::CommitmentSigned) {
 		self.received_msg(wire::Message::CommitmentSigned(msg.clone()));
@@ -800,6 +841,7 @@ fn get_dummy_channel_update(short_chan_id: u64) -> msgs::ChannelUpdate {
 			fee_base_msat: 0,
 			fee_proportional_millionths: 0,
 			excess_data: vec![],
+			htlc_maximum_yuv: None,
 		}
 	}
 }
@@ -1119,6 +1161,10 @@ impl SignerProvider for TestKeysInterface {
 			},
 		}
 	}
+
+	fn get_shutdown_pixel_scriptpubkey(&self, yuv_pixel: &Pixel) -> Result<(ShutdownScript, PublicKey), ()> {
+		self.backing.get_shutdown_pixel_scriptpubkey(yuv_pixel)
+	}
 }
 
 impl TestKeysInterface {
@@ -1207,11 +1253,41 @@ impl TestChainSource {
 		let script_pubkey = Builder::new().push_opcode(opcodes::OP_TRUE).into_script();
 		Self {
 			genesis_hash: genesis_block(network).block_hash(),
-			utxo_ret: Mutex::new(UtxoResult::Sync(Ok(TxOut { value: u64::max_value(), script_pubkey }))),
+			utxo_ret: Mutex::new(UtxoResult::Sync(Ok(UtxoEntry::new(TxOut { value: u64::max_value(), script_pubkey })))),
 			get_utxo_call_count: AtomicUsize::new(0),
 			watched_txn: Mutex::new(HashSet::new()),
 			watched_outputs: Mutex::new(HashSet::new()),
 		}
+	}
+
+	/// Include pixel for [`TestChainSource::utxo_ret`] on [`UtxoResult::Sync`] result.
+	pub fn set_yuv_pixel(&self, pixel: Pixel) -> &Self {
+		let mut ret = self.utxo_ret.lock().unwrap();
+
+		match *ret {
+			UtxoResult::Sync(Ok(ref mut utxo_entry)) => {
+				utxo_entry.pixel = Some(pixel);
+			},
+			// Do nothing as for async and error cases, pixel is not used
+			_ => {},
+		};
+
+		self
+	}
+
+	pub fn set_txout(&self, script: Script, value: u64) -> &Self {
+		let mut ret = self.utxo_ret.lock().unwrap();
+
+		match *ret {
+			UtxoResult::Sync(Ok(ref mut utxo_entry)) => {
+				utxo_entry.txout.script_pubkey = script;
+				utxo_entry.txout.value = value;
+			},
+			// Do nothing as for async and error cases, script_pubkey is not used
+			_ => {},
+		};
+
+		self
 	}
 }
 
@@ -1222,8 +1298,21 @@ impl UtxoLookup for TestChainSource {
 			return UtxoResult::Sync(Err(UtxoLookupError::UnknownChain));
 		}
 
-		self.utxo_ret.lock().unwrap().clone()
+		match self.utxo_ret.lock().unwrap().clone() {
+			// return sync result without pixel
+			UtxoResult::Sync(res) => UtxoResult::Sync(res.map(|utxo| UtxoEntry::new(utxo.txout))),
+			UtxoResult::Async(res) => UtxoResult::Async(res),
+		}
 	}
+
+	fn get_utxo_with_yuv(&self, genesis_hash: &BlockHash, _short_channel_id: u64) -> UtxoResult {
+		self.get_utxo_call_count.fetch_add(1, Ordering::Relaxed);
+		if self.genesis_hash != *genesis_hash {
+			return UtxoResult::Sync(Err(UtxoLookupError::UnknownChain));
+		}
+
+		self.utxo_ret.lock().unwrap().clone()
+    }
 }
 
 impl chain::Filter for TestChainSource {
@@ -1369,5 +1458,9 @@ impl WalletSource for TestWalletSource {
 			}
 		}
 		Ok(tx)
+	}
+
+	fn get_change_yuv_pubkey(&self) -> Result<PublicKey, ()> {
+		Ok(PublicKey::from_secret_key(&self.secp, &self.secret_key))
 	}
 }

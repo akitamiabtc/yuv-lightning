@@ -21,6 +21,7 @@ use bitcoin::hash_types::BlockHash;
 
 use bitcoin::network::constants::Network;
 use bitcoin::blockdata::constants::genesis_block;
+use yuv_pixels::Chroma;
 
 use crate::events::{MessageSendEvent, MessageSendEventsProvider};
 use crate::ln::ChannelId;
@@ -29,7 +30,7 @@ use crate::ln::msgs::{DecodeError, ErrorAction, Init, LightningError, RoutingMes
 use crate::ln::msgs::{ChannelAnnouncement, ChannelUpdate, NodeAnnouncement, GossipTimestampFilter};
 use crate::ln::msgs::{QueryChannelRange, ReplyChannelRange, QueryShortChannelIds, ReplyShortChannelIdsEnd};
 use crate::ln::msgs;
-use crate::routing::utxo::{self, UtxoLookup, UtxoResolver};
+use crate::routing::utxo::{self, CheckAnnouncementResult, UtxoLookup, UtxoResolver};
 use crate::util::ser::{Readable, ReadableArgs, Writeable, Writer, MaybeReadable};
 use crate::util::logger::{Logger, Level};
 use crate::util::scid_utils::{block_from_scid, scid_from_parts, MAX_SCID_BLOCK};
@@ -766,6 +767,8 @@ pub struct ChannelUpdateInfo {
 	/// Everything else is useful only for sending out for initial routing sync.
 	/// Not stored if contains excess data to prevent DoS.
 	pub last_update_message: Option<ChannelUpdate>,
+	/// The maximum YUV amount that can be sent through this channel.
+	pub htlc_maximum_yuv: Option<u128>,
 }
 
 impl fmt::Display for ChannelUpdateInfo {
@@ -787,6 +790,7 @@ impl Writeable for ChannelUpdateInfo {
 			(8, Some(self.htlc_maximum_msat), required),
 			(10, self.fees, required),
 			(12, self.last_update_message, required),
+			(14, self.htlc_maximum_yuv, option),
 		});
 		Ok(())
 	}
@@ -801,6 +805,7 @@ impl Readable for ChannelUpdateInfo {
 		_init_tlv_field_var!(htlc_maximum_msat, option);
 		_init_tlv_field_var!(fees, required);
 		_init_tlv_field_var!(last_update_message, required);
+		_init_tlv_field_var!(htlc_maximum_yuv, option);
 
 		read_tlv_fields!(reader, {
 			(0, last_update, required),
@@ -809,7 +814,8 @@ impl Readable for ChannelUpdateInfo {
 			(6, htlc_minimum_msat, required),
 			(8, htlc_maximum_msat, required),
 			(10, fees, required),
-			(12, last_update_message, required)
+			(12, last_update_message, required),
+			(14, htlc_maximum_yuv, option),
 		});
 
 		if let Some(htlc_maximum_msat) = htlc_maximum_msat {
@@ -821,12 +827,36 @@ impl Readable for ChannelUpdateInfo {
 				htlc_maximum_msat,
 				fees: _init_tlv_based_struct_field!(fees, required),
 				last_update_message: _init_tlv_based_struct_field!(last_update_message, required),
+				htlc_maximum_yuv: _init_tlv_based_struct_field!(htlc_maximum_yuv, option),
 			})
 		} else {
 			Err(DecodeError::InvalidValue)
 		}
 	}
 }
+
+/// Parameters for `ChannelInfo` related to YUV.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChannelInfoYuvParameters {
+	/// The capacity of the channel in YUV amount
+	pub capacity: u128,
+
+	/// Chroma value of the channel
+	pub chroma: Chroma,
+}
+
+impl ChannelInfoYuvParameters {
+	/// Creates a new [`ChannelInfoYuvParameters`] instance from capacity and
+	/// chroma.
+    pub fn new(capacity: u128, chroma: Chroma) -> Self {
+        Self { capacity, chroma }
+    }
+}
+
+impl_writeable_tlv_based!(ChannelInfoYuvParameters, {
+	(1, capacity, required),
+	(2, chroma, required),
+});
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 /// Details about a channel (both directions).
@@ -853,6 +883,10 @@ pub struct ChannelInfo {
 	/// (which we can probably assume we are - no-std environments probably won't have a full
 	/// network graph in memory!).
 	announcement_received_time: u64,
+
+	/// This field is not empty if the `YuvPayments` feature is enabled.
+	/// FIXME: Set this field!.
+	pub yuv_data: Option<ChannelInfoYuvParameters>,
 }
 
 impl ChannelInfo {
@@ -916,7 +950,9 @@ impl Writeable for ChannelInfo {
 			(8, self.two_to_one, required),
 			(10, self.capacity_sats, required),
 			(12, self.announcement_message, required),
+			(14, self.yuv_data, option),
 		});
+
 		Ok(())
 	}
 }
@@ -949,6 +985,7 @@ impl Readable for ChannelInfo {
 		let mut two_to_one_wrap: Option<ChannelUpdateInfoDeserWrapper> = None;
 		_init_tlv_field_var!(capacity_sats, required);
 		_init_tlv_field_var!(announcement_message, required);
+		_init_tlv_field_var!(yuv_data, option);
 		read_tlv_fields!(reader, {
 			(0, features, required),
 			(1, announcement_received_time, (default_value, 0)),
@@ -958,6 +995,7 @@ impl Readable for ChannelInfo {
 			(8, two_to_one_wrap, upgradable_option),
 			(10, capacity_sats, required),
 			(12, announcement_message, required),
+			(14, yuv_data, option),
 		});
 
 		Ok(ChannelInfo {
@@ -969,6 +1007,7 @@ impl Readable for ChannelInfo {
 			capacity_sats: _init_tlv_based_struct_field!(capacity_sats, required),
 			announcement_message: _init_tlv_based_struct_field!(announcement_message, required),
 			announcement_received_time: _init_tlv_based_struct_field!(announcement_received_time, (default_value, 0)),
+			yuv_data: _init_tlv_based_struct_field!(yuv_data, option),
 		})
 	}
 }
@@ -980,6 +1019,8 @@ pub struct DirectedChannelInfo<'a> {
 	channel: &'a ChannelInfo,
 	direction: &'a ChannelUpdateInfo,
 	htlc_maximum_msat: u64,
+	/// Not empty if the `YuvPayments` feature is enabled.
+	htlc_maximum_yuv: Option<u128>,
 	effective_capacity: EffectiveCapacity,
 }
 
@@ -989,16 +1030,28 @@ impl<'a> DirectedChannelInfo<'a> {
 		let mut htlc_maximum_msat = direction.htlc_maximum_msat;
 		let capacity_msat = channel.capacity_sats.map(|capacity_sats| capacity_sats * 1000);
 
+		let htlc_maximum_yuv = direction.htlc_maximum_yuv;
+		let capacity_yuv = channel.yuv_data.as_ref().map(|yuv_data| yuv_data.capacity);
+
 		let effective_capacity = match capacity_msat {
 			Some(capacity_msat) => {
 				htlc_maximum_msat = cmp::min(htlc_maximum_msat, capacity_msat);
-				EffectiveCapacity::Total { capacity_msat, htlc_maximum_msat: htlc_maximum_msat }
+
+				EffectiveCapacity::Total {
+					capacity_msat,
+					htlc_maximum_msat,
+					capacity_yuv,
+					htlc_maximum_yuv,
+				}
 			},
-			None => EffectiveCapacity::AdvertisedMaxHTLC { amount_msat: htlc_maximum_msat },
+			None => EffectiveCapacity::AdvertisedMaxHTLC {
+				amount_msat: htlc_maximum_msat,
+				amount_yuv: htlc_maximum_yuv,
+			},
 		};
 
 		Self {
-			channel, direction, htlc_maximum_msat, effective_capacity
+			channel, direction, htlc_maximum_msat, effective_capacity, htlc_maximum_yuv,
 		}
 	}
 
@@ -1010,6 +1063,12 @@ impl<'a> DirectedChannelInfo<'a> {
 	#[inline]
 	pub fn htlc_maximum_msat(&self) -> u64 {
 		self.htlc_maximum_msat
+	}
+
+	/// Returns the maximum YUV HTLC amount allowed over the channel in the direction.
+	#[inline]
+	pub fn htlc_maximum_yuv(&self) -> Option<u128> {
+		self.htlc_maximum_yuv
 	}
 
 	/// Returns the [`EffectiveCapacity`] of the channel in the direction.
@@ -1046,18 +1105,34 @@ pub enum EffectiveCapacity {
 		/// Either the inbound or outbound liquidity depending on the direction, denominated in
 		/// millisatoshi.
 		liquidity_msat: u64,
+		/// Same as above but denominated in YUV coins.
+		///
+		/// This field is not empty if we are looking for route for YUV payments.
+		liquidity_yuv: Option<u128>,
 	},
 	/// The maximum HTLC amount in one direction as advertised on the gossip network.
 	AdvertisedMaxHTLC {
 		/// The maximum HTLC amount denominated in millisatoshi.
 		amount_msat: u64,
+		/// Same as above but denominated in YUV coins.
+		///
+		/// This field is not empty if we are looking for route for YUV payments.
+		amount_yuv: Option<u128>,
 	},
 	/// The total capacity of the channel as determined by the funding transaction.
 	Total {
 		/// The funding amount denominated in millisatoshi.
 		capacity_msat: u64,
 		/// The maximum HTLC amount denominated in millisatoshi.
-		htlc_maximum_msat: u64
+		htlc_maximum_msat: u64,
+		/// Channel YUV tokens capacity.
+		///
+		/// This field is not empty if we are looking for route for YUV payments.
+		capacity_yuv: Option<u128>,
+		/// The maximum HTLC amount denominated in YUV tokens.
+		///
+		/// This field is not empty if we are looking for route for YUV payments.
+		htlc_maximum_yuv: Option<u128>,
 	},
 	/// A capacity sufficient to route any payment, typically used for private channels provided by
 	/// an invoice.
@@ -1066,6 +1141,10 @@ pub enum EffectiveCapacity {
 	HintMaxHTLC {
 		/// The maximum HTLC amount denominated in millisatoshi.
 		amount_msat: u64,
+		/// Same as above but denominated in YUV coins.
+		///
+		/// This field is not empty if we are looking for route for YUV payments.
+		amount_yuv: Option<u128>,
 	},
 	/// A capacity that is unknown possibly because either the chain state is unavailable to know
 	/// the total capacity or the `htlc_maximum_msat` was not advertised on the gossip network.
@@ -1080,12 +1159,27 @@ impl EffectiveCapacity {
 	/// Returns the effective capacity denominated in millisatoshi.
 	pub fn as_msat(&self) -> u64 {
 		match self {
-			EffectiveCapacity::ExactLiquidity { liquidity_msat } => *liquidity_msat,
-			EffectiveCapacity::AdvertisedMaxHTLC { amount_msat } => *amount_msat,
+			EffectiveCapacity::ExactLiquidity { liquidity_msat, .. } => *liquidity_msat,
+			EffectiveCapacity::AdvertisedMaxHTLC { amount_msat, .. } => *amount_msat,
 			EffectiveCapacity::Total { capacity_msat, .. } => *capacity_msat,
-			EffectiveCapacity::HintMaxHTLC { amount_msat } => *amount_msat,
+			EffectiveCapacity::HintMaxHTLC { amount_msat, .. } => *amount_msat,
 			EffectiveCapacity::Infinite => u64::max_value(),
 			EffectiveCapacity::Unknown => UNKNOWN_CHANNEL_CAPACITY_MSAT,
+		}
+	}
+
+	/// Returns the effective capacity denominated in YUV tokens.
+	pub fn as_yuv(&self) -> Option<u128> {
+		match self {
+			EffectiveCapacity::ExactLiquidity { liquidity_yuv, .. } => *liquidity_yuv,
+			EffectiveCapacity::AdvertisedMaxHTLC { amount_yuv, .. } => *amount_yuv,
+			EffectiveCapacity::Total { capacity_yuv, .. } => *capacity_yuv,
+			EffectiveCapacity::HintMaxHTLC { amount_yuv, .. } => *amount_yuv,
+			// NOTE: may be, these two values should not be `Some`
+			// if we are not doing YUV routing. But from perspective of
+			// this method there is no way we can check that.
+			EffectiveCapacity::Infinite => Some(u128::MAX),
+			EffectiveCapacity::Unknown => Some(0),
 		}
 	}
 }
@@ -1102,7 +1196,7 @@ pub struct RoutingFees {
 
 impl_writeable_tlv_based!(RoutingFees, {
 	(0, base_msat, required),
-	(2, proportional_millionths, required)
+	(2, proportional_millionths, required),
 });
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1540,6 +1634,7 @@ impl<L: Deref> NetworkGraph<L> where L::Target: Logger {
 			node_two: node_2.clone(),
 			two_to_one: None,
 			capacity_sats: None,
+			yuv_data: None,
 			announcement_message: None,
 			announcement_received_time: timestamp,
 		};
@@ -1660,8 +1755,10 @@ impl<L: Deref> NetworkGraph<L> where L::Target: Logger {
 			}
 		}
 
-		let utxo_value = self.pending_checks.check_channel_announcement(
-			utxo_lookup, msg, full_msg)?;
+		let CheckAnnouncementResult {
+			value_sat: utxo_value,
+			pixel
+		}  = self.pending_checks.check_channel_announcement(utxo_lookup, msg, full_msg)?;
 
 		#[allow(unused_mut, unused_assignments)]
 		let mut announcement_received_time = 0;
@@ -1677,6 +1774,7 @@ impl<L: Deref> NetworkGraph<L> where L::Target: Logger {
 			node_two: msg.node_id_2,
 			two_to_one: None,
 			capacity_sats: utxo_value,
+			yuv_data: pixel.map(|p| ChannelInfoYuvParameters::new(p.luma.amount, p.chroma)),
 			announcement_message: if msg.excess_data.len() <= MAX_EXCESS_BYTES_FOR_RELAY
 				{ full_msg.cloned() } else { None },
 			announcement_received_time,
@@ -1913,6 +2011,17 @@ impl<L: Deref> NetworkGraph<L> where L::Target: Logger {
 							action: ErrorAction::IgnoreError});
 					}
 				}
+
+				match (channel.yuv_data.as_ref(), msg.htlc_maximum_yuv) {
+					(Some(channel_yuv_data), Some(htlc_maximum)) if htlc_maximum > channel_yuv_data.capacity => {
+						return Err(LightningError {
+								err: "YUV's htlc_maximum is larger than YUV channel capacity or capacity is bogus".to_owned(),
+								action: ErrorAction::IgnoreError,
+						});
+					}
+					_ => {}
+				};
+
 				macro_rules! check_update_latest {
 					($target: expr) => {
 						if let Some(existing_chan_info) = $target.as_ref() {
@@ -1942,6 +2051,7 @@ impl<L: Deref> NetworkGraph<L> where L::Target: Logger {
 							cltv_expiry_delta: msg.cltv_expiry_delta,
 							htlc_minimum_msat: msg.htlc_minimum_msat,
 							htlc_maximum_msat: msg.htlc_maximum_msat,
+							htlc_maximum_yuv: msg.htlc_maximum_yuv,
 							fees: RoutingFees {
 								base_msat: msg.fee_base_msat,
 								proportional_millionths: msg.fee_proportional_millionths,
@@ -2053,7 +2163,7 @@ pub(crate) mod tests {
 	#[cfg(feature = "std")]
 	use crate::ln::features::InitFeatures;
 	use crate::routing::gossip::{P2PGossipSync, NetworkGraph, NetworkUpdate, NodeAlias, MAX_EXCESS_BYTES_FOR_RELAY, NodeId, RoutingFees, ChannelUpdateInfo, ChannelInfo, NodeAnnouncementInfo, NodeInfo};
-	use crate::routing::utxo::{UtxoLookupError, UtxoResult};
+	use crate::routing::utxo::{UtxoEntry, UtxoLookupError, UtxoResult};
 	use crate::ln::msgs::{RoutingMessageHandler, UnsignedNodeAnnouncement, NodeAnnouncement,
 		UnsignedChannelAnnouncement, ChannelAnnouncement, UnsignedChannelUpdate, ChannelUpdate,
 		ReplyChannelRange, QueryChannelRange, QueryShortChannelIds, MAX_VALUE_MSAT};
@@ -2163,7 +2273,7 @@ pub(crate) mod tests {
 		let node_1_btckey = SecretKey::from_slice(&[40; 32]).unwrap();
 		let node_2_btckey = SecretKey::from_slice(&[39; 32]).unwrap();
 		make_funding_redeemscript(&PublicKey::from_secret_key(secp_ctx, &node_1_btckey),
-			&PublicKey::from_secret_key(secp_ctx, &node_2_btckey)).to_v0_p2wsh()
+			&PublicKey::from_secret_key(secp_ctx, &node_2_btckey), None).to_v0_p2wsh()
 	}
 
 	pub(crate) fn get_signed_channel_update<F: Fn(&mut UnsignedChannelUpdate)>(f: F, node_key: &SecretKey, secp_ctx: &Secp256k1<secp256k1::All>) -> ChannelUpdate {
@@ -2177,6 +2287,7 @@ pub(crate) mod tests {
 			htlc_maximum_msat: 1_000_000,
 			fee_base_msat: 10_000,
 			fee_proportional_millionths: 20,
+			htlc_maximum_yuv: None,
 			excess_data: Vec::new()
 		};
 		f(&mut unsigned_channel_update);
@@ -2296,7 +2407,7 @@ pub(crate) mod tests {
 
 		// Now test if the transaction is found in the UTXO set and the script is correct.
 		*chain_source.utxo_ret.lock().unwrap() =
-			UtxoResult::Sync(Ok(TxOut { value: 0, script_pubkey: good_script.clone() }));
+			UtxoResult::Sync(Ok(UtxoEntry::new(TxOut { value: 0, script_pubkey: good_script.clone() })));
 		let valid_announcement = get_signed_channel_announcement(|unsigned_announcement| {
 			unsigned_announcement.short_channel_id += 2;
 		}, node_1_privkey, node_2_privkey, &secp_ctx);
@@ -2315,7 +2426,7 @@ pub(crate) mod tests {
 		// If we receive announcement for the same channel, once we've validated it against the
 		// chain, we simply ignore all new (duplicate) announcements.
 		*chain_source.utxo_ret.lock().unwrap() =
-			UtxoResult::Sync(Ok(TxOut { value: 0, script_pubkey: good_script }));
+			UtxoResult::Sync(Ok(UtxoEntry::new(TxOut { value: 0, script_pubkey: good_script })));
 		match gossip_sync.handle_channel_announcement(&valid_announcement) {
 			Ok(_) => panic!(),
 			Err(e) => assert_eq!(e.err, "Already have chain-validated channel")
@@ -2399,7 +2510,7 @@ pub(crate) mod tests {
 			// Announce a channel we will update
 			let good_script = get_channel_script(&secp_ctx);
 			*chain_source.utxo_ret.lock().unwrap() =
-				UtxoResult::Sync(Ok(TxOut { value: amount_sats, script_pubkey: good_script.clone() }));
+				UtxoResult::Sync(Ok(UtxoEntry::new(TxOut { value: amount_sats, script_pubkey: good_script.clone() })));
 
 			let valid_channel_announcement = get_signed_channel_announcement(|_| {}, node_1_privkey, node_2_privkey, &secp_ctx);
 			short_channel_id = valid_channel_announcement.contents.short_channel_id;
@@ -3302,8 +3413,12 @@ pub(crate) mod tests {
 			cltv_expiry_delta: 42,
 			htlc_minimum_msat: 1234,
 			htlc_maximum_msat: 5678,
-			fees: RoutingFees { base_msat: 9, proportional_millionths: 10 },
+			fees: RoutingFees {
+				base_msat: 9,
+				proportional_millionths: 10,
+			},
 			last_update_message: None,
+			htlc_maximum_yuv: None,
 		};
 
 		let mut encoded_chan_update_info: Vec<u8> = Vec::new();
@@ -3337,6 +3452,7 @@ pub(crate) mod tests {
 			two_to_one: None,
 			capacity_sats: None,
 			announcement_message: None,
+			yuv_data: None,
 			announcement_received_time: 87654,
 		};
 
@@ -3354,6 +3470,7 @@ pub(crate) mod tests {
 			node_two: NodeId::from_pubkey(&nodes[1].node.get_our_node_id()),
 			two_to_one: Some(chan_update_info.clone()),
 			capacity_sats: None,
+			yuv_data: None,
 			announcement_message: None,
 			announcement_received_time: 87654,
 		};
@@ -3365,7 +3482,7 @@ pub(crate) mod tests {
 		assert_eq!(chan_info_some_updates, read_chan_info);
 
 		// Check the serialization hasn't changed.
-		let legacy_chan_info_with_some: Vec<u8> = hex::decode("ca00020000010800000000000156660221027f921585f2ac0c7c70e36110adecfd8fd14b8a99bfb3d000a283fcac358fce88043636340004000000170201010402002a060800000000000004d2080909000000000000162e0a0d0c00040000000902040000000a0c010006210355f8d2238a322d16b602bd0ceaad5b01019fb055971eaadcc9b29226a4da6c23083636340004000000170201010402002a060800000000000004d2080909000000000000162e0a0d0c00040000000902040000000a0c01000a01000c0100").unwrap();
+		let legacy_chan_info_with_some: Vec<u8> = hex::decode("d10009000700000000000000010800000000000156660221027f921585f2ac0c7c70e36110adecfd8fd14b8a99bfb3d000a283fcac358fce88043636340004000000170201010402002a060800000000000004d2080909000000000000162e0a0d0c00040000000902040000000a0c010006210355f8d2238a322d16b602bd0ceaad5b01019fb055971eaadcc9b29226a4da6c23083636340004000000170201010402002a060800000000000004d2080909000000000000162e0a0d0c00040000000902040000000a0c01000a01000c0100").unwrap();
 		assert_eq!(encoded_chan_info, legacy_chan_info_with_some);
 
 		// Check we can decode legacy ChannelInfo, even if the `two_to_one` / `one_to_two` /

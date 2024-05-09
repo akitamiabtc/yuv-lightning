@@ -9,8 +9,8 @@ use core::str::FromStr;
 
 use bech32::{u5, FromBase32};
 
-use bitcoin::{PubkeyHash, ScriptHash};
-use bitcoin::util::address::WitnessVersion;
+use bitcoin::{Address, Network, PubkeyHash, ScriptHash};
+use bitcoin::util::address::{Payload, WitnessVersion};
 use bitcoin_hashes::Hash;
 use bitcoin_hashes::sha256;
 use crate::prelude::*;
@@ -22,6 +22,7 @@ use num_traits::{CheckedAdd, CheckedMul};
 
 use secp256k1::ecdsa::{RecoveryId, RecoverableSignature};
 use secp256k1::PublicKey;
+use yuv_pixels::{Chroma, Pixel};
 
 use super::{Bolt11Invoice, Sha256, TaggedField, ExpiryTime, MinFinalCltvExpiryDelta, Fallback, PayeePubKey, Bolt11InvoiceSignature, PositiveTimestamp,
 	Bolt11SemanticError, PrivateRoute, Bolt11ParseError, ParseOrSemanticError, Description, RawTaggedField, Currency, RawHrp, SiPrefix, RawBolt11Invoice,
@@ -32,6 +33,7 @@ use self::hrp_sm::parse_hrp;
 /// State machine to parse the hrp
 mod hrp_sm {
 	use core::ops::Range;
+	use crate::RawHrpParts;
 
 	#[derive(PartialEq, Eq, Debug)]
 	enum States {
@@ -39,8 +41,11 @@ mod hrp_sm {
 		ParseL,
 		ParseN,
 		ParseCurrencyPrefix,
+		ParseYuvPrefix,
 		ParseAmountNumber,
 		ParseAmountSiPrefix,
+		ParseYuvAmountNumber,
+		ParseYuvChroma,
 	}
 
 	impl States {
@@ -68,7 +73,9 @@ mod hrp_sm {
 					}
 				},
 				States::ParseCurrencyPrefix => {
-					if !read_symbol.is_numeric() {
+					if read_symbol.eq(&'y') {
+						Ok(States::ParseYuvPrefix)
+					} else if !read_symbol.is_numeric() {
 						Ok(States::ParseCurrencyPrefix)
 					} else {
 						Ok(States::ParseAmountNumber)
@@ -79,11 +86,34 @@ mod hrp_sm {
 						Ok(States::ParseAmountNumber)
 					} else if ['m', 'u', 'n', 'p'].contains(&read_symbol) {
 						Ok(States::ParseAmountSiPrefix)
+					} else if read_symbol.eq(&'y') {
+						Ok(States::ParseYuvPrefix)
 					} else {
 						Err(super::Bolt11ParseError::UnknownSiPrefix)
 					}
 				},
-				States::ParseAmountSiPrefix => Err(super::Bolt11ParseError::MalformedHRP),
+				States::ParseAmountSiPrefix => {
+					if read_symbol.eq(&'y') {
+						Ok(States::ParseYuvPrefix)
+					} else {
+						Err(super::Bolt11ParseError::MalformedHRP)
+					}
+				},
+				States::ParseYuvPrefix => {
+					if read_symbol.is_numeric() {
+						Ok(States::ParseYuvAmountNumber)
+					} else {
+						Err(super::Bolt11ParseError::InvalidYuvAmount)
+					}
+				},
+				States::ParseYuvAmountNumber => {
+					if read_symbol.is_numeric() {
+						Ok(States::ParseYuvAmountNumber)
+					} else {
+						Ok(States::ParseYuvChroma)
+					}
+				},
+				States::ParseYuvChroma => Ok(States::ParseYuvChroma)
 			}
 		}
 
@@ -96,9 +126,12 @@ mod hrp_sm {
 	struct StateMachine {
 		state: States,
 		position: usize,
+		is_yuv_payments_used: bool,
 		currency_prefix: Option<Range<usize>>,
 		amount_number: Option<Range<usize>>,
 		amount_si_prefix: Option<Range<usize>>,
+		yuv_amount_number: Option<Range<usize>>,
+		yuv_chroma: Option<Range<usize>>,
 	}
 
 	impl StateMachine {
@@ -106,9 +139,12 @@ mod hrp_sm {
 			StateMachine {
 				state: States::Start,
 				position: 0,
+				is_yuv_payments_used: false,
 				currency_prefix: None,
 				amount_number: None,
 				amount_si_prefix: None,
+				yuv_amount_number: None,
+				yuv_chroma: None,
 			}
 		}
 
@@ -131,6 +167,15 @@ mod hrp_sm {
 				},
 				States::ParseAmountSiPrefix => {
 					StateMachine::update_range(&mut self.amount_si_prefix, self.position)
+				},
+				States::ParseYuvPrefix => {
+					self.is_yuv_payments_used = true
+				},
+				States::ParseYuvAmountNumber => {
+					StateMachine::update_range(&mut self.yuv_amount_number, self.position)
+				},
+				States::ParseYuvChroma => {
+					StateMachine::update_range(&mut self.yuv_chroma, self.position)
 				},
 				_ => {}
 			}
@@ -155,9 +200,17 @@ mod hrp_sm {
 		fn amount_si_prefix(&self) -> &Option<Range<usize>> {
 			&self.amount_si_prefix
 		}
+
+		fn yuv_amount_number(&self) -> &Option<Range<usize>> {
+			&self.yuv_amount_number
+		}
+
+		fn yuv_chroma(&self) -> &Option<Range<usize>> {
+			&self.yuv_chroma
+		}
 	}
 
-	pub fn parse_hrp(input: &str) -> Result<(&str, &str, &str), super::Bolt11ParseError> {
+	pub fn parse_hrp(input: &str) -> Result<RawHrpParts, super::Bolt11ParseError> {
 		let mut sm = StateMachine::new();
 		for c in input.chars() {
 			sm.step(c)?;
@@ -168,13 +221,30 @@ mod hrp_sm {
 		}
 
 		let currency = sm.currency_prefix().clone()
-			.map(|r| &input[r]).unwrap_or("");
+			.map_or("", |r| &input[r]).to_string();
 		let amount = sm.amount_number().clone()
-			.map(|r| &input[r]).unwrap_or("");
-		let si = sm.amount_si_prefix().clone()
-			.map(|r| &input[r]).unwrap_or("");
+			.map_or("", |r| &input[r]).to_string();
+		let si_prefix = sm.amount_si_prefix().clone()
+			.map_or("", |r| &input[r]).to_string();
 
-		Ok((currency, amount, si))
+		let yuv_pixel = if sm.is_yuv_payments_used {
+			let yuv_amount_range = sm.yuv_amount_number().clone()
+				.ok_or(super::Bolt11ParseError::YuvAmountIsAbsent)?;
+
+			let yuv_chroma_range = sm.yuv_chroma().clone()
+				.ok_or(super::Bolt11ParseError::YuvChromaIsAbsent)?;
+
+			Some((input[yuv_amount_range].to_string(), input[yuv_chroma_range].to_string()))
+		} else {
+			None
+		};
+
+		Ok(RawHrpParts {
+			currency,
+			amount_msat: amount,
+			si_prefix,
+			yuv_pixel,
+		})
 	}
 }
 
@@ -303,18 +373,17 @@ impl FromStr for RawHrp {
 	fn from_str(hrp: &str) -> Result<Self, <Self as FromStr>::Err> {
 		let parts = parse_hrp(hrp)?;
 
-		let currency = parts.0.parse::<Currency>()?;
+		let currency = parts.currency.parse::<Currency>()?;
 
-		let amount = if !parts.1.is_empty() {
-			Some(parts.1.parse::<u64>()?)
+		let amount = if !parts.amount_msat.is_empty() {
+			Some(parts.amount_msat.parse::<u64>()?)
 		} else {
 			None
 		};
-
-		let si_prefix: Option<SiPrefix> = if parts.2.is_empty() {
+		let si_prefix: Option<SiPrefix> = if parts.si_prefix.is_empty() {
 			None
 		} else {
-			let si: SiPrefix = parts.2.parse()?;
+			let si: SiPrefix = parts.si_prefix.parse()?;
 			if let Some(amt) = amount {
 				if amt.checked_mul(si.multiplier()).is_none() {
 					return Err(Bolt11ParseError::IntegerOverflowError);
@@ -323,12 +392,49 @@ impl FromStr for RawHrp {
 			Some(si)
 		};
 
+		let yuv_pixel = if let Some((yuv_amount, yuv_chroma)) = parts.yuv_pixel {
+			parse_pixel_from_hrp(yuv_amount, yuv_chroma, currency.clone().into())?
+		} else {
+			None
+		};
+
 		Ok(RawHrp {
 			currency,
 			raw_amount: amount,
 			si_prefix,
+			yuv_pixel,
 		})
 	}
+}
+
+/// It parses the [`YUV pixel`](Pixel) from the YUV amount string and YUV chroma strings. Where the
+/// amount is u64 and chroma is encoded in human-readable format as [`P2TR address`](Address).
+pub fn parse_pixel_from_hrp(
+	yuv_amount_raw: String, yuv_chroma_raw: String, expected_network: Network,
+) -> Result<Option<Pixel>, Bolt11ParseError> {
+	let yuv_amount = yuv_amount_raw.parse::<u128>()
+		.map_err(Bolt11ParseError::ParseAmountError)?;
+
+	if yuv_amount == 0 {
+		return Ok(None)
+	}
+
+	let chroma_p2tr = Address::from_str(&yuv_chroma_raw)
+		.map_err(|_| Bolt11ParseError::InvalidYuvChromaP2TR)?;
+
+	if chroma_p2tr.network != expected_network {
+		return Err(Bolt11ParseError::InvalidYuvChromaP2TR)
+	}
+
+	let yuv_chroma = match chroma_p2tr.payload {
+		Payload::WitnessProgram {
+			version: WitnessVersion::V1,
+			program: chroma_raw,
+		} => Chroma::from_bytes(&chroma_raw).map_err(|_| Bolt11ParseError::InvalidYuvChromaP2TR)?,
+		_ => return Err(Bolt11ParseError::InvalidYuvChromaP2TR)
+	};
+
+	Ok(Some(Pixel::new(yuv_amount, yuv_chroma)))
 }
 
 impl FromBase32 for RawDataPart {
@@ -610,6 +716,7 @@ impl FromBase32 for PrivateRoute {
 				cltv_expiry_delta: parse_int_be(&hop_bytes[49..51], 256).expect("slice too big?"),
 				htlc_minimum_msat: None,
 				htlc_maximum_msat: None,
+				htlc_maximum_yuv: None,
 			};
 
 			route_hops.push(hop);
@@ -663,6 +770,18 @@ impl Display for Bolt11ParseError {
 			},
 			Bolt11ParseError::InvalidRecoveryId => {
 				f.write_str("recovery id is out of range (should be in [0,3])")
+			},
+			Bolt11ParseError::InvalidYuvAmount => {
+				f.write_str("Invalid YUV amount in hrp")
+			},
+			Bolt11ParseError::YuvAmountIsAbsent => {
+				f.write_str("YUV prefix is presented, but YUV amount is absent in HRP")
+			},
+			Bolt11ParseError::YuvChromaIsAbsent => {
+				f.write_str("YUV prefix is presented, but YUV chroma is absent in HRP")
+			},
+			Bolt11ParseError::InvalidYuvChromaP2TR => {
+				f.write_str("YUV chroma is not a valid P2TR address or invalid networks mismatch")
 			},
 			Bolt11ParseError::Skip => {
 				f.write_str("the tagged field has to be skipped because of an unexpected, but allowed property")
@@ -723,11 +842,15 @@ impl From<crate::Bolt11SemanticError> for ParseOrSemanticError {
 
 #[cfg(test)]
 mod test {
-	use crate::de::Bolt11ParseError;
+	use crate::de::{Bolt11ParseError, parse_pixel_from_hrp};
 	use secp256k1::PublicKey;
 	use bech32::u5;
+	use bitcoin::Network;
 	use bitcoin_hashes::hex::FromHex;
 	use bitcoin_hashes::sha256;
+	use yuv_pixels::Pixel;
+	use lightning::ln::functional_test_utils::new_test_pixel;
+	use crate::de::hrp_sm::parse_hrp;
 
 	const CHARSET_REV: [i8; 128] = [
 		-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
@@ -939,7 +1062,8 @@ mod test {
 			},
 			cltv_expiry_delta: 3,
 			htlc_minimum_msat: None,
-			htlc_maximum_msat: None
+			htlc_maximum_msat: None,
+			htlc_maximum_yuv: None,
 		});
 		expected.push(RouteHintHop {
 			src_node_id: PublicKey::from_slice(
@@ -956,7 +1080,8 @@ mod test {
 			},
 			cltv_expiry_delta: 4,
 			htlc_minimum_msat: None,
-			htlc_maximum_msat: None
+			htlc_maximum_msat: None,
+			htlc_maximum_yuv: None,
 		});
 
 		assert_eq!(PrivateRoute::from_base32(&input), Ok(PrivateRoute(RouteHint(expected))));
@@ -983,7 +1108,8 @@ mod test {
 						hrp: RawHrp {
 							currency: Currency::Bitcoin,
 							raw_amount: Some(25),
-							si_prefix: Some(SiPrefix::Milli)
+							si_prefix: Some(SiPrefix::Milli),
+							yuv_pixel: None,
 						},
 						data: RawDataPart {
 							timestamp: PositiveTimestamp::from_unix_timestamp(1496314658).unwrap(),
@@ -1031,6 +1157,7 @@ mod test {
 						currency: Currency::Bitcoin,
 						raw_amount: None,
 						si_prefix: None,
+						yuv_pixel: None,
 					},
 					data: RawDataPart {
 					timestamp: PositiveTimestamp::from_unix_timestamp(1496314658).unwrap(),
@@ -1065,5 +1192,103 @@ mod test {
 				}
 			)
 		)
+	}
+
+	#[test]
+	fn test_raw_signed_invoice_deserialization_with_yuv() {
+		use crate::TaggedField::*;
+		use secp256k1::ecdsa::{RecoveryId, RecoverableSignature};
+		use crate::{SignedRawBolt11Invoice, Bolt11InvoiceSignature, RawBolt11Invoice, RawHrp, RawDataPart, Currency, Sha256,
+					PositiveTimestamp};
+
+		assert_eq!(
+			"lnbcy1234bc1pt0j7j3uzp9n549hxpu0sxlmpwe2ql5qplgwkg628wrzk5acfcskq9ryxre1pvjluezpp5qqq\
+			syqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqdpl2pkx2ctnv5sxxmmwwd5kgetjypeh2ursda\
+			e8g6twvus8g6rfwvs8qun0dfjkxaq8rkx3yf5tcsyz3d73gafnh3cax9rn449d9p5uxz9ezhhypd0elx87sjle\
+			52x86fux2ypatgddc6k63n7erqz25le42c4u4ecky03ylcqgytsqp".parse(),
+			Ok(SignedRawBolt11Invoice {
+				raw_invoice: RawBolt11Invoice {
+					hrp: RawHrp {
+						currency: Currency::Bitcoin,
+						raw_amount: None,
+						si_prefix: None,
+						yuv_pixel: Some(new_test_pixel(None, None, &secp256k1::Secp256k1::new())),
+					},
+					data: RawDataPart {
+						timestamp: PositiveTimestamp::from_unix_timestamp(1496314658).unwrap(),
+						tagged_fields: vec ! [
+							PaymentHash(Sha256(sha256::Hash::from_hex(
+								"0001020304050607080900010203040506070809000102030405060708090102"
+							).unwrap())).into(),
+							Description(
+								crate::Description::new(
+									"Please consider supporting this project".to_owned()
+								).unwrap()
+							).into(),
+						],
+					},
+				},
+				hash: [
+					115, 152, 238, 108, 158, 110, 26, 107, 122, 73, 138, 192, 166, 150, 92, 25,
+					65, 116, 106, 95, 237, 27, 245, 19, 9, 210, 238, 149, 179, 246, 49, 79,
+				],
+				signature: Bolt11InvoiceSignature(RecoverableSignature::from_compact(
+					& [
+						0x38u8, 0xec, 0x68, 0x91, 0x34, 0x5e, 0x20, 0x41, 0x45, 0xbe, 0x8a,
+						0x3a, 0x99, 0xde, 0x38, 0xe9, 0x8a, 0x39, 0xd6, 0xa5, 0x69, 0x43,
+						0x4e, 0x18, 0x45, 0xc8, 0xaf, 0x72, 0x05, 0xaf, 0xcf, 0xcc, 0x7f,
+						0x42, 0x5f, 0xcd, 0x14, 0x63, 0xe9, 0x3c, 0x32, 0x88, 0x1e, 0xad,
+						0x0d, 0x6e, 0x35, 0x6d, 0x46, 0x7e, 0xc8, 0xc0, 0x25, 0x53, 0xf9,
+						0xaa, 0xb1, 0x5e, 0x57, 0x38, 0xb1, 0x1f, 0x12, 0x7f
+					],
+					RecoveryId::from_i32(0).unwrap()
+				).unwrap()),
+			})
+		)
+	}
+
+	fn do_test_parse_pixel_from_hrp(encoded_hrp: &'static str, expected_pixel: Pixel) {
+		let (yuv_amount, yuv_chroma) = parse_hrp(encoded_hrp).unwrap().yuv_pixel.unwrap();
+
+		let pixel = parse_pixel_from_hrp(yuv_amount, yuv_chroma, Network::Bitcoin).unwrap().unwrap();
+
+		assert_eq!(expected_pixel, pixel)
+	}
+
+	#[test]
+	fn test_parse_pixel_from_hrp() {
+		let secp_ctx = &secp256k1::Secp256k1::new();
+
+		let test_vector = vec![
+			// Happy path.
+			(true, "lnbc100uy1234bc1pt0j7j3uzp9n549hxpu0sxlmpwe2ql5qplgwkg628wrzk5acfcskq9ryxre"),
+			// Happy path if SI prefix is absent.
+			(true, "lnbc100y1234bc1pt0j7j3uzp9n549hxpu0sxlmpwe2ql5qplgwkg628wrzk5acfcskq9ryxre"),
+			// Happy path if MSAT amount and SI prefix are absent.
+			(true, "lnbcy1234bc1pt0j7j3uzp9n549hxpu0sxlmpwe2ql5qplgwkg628wrzk5acfcskq9ryxre"),
+			// Received amount is different.
+			(false, "lnbc100uy99999bc1pt0j7j3uzp9n549hxpu0sxlmpwe2ql5qplgwkg628wrzk5acfcskq9ryxre"),
+			// Chroma's P2TR network differs from the invoice's network.
+			(false, "lnbc100uy1234bc321pt0j7j3uzp9n549hxpu0sxlmpwe2ql5qplgwkg628wrzk5acfcskq9ryxre"),
+			// The correct pixel is provided, but the YUV prefix is absent.
+			(false, "lnbc100u1234bc1pt0j7j3uzp9n549hxpu0sxlmpwe2ql5qplgwkg628wrzk5acfcskq9ryxre"),
+			// Invalid YUV chroma P2TR.
+			(false, "lnbc100uy1234bc000000000000000000000000000000000000000000000000000000000000"),
+			// The YUV chroma is absent.
+			(false, "lnbc100uy1234"),
+			// YUV pixel is absent.
+			(false, "lnbc100u"),
+		];
+
+		let expected_pixel = new_test_pixel(None, None, &secp_ctx);
+
+		for (is_valid, hrp) in test_vector.iter().cloned() {
+			if is_valid {
+				do_test_parse_pixel_from_hrp(hrp, expected_pixel);
+				continue
+			}
+
+			assert_panic!(do_test_parse_pixel_from_hrp(hrp, expected_pixel));
+		}
 	}
 }

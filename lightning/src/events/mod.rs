@@ -39,6 +39,8 @@ use crate::io;
 use crate::prelude::*;
 use core::time::Duration;
 use core::ops::Deref;
+use yuv_pixels::Pixel;
+use crate::ln::chan_utils::NewUpdateBalanceRequest;
 use crate::sync::Arc;
 
 /// Some information provided on receipt of payment depends on whether the payment received is a
@@ -102,12 +104,15 @@ pub struct ClaimedHTLC {
 	pub cltv_expiry: u32,
 	/// The amount (in msats) of this part of an MPP.
 	pub value_msat: u64,
+	/// Optional YUV pixel amount that is received with that payemnt.
+	pub yuv_amount: Option<u128>,
 }
 impl_writeable_tlv_based!(ClaimedHTLC, {
 	(0, channel_id, required),
 	(2, user_channel_id, required),
 	(4, cltv_expiry, required),
 	(6, value_msat, required),
+	(8, yuv_amount, option),
 });
 
 /// When the payment path failure took place and extra details about it. [`PathFailure::OnPath`] may
@@ -389,6 +394,21 @@ pub enum Event {
 		/// [`ChannelManager::accept_inbound_channel`]: crate::ln::channelmanager::ChannelManager::accept_inbound_channel
 		/// [`UserConfig::manually_accept_inbound_channels`]: crate::util::config::UserConfig::manually_accept_inbound_channels
 		user_channel_id: u128,
+		/// The funding YUV Pixel value passed in to [`ChannelManager::create_channel`] for outbound
+		/// channels, or to [`ChannelManager::accept_inbound_channel`] for inbound channels if
+		/// YUV payments are used for this channel.
+		///
+		/// It can be used for generating YUV multisig payment.
+		///
+		/// [`ChannelManager::create_channel`]: crate::ln::channelmanager::ChannelManager::create_channel
+		/// [`ChannelManager::accept_inbound_channel`]: crate::ln::channelmanager::ChannelManager::accept_inbound_channel
+		funding_yuv_pixel: Option<Pixel>,
+		/// The holder's public key that is used in a multisig of the funding trasnaction and
+		/// output_script.
+		funding_holder_pubkey: PublicKey,
+		/// The counterparty's public key that is used in a multisig of the funding trasnaction and
+		/// output_script.
+		funding_counterparty_pubkey: PublicKey,
 	},
 	/// Indicates that we've been offered a payment and it needs to be claimed via calling
 	/// [`ChannelManager::claim_funds`] with the preimage given in [`PaymentPurpose`].
@@ -474,6 +494,9 @@ pub enum Event {
 		///
 		/// [`ChannelManager::claim_funds`]: crate::ln::channelmanager::ChannelManager::claim_funds
 		claim_deadline: Option<u32>,
+
+		/// Optional YUV Pixel's luma amount that is received with the payment.
+		yuv_amount: Option<u128>,
 	},
 	/// Indicates a payment has been claimed and we've received money!
 	///
@@ -512,6 +535,8 @@ pub enum Event {
 		/// The sender-intended sum total of all the MPP parts. This will be `None` for events
 		/// serialized prior to LDK version 0.0.117.
 		sender_intended_total_msat: Option<u64>,
+		/// Optional yuv tokens that were sent along with this HTLC
+		sender_intended_total_yuv: Option<u128>,
 	},
 	/// Indicates a request for an invoice failed to yield a response in a reasonable amount of time
 	/// or was explicitly abandoned by [`ChannelManager::abandon_payment`].
@@ -764,6 +789,8 @@ pub enum Event {
 		///
 		/// The caveat described above the `fee_earned_msat` field applies here as well.
 		outbound_amount_forwarded_msat: Option<u64>,
+		/// The final amount forwarded, in YUV.
+		outbound_amount_forwarded_yuv: Option<u128>,
 	},
 	/// Used to indicate that a channel with the given `channel_id` is being opened and pending
 	/// confirmation on-chain.
@@ -938,6 +965,19 @@ pub enum Event {
 	///
 	/// [`ChannelHandshakeConfig::negotiate_anchors_zero_fee_htlc_tx`]: crate::util::config::ChannelHandshakeConfig::negotiate_anchors_zero_fee_htlc_tx
 	BumpTransaction(BumpTransactionEvent),
+	/// Indicates that the update balances after the `Update Balance` flow are already applied and
+	/// the nodes have exchanged by `commitment_signed` and `revoke_and_ack`.
+	UpdateBalanceApplied(ChannelId),
+	/// Indicates that the counterparty sent a new `update_balance` request. It contains
+	/// [`ChannelId`] of the channel and the [`new update-balance request`].
+	///
+	/// [`new update-balance request`]: NewUpdateBalanceRequest
+	NewUpdateBalanceRequest {
+		/// The channel id of the channel.
+		channel_id: ChannelId,
+		/// The new update-balance request. Either contains new balances or the revoke request.
+		request: NewUpdateBalanceRequest,
+	},
 }
 
 impl Writeable for Event {
@@ -950,7 +990,7 @@ impl Writeable for Event {
 			},
 			&Event::PaymentClaimable { ref payment_hash, ref amount_msat, counterparty_skimmed_fee_msat,
 				ref purpose, ref receiver_node_id, ref via_channel_id, ref via_user_channel_id,
-				ref claim_deadline, ref onion_fields
+				ref claim_deadline, ref onion_fields, ref yuv_amount,
 			} => {
 				1u8.write(writer)?;
 				let mut payment_secret = None;
@@ -978,6 +1018,7 @@ impl Writeable for Event {
 					(8, payment_preimage, option),
 					(9, onion_fields, option),
 					(10, skimmed_fee_opt, option),
+					(11, yuv_amount, option),
 				});
 			},
 			&Event::PaymentSent { ref payment_id, ref payment_preimage, ref payment_hash, ref fee_paid_msat } => {
@@ -1013,6 +1054,7 @@ impl Writeable for Event {
 					(9, None::<RouteParameters>, option), // retry in LDK versions prior to 0.0.115
 					(11, payment_id, option),
 					(13, failure, required),
+					(14, path.chroma, option),
 				});
 			},
 			&Event::PendingHTLCsForwardable { time_forwardable: _ } => {
@@ -1040,7 +1082,7 @@ impl Writeable for Event {
 			}
 			&Event::PaymentForwarded {
 				fee_earned_msat, prev_channel_id, claim_from_onchain_tx,
-				next_channel_id, outbound_amount_forwarded_msat
+				next_channel_id, outbound_amount_forwarded_msat, outbound_amount_forwarded_yuv
 			} => {
 				7u8.write(writer)?;
 				write_tlv_fields!(writer, {
@@ -1049,6 +1091,7 @@ impl Writeable for Event {
 					(2, claim_from_onchain_tx, required),
 					(3, next_channel_id, option),
 					(5, outbound_amount_forwarded_msat, option),
+					(7, outbound_amount_forwarded_yuv, option),
 				});
 			},
 			&Event::ChannelClosed { ref channel_id, ref user_channel_id, ref reason,
@@ -1083,6 +1126,7 @@ impl Writeable for Event {
 					(2, payment_hash, option),
 					(4, path.hops, required_vec),
 					(6, path.blinded_tail, option),
+					(8, path.chroma, option),
 				})
 			},
 			&Event::PaymentFailed { ref payment_id, ref payment_hash, ref reason } => {
@@ -1098,7 +1142,7 @@ impl Writeable for Event {
 				// We never write the OpenChannelRequest events as, upon disconnection, peers
 				// drop any channels which have not yet exchanged funding_signed.
 			},
-			&Event::PaymentClaimed { ref payment_hash, ref amount_msat, ref purpose, ref receiver_node_id, ref htlcs, ref sender_intended_total_msat } => {
+			&Event::PaymentClaimed { ref payment_hash, ref amount_msat, ref purpose, ref receiver_node_id, ref htlcs, ref sender_intended_total_msat, ref sender_intended_total_yuv } => {
 				19u8.write(writer)?;
 				write_tlv_fields!(writer, {
 					(0, payment_hash, required),
@@ -1107,6 +1151,7 @@ impl Writeable for Event {
 					(4, amount_msat, required),
 					(5, *htlcs, optional_vec),
 					(7, sender_intended_total_msat, option),
+					(9, sender_intended_total_yuv, option),
 				});
 			},
 			&Event::ProbeSuccessful { ref payment_id, ref payment_hash, ref path } => {
@@ -1116,6 +1161,7 @@ impl Writeable for Event {
 					(2, payment_hash, required),
 					(4, path.hops, required_vec),
 					(6, path.blinded_tail, option),
+					(8, path.chroma, option),
 				})
 			},
 			&Event::ProbeFailed { ref payment_id, ref payment_hash, ref path, ref short_channel_id } => {
@@ -1126,6 +1172,7 @@ impl Writeable for Event {
 					(4, path.hops, required_vec),
 					(6, short_channel_id, option),
 					(8, path.blinded_tail, option),
+					(9, path.chroma, option),
 				})
 			},
 			&Event::HTLCHandlingFailed { ref prev_channel_id, ref failed_next_destination } => {
@@ -1171,6 +1218,19 @@ impl Writeable for Event {
 					(0, payment_id, required),
 				})
 			},
+			&Event::UpdateBalanceApplied(ref channel_id) => {
+				35u8.write(writer)?;
+				write_tlv_fields!(writer, {
+					(0, channel_id, required),
+				})
+			},
+			&Event::NewUpdateBalanceRequest { ref channel_id, ref request } => {
+				37u8.write(writer)?;
+				write_tlv_fields!(writer, {
+					(0, channel_id, required),
+					(2, request, required),
+				})
+			},
 			// Note that, going forward, all new events must only write data inside of
 			// `write_tlv_fields`. Versions 0.0.101+ will ignore odd-numbered events that write
 			// data via `write_tlv_fields`.
@@ -1197,6 +1257,7 @@ impl MaybeReadable for Event {
 					let mut claim_deadline = None;
 					let mut via_user_channel_id = None;
 					let mut onion_fields = None;
+					let mut yuv_amount = None;
 					read_tlv_fields!(reader, {
 						(0, payment_hash, required),
 						(1, receiver_node_id, option),
@@ -1209,6 +1270,7 @@ impl MaybeReadable for Event {
 						(8, payment_preimage, option),
 						(9, onion_fields, option),
 						(10, counterparty_skimmed_fee_msat_opt, option),
+						(11, yuv_amount, option),
 					});
 					let purpose = match payment_secret {
 						Some(secret) => PaymentPurpose::InvoicePayment {
@@ -1228,6 +1290,7 @@ impl MaybeReadable for Event {
 						via_user_channel_id,
 						claim_deadline,
 						onion_fields,
+						yuv_amount,
 					}))
 				};
 				f()
@@ -1270,6 +1333,7 @@ impl MaybeReadable for Event {
 					let mut short_channel_id = None;
 					let mut payment_id = None;
 					let mut failure_opt = None;
+					let mut chroma = None;
 					read_tlv_fields!(reader, {
 						(0, payment_hash, required),
 						(1, network_update, upgradable_option),
@@ -1281,6 +1345,7 @@ impl MaybeReadable for Event {
 						(7, short_channel_id, option),
 						(11, payment_id, option),
 						(13, failure_opt, upgradable_option),
+						(14, chroma, option),
 					});
 					let failure = failure_opt.unwrap_or_else(|| PathFailure::OnPath { network_update });
 					Ok(Some(Event::PaymentPathFailed {
@@ -1288,7 +1353,7 @@ impl MaybeReadable for Event {
 						payment_hash,
 						payment_failed_permanently,
 						failure,
-						path: Path { hops: path.unwrap(), blinded_tail },
+						path: Path { hops: path.unwrap(), blinded_tail, chroma, },
 						short_channel_id,
 						#[cfg(test)]
 						error_code,
@@ -1342,16 +1407,18 @@ impl MaybeReadable for Event {
 					let mut claim_from_onchain_tx = false;
 					let mut next_channel_id = None;
 					let mut outbound_amount_forwarded_msat = None;
+					let mut outbound_amount_forwarded_yuv = None;
 					read_tlv_fields!(reader, {
 						(0, fee_earned_msat, option),
 						(1, prev_channel_id, option),
 						(2, claim_from_onchain_tx, required),
 						(3, next_channel_id, option),
 						(5, outbound_amount_forwarded_msat, option),
+						(7, outbound_amount_forwarded_yuv, option),
 					});
 					Ok(Some(Event::PaymentForwarded {
 						fee_earned_msat, prev_channel_id, claim_from_onchain_tx, next_channel_id,
-						outbound_amount_forwarded_msat
+						outbound_amount_forwarded_msat, outbound_amount_forwarded_yuv
 					}))
 				};
 				f()
@@ -1403,11 +1470,12 @@ impl MaybeReadable for Event {
 						(2, payment_hash, option),
 						(4, path, required_vec),
 						(6, blinded_tail, option),
+						(8, chroma, option),
 					});
 					Ok(Some(Event::PaymentPathSuccessful {
 						payment_id: payment_id.0.unwrap(),
 						payment_hash,
-						path: Path { hops: path, blinded_tail },
+						path: Path { hops: path, blinded_tail, chroma },
 					}))
 				};
 				f()
@@ -1442,6 +1510,7 @@ impl MaybeReadable for Event {
 					let mut receiver_node_id = None;
 					let mut htlcs: Option<Vec<ClaimedHTLC>> = Some(vec![]);
 					let mut sender_intended_total_msat: Option<u64> = None;
+					let mut sender_intended_total_yuv: Option<u128> = None;
 					read_tlv_fields!(reader, {
 						(0, payment_hash, required),
 						(1, receiver_node_id, option),
@@ -1449,6 +1518,7 @@ impl MaybeReadable for Event {
 						(4, amount_msat, required),
 						(5, htlcs, optional_vec),
 						(7, sender_intended_total_msat, option),
+						(9, sender_intended_total_yuv, option),
 					});
 					Ok(Some(Event::PaymentClaimed {
 						receiver_node_id,
@@ -1457,6 +1527,7 @@ impl MaybeReadable for Event {
 						amount_msat,
 						htlcs: htlcs.unwrap_or(vec![]),
 						sender_intended_total_msat,
+						sender_intended_total_yuv,
 					}))
 				};
 				f()
@@ -1468,11 +1539,12 @@ impl MaybeReadable for Event {
 						(2, payment_hash, required),
 						(4, path, required_vec),
 						(6, blinded_tail, option),
+						(8, chroma, option)
 					});
 					Ok(Some(Event::ProbeSuccessful {
 						payment_id: payment_id.0.unwrap(),
 						payment_hash: payment_hash.0.unwrap(),
-						path: Path { hops: path, blinded_tail },
+						path: Path { hops: path, blinded_tail, chroma },
 					}))
 				};
 				f()
@@ -1485,11 +1557,12 @@ impl MaybeReadable for Event {
 						(4, path, required_vec),
 						(6, short_channel_id, option),
 						(8, blinded_tail, option),
+						(9, chroma, option)
 					});
 					Ok(Some(Event::ProbeFailed {
 						payment_id: payment_id.0.unwrap(),
 						payment_hash: payment_hash.0.unwrap(),
-						path: Path { hops: path, blinded_tail },
+						path: Path { hops: path, blinded_tail, chroma },
 						short_channel_id,
 					}))
 				};
@@ -1569,6 +1642,25 @@ impl MaybeReadable for Event {
 					}))
 				};
 				f()
+			},
+			35u8 => {
+				let mut channel_id = ChannelId::new_zero();
+				read_tlv_fields!(reader, {
+					(0, channel_id, required),
+				});
+				Ok(Some(Event::UpdateBalanceApplied(channel_id)))
+			},
+			37u8 => {
+				let mut channel_id = ChannelId::new_zero();
+				let mut request = NewUpdateBalanceRequest::Revoke;
+				read_tlv_fields!(reader, {
+					(0, channel_id, required),
+					(2, request, required),
+				});
+				Ok(Some(Event::NewUpdateBalanceRequest {
+					channel_id,
+					request,
+				}))
 			},
 			// Versions prior to 0.0.100 did not ignore odd types, instead returning InvalidValue.
 			// Version 0.0.100 failed to properly ignore odd types, possibly resulting in corrupt
@@ -1836,6 +1928,14 @@ pub enum MessageSendEvent {
 		node_id: PublicKey,
 		/// The gossip_timestamp_filter which should be sent.
 		msg: msgs::GossipTimestampFilter,
+	},
+	/// Used to indicate that an update_balance message should be sent to the peer with the given
+	/// node_id.
+	SendUpdateBalance {
+		/// The node_id of this message recipient
+		node_id: PublicKey,
+		/// The update_balance which should be sent.
+		msg: msgs::UpdateBalance,
 	},
 }
 

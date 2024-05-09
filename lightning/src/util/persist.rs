@@ -19,7 +19,7 @@ use crate::alloc::string::ToString;
 use crate::prelude::*;
 
 use crate::chain;
-use crate::chain::chaininterface::{BroadcasterInterface, FeeEstimator};
+use crate::chain::chaininterface::{BroadcasterInterface, FeeEstimator, YuvBroadcaster};
 use crate::chain::chainmonitor::{Persist, MonitorUpdateId};
 use crate::sign::{EntropySource, NodeSigner, WriteableEcdsaChannelSigner, SignerProvider};
 use crate::chain::transaction::OutPoint;
@@ -131,9 +131,10 @@ pub trait KVStore {
 }
 
 /// Trait that handles persisting a [`ChannelManager`], [`NetworkGraph`], and [`WriteableScore`] to disk.
-pub trait Persister<'a, M: Deref, T: Deref, ES: Deref, NS: Deref, SP: Deref, F: Deref, R: Deref, L: Deref, S: WriteableScore<'a>>
+pub trait Persister<'a, M: Deref, T: Deref, YT: Deref, ES: Deref, NS: Deref, SP: Deref, F: Deref, R: Deref, L: Deref, S: WriteableScore<'a>>
 	where M::Target: 'static + chain::Watch<<SP::Target as SignerProvider>::Signer>,
 		T::Target: 'static + BroadcasterInterface,
+		YT::Target: 'static + YuvBroadcaster,
 		ES::Target: 'static + EntropySource,
 		NS::Target: 'static + NodeSigner,
 		SP::Target: 'static + SignerProvider,
@@ -142,7 +143,7 @@ pub trait Persister<'a, M: Deref, T: Deref, ES: Deref, NS: Deref, SP: Deref, F: 
 		L::Target: 'static + Logger,
 {
 	/// Persist the given ['ChannelManager'] to disk, returning an error if persistence failed.
-	fn persist_manager(&self, channel_manager: &ChannelManager<M, T, ES, NS, SP, F, R, L>) -> Result<(), io::Error>;
+	fn persist_manager(&self, channel_manager: &ChannelManager<M, T, YT, ES, NS, SP, F, R, L>) -> Result<(), io::Error>;
 
 	/// Persist the given [`NetworkGraph`] to disk, returning an error if persistence failed.
 	fn persist_graph(&self, network_graph: &NetworkGraph<L>) -> Result<(), io::Error>;
@@ -152,9 +153,10 @@ pub trait Persister<'a, M: Deref, T: Deref, ES: Deref, NS: Deref, SP: Deref, F: 
 }
 
 
-impl<'a, A: KVStore, M: Deref, T: Deref, ES: Deref, NS: Deref, SP: Deref, F: Deref, R: Deref, L: Deref, S: WriteableScore<'a>> Persister<'a, M, T, ES, NS, SP, F, R, L, S> for A
+impl<'a, A: KVStore, M: Deref, T: Deref, YT: Deref, ES: Deref, NS: Deref, SP: Deref, F: Deref, R: Deref, L: Deref, S: WriteableScore<'a>> Persister<'a, M, T, YT, ES, NS, SP, F, R, L, S> for A
 	where M::Target: 'static + chain::Watch<<SP::Target as SignerProvider>::Signer>,
 		T::Target: 'static + BroadcasterInterface,
+		YT::Target: 'static + YuvBroadcaster,
 		ES::Target: 'static + EntropySource,
 		NS::Target: 'static + NodeSigner,
 		SP::Target: 'static + SignerProvider,
@@ -163,7 +165,7 @@ impl<'a, A: KVStore, M: Deref, T: Deref, ES: Deref, NS: Deref, SP: Deref, F: Der
 		L::Target: 'static + Logger,
 {
 	/// Persist the given [`ChannelManager`] to disk, returning an error if persistence failed.
-	fn persist_manager(&self, channel_manager: &ChannelManager<M, T, ES, NS, SP, F, R, L>) -> Result<(), io::Error> {
+	fn persist_manager(&self, channel_manager: &ChannelManager<M, T, YT, ES, NS, SP, F, R, L>) -> Result<(), io::Error> {
 		self.write(CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
 			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
 			CHANNEL_MANAGER_PERSISTENCE_KEY,
@@ -412,11 +414,12 @@ where
 	/// It is extremely important that your [`KVStore::read`] implementation uses the
 	/// [`io::ErrorKind::NotFound`] variant correctly. For more information, please see the
 	/// documentation for [`MonitorUpdatingPersister`].
-	pub fn read_all_channel_monitors_with_updates<B: Deref, F: Deref>(
-		&self, broadcaster: &B, fee_estimator: &F,
+	pub fn read_all_channel_monitors_with_updates<B: Deref, YB: Deref, F: Deref>(
+		&self, broadcaster: &B, yuv_broadcaster: Option<YB>, fee_estimator: &F,
 	) -> Result<Vec<(BlockHash, ChannelMonitor<<SP::Target as SignerProvider>::Signer>)>, io::Error>
 	where
 		B::Target: BroadcasterInterface,
+		YB::Target: YuvBroadcaster,
 		F::Target: FeeEstimator,
 	{
 		let monitor_list = self.kv_store.list(
@@ -427,6 +430,7 @@ where
 		for monitor_key in monitor_list {
 			res.push(self.read_channel_monitor_with_updates(
 				broadcaster,
+				yuv_broadcaster.as_deref(),
 				fee_estimator,
 				monitor_key,
 			)?)
@@ -451,11 +455,12 @@ where
 	/// 
 	/// Loading a large number of monitors will be faster if done in parallel. You can use this
 	/// function to accomplish this. Take care to limit the number of parallel readers.
-	pub fn read_channel_monitor_with_updates<B: Deref, F: Deref>(
-		&self, broadcaster: &B, fee_estimator: &F, monitor_key: String,
+	pub fn read_channel_monitor_with_updates<B: Deref, YB: Deref, F: Deref>(
+		&self, broadcaster: &B, yuv_broadcaster: Option<YB>, fee_estimator: &F, monitor_key: String,
 	) -> Result<(BlockHash, ChannelMonitor<<SP::Target as SignerProvider>::Signer>), io::Error>
 	where
 		B::Target: BroadcasterInterface,
+		YB::Target: YuvBroadcaster,
 		F::Target: FeeEstimator,
 	{
 		let monitor_name = MonitorName::new(monitor_key)?;
@@ -476,7 +481,7 @@ where
 				Err(err) => return Err(err),
 			};
 
-			monitor.update_monitor(&update, broadcaster, fee_estimator, &self.logger)
+			monitor.update_monitor(&update, broadcaster, yuv_broadcaster.as_deref(), fee_estimator, &self.logger)
 				.map_err(|e| {
 					log_error!(
 						self.logger,
@@ -917,14 +922,22 @@ mod tests {
 		let chain_mon_0 = test_utils::TestChainMonitor::new(
 			Some(&chanmon_cfgs[0].chain_source),
 			&chanmon_cfgs[0].tx_broadcaster,
+			chanmon_cfgs[0].yuv_tx_broadcaster
+				.as_ref()
+				.map(|v| v as &YuvBroadcaster),
 			&chanmon_cfgs[0].logger,
 			&chanmon_cfgs[0].fee_estimator,
 			&persister_0,
 			&chanmon_cfgs[0].keys_manager,
 		);
+
+		let yuv_broadcaster = chanmon_cfgs[0].yuv_tx_broadcaster
+			.as_ref()
+			.map(|v| v as &YuvBroadcaster);
 		let chain_mon_1 = test_utils::TestChainMonitor::new(
 			Some(&chanmon_cfgs[1].chain_source),
 			&chanmon_cfgs[1].tx_broadcaster,
+			yuv_broadcaster,
 			&chanmon_cfgs[1].logger,
 			&chanmon_cfgs[1].fee_estimator,
 			&persister_1,
@@ -938,20 +951,32 @@ mod tests {
 		let broadcaster_0 = &chanmon_cfgs[2].tx_broadcaster;
 		let broadcaster_1 = &chanmon_cfgs[3].tx_broadcaster;
 
-		// Check that the persisted channel data is empty before any channels are
-		// open.
+		// Check that the persisted channel data is empty before any channels are open.
+		let yuv_broadcaster_0 = chanmon_cfgs[0].yuv_tx_broadcaster
+			.as_ref()
+			.map(|v| v as &YuvBroadcaster);
+		let yuv_broadcaster_1 = chanmon_cfgs[0].yuv_tx_broadcaster
+			.as_ref()
+			.map(|v| v as &YuvBroadcaster);
+
 		let mut persisted_chan_data_0 = persister_0.read_all_channel_monitors_with_updates(
-			&broadcaster_0, &&chanmon_cfgs[0].fee_estimator).unwrap();
+			&broadcaster_0,
+			yuv_broadcaster_0,
+			&&chanmon_cfgs[0].fee_estimator,
+		).unwrap();
 		assert_eq!(persisted_chan_data_0.len(), 0);
 		let mut persisted_chan_data_1 = persister_1.read_all_channel_monitors_with_updates(
-			&broadcaster_1, &&chanmon_cfgs[1].fee_estimator).unwrap();
+			&broadcaster_1,
+			yuv_broadcaster_1,
+			&&chanmon_cfgs[1].fee_estimator,
+		).unwrap();
 		assert_eq!(persisted_chan_data_1.len(), 0);
 
 		// Helper to make sure the channel is on the expected update ID.
 		macro_rules! check_persisted_data {
 			($expected_update_id: expr) => {
 				persisted_chan_data_0 = persister_0.read_all_channel_monitors_with_updates(
-					&broadcaster_0, &&chanmon_cfgs[0].fee_estimator).unwrap();
+					&broadcaster_0, yuv_broadcaster_0, &&chanmon_cfgs[0].fee_estimator).unwrap();
 				// check that we stored only one monitor
 				assert_eq!(persisted_chan_data_0.len(), 1);
 				for (_, mon) in persisted_chan_data_0.iter() {
@@ -970,7 +995,7 @@ mod tests {
 					}
 				}
 				persisted_chan_data_1 = persister_1.read_all_channel_monitors_with_updates(
-					&broadcaster_1, &&chanmon_cfgs[1].fee_estimator).unwrap();
+					&broadcaster_1, yuv_broadcaster_1, &&chanmon_cfgs[1].fee_estimator).unwrap();
 				assert_eq!(persisted_chan_data_1.len(), 1);
 				for (_, mon) in persisted_chan_data_1.iter() {
 					assert_eq!(mon.get_latest_update_id(), $expected_update_id);
@@ -1035,7 +1060,7 @@ mod tests {
 		check_persisted_data!(CLOSED_CHANNEL_UPDATE_ID);
 
 		// Make sure the expected number of stale updates is present.
-		let persisted_chan_data = persister_0.read_all_channel_monitors_with_updates(&broadcaster_0, &&chanmon_cfgs[0].fee_estimator).unwrap();
+		let persisted_chan_data = persister_0.read_all_channel_monitors_with_updates(&broadcaster_0, yuv_broadcaster_0, &&chanmon_cfgs[0].fee_estimator).unwrap();
 		let (_, monitor) = &persisted_chan_data[0];
 		let monitor_name = MonitorName::from(monitor.get_funding_txo().0);
 		// The channel should have 0 updates, as it wrote a full monitor and consolidated.
@@ -1118,9 +1143,15 @@ mod tests {
 			signer_provider: &chanmon_cfgs[1].keys_manager,
 		};
 		let mut node_cfgs = create_node_cfgs(2, &chanmon_cfgs);
+
+		let yuv_broadcaster = chanmon_cfgs[0].yuv_tx_broadcaster
+			.as_ref()
+			.map(|v| v as &YuvBroadcaster);
+
 		let chain_mon_0 = test_utils::TestChainMonitor::new(
 			Some(&chanmon_cfgs[0].chain_source),
 			&chanmon_cfgs[0].tx_broadcaster,
+			yuv_broadcaster,
 			&chanmon_cfgs[0].logger,
 			&chanmon_cfgs[0].fee_estimator,
 			&persister_0,
@@ -1129,6 +1160,7 @@ mod tests {
 		let chain_mon_1 = test_utils::TestChainMonitor::new(
 			Some(&chanmon_cfgs[1].chain_source),
 			&chanmon_cfgs[1].tx_broadcaster,
+			yuv_broadcaster,
 			&chanmon_cfgs[1].logger,
 			&chanmon_cfgs[1].fee_estimator,
 			&persister_1,
@@ -1140,10 +1172,11 @@ mod tests {
 		let nodes = create_network(2, &node_cfgs, &node_chanmgrs);
 
 		let broadcaster_0 = &chanmon_cfgs[2].tx_broadcaster;
+		let yuv_broadcaster_0 = chanmon_cfgs[2].yuv_tx_broadcaster.as_ref().map(|v| v as &YuvBroadcaster);
 
 		// Check that the persisted channel data is empty before any channels are
 		// open.
-		let persisted_chan_data = persister_0.read_all_channel_monitors_with_updates(&broadcaster_0, &&chanmon_cfgs[0].fee_estimator).unwrap();
+		let persisted_chan_data = persister_0.read_all_channel_monitors_with_updates(&broadcaster_0, yuv_broadcaster_0, &&chanmon_cfgs[0].fee_estimator).unwrap();
 		assert_eq!(persisted_chan_data.len(), 0);
 
 		// Create some initial channel
@@ -1154,7 +1187,7 @@ mod tests {
 		send_payment(&nodes[1], &vec![&nodes[0]][..], 4_000_000);
 
 		// Get the monitor and make a fake stale update at update_id=1 (lowest height of an update possible)
-		let persisted_chan_data = persister_0.read_all_channel_monitors_with_updates(&broadcaster_0, &&chanmon_cfgs[0].fee_estimator).unwrap();
+		let persisted_chan_data = persister_0.read_all_channel_monitors_with_updates(&broadcaster_0, yuv_broadcaster_0, &&chanmon_cfgs[0].fee_estimator).unwrap();
 		let (_, monitor) = &persisted_chan_data[0];
 		let monitor_name = MonitorName::from(monitor.get_funding_txo().0);
 		persister_0

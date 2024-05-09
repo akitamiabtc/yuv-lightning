@@ -14,11 +14,10 @@
 use bitcoin::blockdata::constants::WITNESS_SCALE_FACTOR;
 use bitcoin::blockdata::transaction::{TxOut,TxIn, Transaction, EcdsaSighashType};
 use bitcoin::blockdata::transaction::OutPoint as BitcoinOutPoint;
-use bitcoin::blockdata::script::Script;
-
+use bitcoin::blockdata::script::{Builder, Script};
+use bitcoin::hashes::{hash160::Hash as Hash160, ripemd160::Hash as Ripemd160};
 use bitcoin::hash_types::Txid;
-
-use bitcoin::secp256k1::{SecretKey,PublicKey};
+use bitcoin::secp256k1::{SecretKey, PublicKey, Secp256k1};
 
 use crate::ln::PaymentPreimage;
 use crate::ln::chan_utils::{TxCreationKeys, HTLCOutputInCommitment};
@@ -36,7 +35,13 @@ use core::cmp;
 use core::convert::TryInto;
 use core::mem;
 use core::ops::Deref;
-use bitcoin::{PackedLockTime, Sequence, Witness};
+use bitcoin::{PackedLockTime, PubkeyHash, secp256k1, Sequence, Witness, WPubkeyHash};
+use bitcoin::blockdata::opcodes;
+use bitcoin::hashes::Hash;
+use alloc::collections::BTreeMap;
+use yuv_pixels::{HtlcScriptKind, LightningCommitmentProof, LightningHtlcData, Pixel, PixelProof, Tweakable};
+
+use yuv_types::{YuvTransaction, YuvTxType};
 use crate::ln::features::ChannelTypeFeatures;
 
 use super::chaininterface::LowerBoundedFeeEstimator;
@@ -111,7 +116,7 @@ const HIGH_FREQUENCY_BUMP_INTERVAL: u32 = 1;
 ///
 /// CSV and pubkeys are used as part of a witnessScript redeeming a balance output, amount is used
 /// as part of the signature hash and revocation secret to generate a satisfying witness.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RevokedOutput {
 	per_commitment_point: PublicKey,
 	counterparty_delayed_payment_base_key: PublicKey,
@@ -121,10 +126,20 @@ pub(crate) struct RevokedOutput {
 	amount: u64,
 	on_counterparty_tx_csv: u16,
 	is_counterparty_balance_on_anchors: Option<()>,
+	/// The YUV pixel to build the spent transaction.
+	yuv_pixel_proof: Option<PixelProof>,
 }
 
 impl RevokedOutput {
-	pub(crate) fn build(per_commitment_point: PublicKey, counterparty_delayed_payment_base_key: PublicKey, counterparty_htlc_base_key: PublicKey, per_commitment_key: SecretKey, amount: u64, on_counterparty_tx_csv: u16, is_counterparty_balance_on_anchors: bool) -> Self {
+	pub(crate) fn build(
+		per_commitment_point: PublicKey,
+		counterparty_delayed_payment_base_key: PublicKey,
+		counterparty_htlc_base_key: PublicKey,
+		per_commitment_key: SecretKey,
+		amount: u64,
+		on_counterparty_tx_csv: u16,
+		is_counterparty_balance_on_anchors: bool,
+	) -> Self {
 		RevokedOutput {
 			per_commitment_point,
 			counterparty_delayed_payment_base_key,
@@ -133,8 +148,31 @@ impl RevokedOutput {
 			weight: WEIGHT_REVOKED_OUTPUT,
 			amount,
 			on_counterparty_tx_csv,
-			is_counterparty_balance_on_anchors: if is_counterparty_balance_on_anchors { Some(()) } else { None }
+			is_counterparty_balance_on_anchors: if is_counterparty_balance_on_anchors { Some(()) } else { None },
+			yuv_pixel_proof: None,
 		}
+	}
+
+	pub(crate) fn set_yuv_pixel_proof(&mut self, yuv_pixel_proof: PixelProof) {
+		self.yuv_pixel_proof = Some(yuv_pixel_proof);
+	}
+
+	pub(crate) fn add_yuv_counterparty_pixel_proof(
+		&mut self,
+		yuv_pixel: Pixel,
+		delayed_key: PublicKey,
+		revocation_pubkey: PublicKey,
+	) -> PixelProof {
+		let pixel_proof = PixelProof::Lightning(LightningCommitmentProof {
+			pixel: yuv_pixel,
+			revocation_pubkey,
+			to_self_delay: self.on_counterparty_tx_csv,
+			local_delayed_pubkey: delayed_key,
+		});
+
+		self.yuv_pixel_proof = Some(pixel_proof.clone());
+
+		pixel_proof
 	}
 }
 
@@ -146,7 +184,8 @@ impl_writeable_tlv_based!(RevokedOutput, {
 	(8, weight, required),
 	(10, amount, required),
 	(12, on_counterparty_tx_csv, required),
-	(14, is_counterparty_balance_on_anchors, option)
+	(14, is_counterparty_balance_on_anchors, option),
+	(16, yuv_pixel_proof, option)
 });
 
 /// A struct to describe a revoked offered output and corresponding information to generate a
@@ -157,7 +196,7 @@ impl_writeable_tlv_based!(RevokedOutput, {
 ///
 /// CSV is used as part of a witnessScript redeeming a balance output, amount is used as part
 /// of the signature hash and revocation secret to generate a satisfying witness.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RevokedHTLCOutput {
 	per_commitment_point: PublicKey,
 	counterparty_delayed_payment_base_key: PublicKey,
@@ -166,10 +205,20 @@ pub(crate) struct RevokedHTLCOutput {
 	weight: u64,
 	amount: u64,
 	htlc: HTLCOutputInCommitment,
+	/// The YUV pixel to build the spent transaction.
+	yuv_pixel_proof: Option<PixelProof>,
 }
 
 impl RevokedHTLCOutput {
-	pub(crate) fn build(per_commitment_point: PublicKey, counterparty_delayed_payment_base_key: PublicKey, counterparty_htlc_base_key: PublicKey, per_commitment_key: SecretKey, amount: u64, htlc: HTLCOutputInCommitment, channel_type_features: &ChannelTypeFeatures) -> Self {
+	pub(crate) fn build(
+		per_commitment_point: PublicKey,
+		counterparty_delayed_payment_base_key: PublicKey,
+		counterparty_htlc_base_key: PublicKey,
+		per_commitment_key: SecretKey,
+		amount: u64,
+		htlc: HTLCOutputInCommitment,
+		channel_type_features: &ChannelTypeFeatures,
+	) -> Self {
 		let weight = if htlc.offered { weight_revoked_offered_htlc(channel_type_features) } else { weight_revoked_received_htlc(channel_type_features) };
 		RevokedHTLCOutput {
 			per_commitment_point,
@@ -178,8 +227,35 @@ impl RevokedHTLCOutput {
 			per_commitment_key,
 			weight,
 			amount,
-			htlc
+			htlc,
+			yuv_pixel_proof: None,
 		}
+	}
+
+	pub(crate) fn set_yuv_pixel_proof(&mut self, yuv_pixel_proof: PixelProof) {
+		self.yuv_pixel_proof = Some(yuv_pixel_proof);
+	}
+
+	pub(crate) fn add_yuv_htlc_pixel_proof(
+		&mut self,
+		yuv_pixel: Pixel,
+		holder_htlc_basepoint: PublicKey,
+		holder_revocation_basepoint: PublicKey,
+		secp_ctx: &Secp256k1<secp256k1::All>
+	) -> PixelProof {
+		let pixel_proof = get_yuv_htlc_pixel_proof(
+			yuv_pixel,
+			&self.htlc,
+			&self.per_commitment_point,
+			&holder_htlc_basepoint,
+			&self.counterparty_htlc_base_key,
+			&holder_revocation_basepoint,
+			secp_ctx,
+		);
+
+		self.yuv_pixel_proof = Some(pixel_proof.clone());
+
+		pixel_proof
 	}
 }
 
@@ -191,6 +267,7 @@ impl_writeable_tlv_based!(RevokedHTLCOutput, {
 	(8, weight, required),
 	(10, amount, required),
 	(12, htlc, required),
+	(14, yuv_pixel_proof, option)
 });
 
 /// A struct to describe a HTLC output on a counterparty commitment transaction.
@@ -201,7 +278,7 @@ impl_writeable_tlv_based!(RevokedHTLCOutput, {
 /// The preimage is used as part of the witness.
 ///
 /// Note that on upgrades, some features of existing outputs may be missed.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CounterpartyOfferedHTLCOutput {
 	per_commitment_point: PublicKey,
 	counterparty_delayed_payment_base_key: PublicKey,
@@ -209,6 +286,8 @@ pub(crate) struct CounterpartyOfferedHTLCOutput {
 	preimage: PaymentPreimage,
 	htlc: HTLCOutputInCommitment,
 	channel_type_features: ChannelTypeFeatures,
+	/// The YUV pixel to build the spent transaction.
+	yuv_pixel_proof: Option<PixelProof>,
 }
 
 impl CounterpartyOfferedHTLCOutput {
@@ -220,7 +299,12 @@ impl CounterpartyOfferedHTLCOutput {
 			preimage,
 			htlc,
 			channel_type_features,
+			yuv_pixel_proof: None,
 		}
+	}
+
+	pub(crate) fn set_yuv_pixel_proof(&mut self, yuv_pixel_proof: PixelProof) {
+		self.yuv_pixel_proof = Some(yuv_pixel_proof);
 	}
 }
 
@@ -235,6 +319,7 @@ impl Writeable for CounterpartyOfferedHTLCOutput {
 			(8, self.htlc, required),
 			(10, legacy_deserialization_prevention_marker, option),
 			(11, self.channel_type_features, required),
+			(12, self.yuv_pixel_proof, option),
 		});
 		Ok(())
 	}
@@ -249,6 +334,7 @@ impl Readable for CounterpartyOfferedHTLCOutput {
 		let mut htlc = RequiredWrapper(None);
 		let mut _legacy_deserialization_prevention_marker: Option<()> = None;
 		let mut channel_type_features = None;
+		let mut yuv_pixel_proof = None;
 
 		read_tlv_fields!(reader, {
 			(0, per_commitment_point, required),
@@ -258,6 +344,7 @@ impl Readable for CounterpartyOfferedHTLCOutput {
 			(8, htlc, required),
 			(10, _legacy_deserialization_prevention_marker, option),
 			(11, channel_type_features, option),
+			(12, yuv_pixel_proof, option),
 		});
 
 		verify_channel_type_features(&channel_type_features, None)?;
@@ -268,7 +355,8 @@ impl Readable for CounterpartyOfferedHTLCOutput {
 			counterparty_htlc_base_key: counterparty_htlc_base_key.0.unwrap(),
 			preimage: preimage.0.unwrap(),
 			htlc: htlc.0.unwrap(),
-			channel_type_features: channel_type_features.unwrap_or(ChannelTypeFeatures::only_static_remote_key())
+			channel_type_features: channel_type_features.unwrap_or(ChannelTypeFeatures::only_static_remote_key()),
+			yuv_pixel_proof,
 		})
 	}
 }
@@ -279,13 +367,15 @@ impl Readable for CounterpartyOfferedHTLCOutput {
 /// witnessScript.
 ///
 /// Note that on upgrades, some features of existing outputs may be missed.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CounterpartyReceivedHTLCOutput {
 	per_commitment_point: PublicKey,
 	counterparty_delayed_payment_base_key: PublicKey,
 	counterparty_htlc_base_key: PublicKey,
 	htlc: HTLCOutputInCommitment,
 	channel_type_features: ChannelTypeFeatures,
+	/// The YUV pixel to build the spent transaction.
+	yuv_pixel_proof: Option<PixelProof>,
 }
 
 impl CounterpartyReceivedHTLCOutput {
@@ -295,8 +385,13 @@ impl CounterpartyReceivedHTLCOutput {
 			counterparty_delayed_payment_base_key,
 			counterparty_htlc_base_key,
 			htlc,
-			channel_type_features
+			channel_type_features,
+			yuv_pixel_proof: None,
 		}
+	}
+
+	pub(crate) fn set_yuv_pixel_proof(&mut self, yuv_pixel_proof: PixelProof) {
+		self.yuv_pixel_proof = Some(yuv_pixel_proof);
 	}
 }
 
@@ -310,6 +405,7 @@ impl Writeable for CounterpartyReceivedHTLCOutput {
 			(6, self.htlc, required),
 			(8, legacy_deserialization_prevention_marker, option),
 			(9, self.channel_type_features, required),
+			(10, self.yuv_pixel_proof, option),
 		});
 		Ok(())
 	}
@@ -323,6 +419,7 @@ impl Readable for CounterpartyReceivedHTLCOutput {
 		let mut htlc = RequiredWrapper(None);
 		let mut _legacy_deserialization_prevention_marker: Option<()> = None;
 		let mut channel_type_features = None;
+		let mut yuv_pixel_proof = None;
 
 		read_tlv_fields!(reader, {
 			(0, per_commitment_point, required),
@@ -331,6 +428,7 @@ impl Readable for CounterpartyReceivedHTLCOutput {
 			(6, htlc, required),
 			(8, _legacy_deserialization_prevention_marker, option),
 			(9, channel_type_features, option),
+			(10, yuv_pixel_proof, option),
 		});
 
 		verify_channel_type_features(&channel_type_features, None)?;
@@ -340,7 +438,8 @@ impl Readable for CounterpartyReceivedHTLCOutput {
 			counterparty_delayed_payment_base_key: counterparty_delayed_payment_base_key.0.unwrap(),
 			counterparty_htlc_base_key: counterparty_htlc_base_key.0.unwrap(),
 			htlc: htlc.0.unwrap(),
-			channel_type_features: channel_type_features.unwrap_or(ChannelTypeFeatures::only_static_remote_key())
+			channel_type_features: channel_type_features.unwrap_or(ChannelTypeFeatures::only_static_remote_key()),
+			yuv_pixel_proof,
 		})
 	}
 }
@@ -351,13 +450,15 @@ impl Readable for CounterpartyReceivedHTLCOutput {
 /// Preimage is only included as part of the witness in former case.
 ///
 /// Note that on upgrades, some features of existing outputs may be missed.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct HolderHTLCOutput {
 	preimage: Option<PaymentPreimage>,
 	amount_msat: u64,
 	/// Defaults to 0 for HTLC-Success transactions, which have no expiry
 	cltv_expiry: u32,
 	channel_type_features: ChannelTypeFeatures,
+	/// The YUV pixel to build the spent transaction.
+	yuv_pixel_proof: Option<PixelProof>,
 }
 
 impl HolderHTLCOutput {
@@ -367,6 +468,7 @@ impl HolderHTLCOutput {
 			amount_msat,
 			cltv_expiry,
 			channel_type_features,
+			yuv_pixel_proof: None,
 		}
 	}
 
@@ -376,7 +478,12 @@ impl HolderHTLCOutput {
 			amount_msat,
 			cltv_expiry: 0,
 			channel_type_features,
+			yuv_pixel_proof: None,
 		}
+	}
+
+	pub(crate) fn set_yuv_pixel_proof(&mut self, yuv_pixel_proof: PixelProof) {
+		self.yuv_pixel_proof = Some(yuv_pixel_proof);
 	}
 }
 
@@ -389,6 +496,7 @@ impl Writeable for HolderHTLCOutput {
 			(4, self.preimage, option),
 			(6, legacy_deserialization_prevention_marker, option),
 			(7, self.channel_type_features, required),
+			(8, self.yuv_pixel_proof, option),
 		});
 		Ok(())
 	}
@@ -401,6 +509,7 @@ impl Readable for HolderHTLCOutput {
 		let mut preimage = None;
 		let mut _legacy_deserialization_prevention_marker: Option<()> = None;
 		let mut channel_type_features = None;
+		let mut yuv_pixel_proof = None;
 
 		read_tlv_fields!(reader, {
 			(0, amount_msat, required),
@@ -408,6 +517,7 @@ impl Readable for HolderHTLCOutput {
 			(4, preimage, option),
 			(6, _legacy_deserialization_prevention_marker, option),
 			(7, channel_type_features, option),
+			(8, yuv_pixel_proof, option),
 		});
 
 		verify_channel_type_features(&channel_type_features, None)?;
@@ -416,7 +526,8 @@ impl Readable for HolderHTLCOutput {
 			amount_msat: amount_msat.0.unwrap(),
 			cltv_expiry: cltv_expiry.0.unwrap(),
 			preimage,
-			channel_type_features: channel_type_features.unwrap_or(ChannelTypeFeatures::only_static_remote_key())
+			channel_type_features: channel_type_features.unwrap_or(ChannelTypeFeatures::only_static_remote_key()),
+			yuv_pixel_proof,
 		})
 	}
 }
@@ -426,11 +537,13 @@ impl Readable for HolderHTLCOutput {
 /// witnessScript is used as part of the witness redeeming the funding utxo.
 ///
 /// Note that on upgrades, some features of existing outputs may be missed.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct HolderFundingOutput {
 	funding_redeemscript: Script,
 	pub(crate) funding_amount: Option<u64>,
 	channel_type_features: ChannelTypeFeatures,
+	/// The YUV pixel to build the spent transaction.
+	yuv_pixel_proof: Option<PixelProof>,
 }
 
 
@@ -440,7 +553,12 @@ impl HolderFundingOutput {
 			funding_redeemscript,
 			funding_amount: Some(funding_amount),
 			channel_type_features,
+			yuv_pixel_proof: None,
 		}
+	}
+
+	pub(crate) fn set_yuv_pixel_proof(&mut self, yuv_pixel_proof: PixelProof) {
+		self.yuv_pixel_proof = Some(yuv_pixel_proof);
 	}
 }
 
@@ -452,6 +570,7 @@ impl Writeable for HolderFundingOutput {
 			(1, self.channel_type_features, required),
 			(2, legacy_deserialization_prevention_marker, option),
 			(3, self.funding_amount, option),
+			(4, self.yuv_pixel_proof, option),
 		});
 		Ok(())
 	}
@@ -463,12 +582,14 @@ impl Readable for HolderFundingOutput {
 		let mut _legacy_deserialization_prevention_marker: Option<()> = None;
 		let mut channel_type_features = None;
 		let mut funding_amount = None;
+		let mut yuv_pixel_proof = None;
 
 		read_tlv_fields!(reader, {
 			(0, funding_redeemscript, required),
 			(1, channel_type_features, option),
 			(2, _legacy_deserialization_prevention_marker, option),
-			(3, funding_amount, option)
+			(3, funding_amount, option),
+			(4, yuv_pixel_proof, option)
 		});
 
 		verify_channel_type_features(&channel_type_features, None)?;
@@ -476,7 +597,8 @@ impl Readable for HolderFundingOutput {
 		Ok(Self {
 			funding_redeemscript: funding_redeemscript.0.unwrap(),
 			channel_type_features: channel_type_features.unwrap_or(ChannelTypeFeatures::only_static_remote_key()),
-			funding_amount
+			funding_amount,
+			yuv_pixel_proof,
 		})
 	}
 }
@@ -485,7 +607,7 @@ impl Readable for HolderFundingOutput {
 ///
 /// The generic API offers access to an outputs common attributes or allow transformation such as
 /// finalizing an input claiming the output.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum PackageSolvingData {
 	RevokedOutput(RevokedOutput),
 	RevokedHTLCOutput(RevokedHTLCOutput),
@@ -577,69 +699,96 @@ impl PackageSolvingData {
 			witness: Witness::new(),
 		}
 	}
-	fn finalize_input<Signer: WriteableEcdsaChannelSigner>(&self, bumped_tx: &mut Transaction, i: usize, onchain_handler: &mut OnchainTxHandler<Signer>) -> bool {
+	fn finalize_input<Signer: WriteableEcdsaChannelSigner>(
+		&self,
+		bumped_tx: &mut Transaction,
+		i: usize,
+		onchain_handler: &mut OnchainTxHandler<Signer>,
+		yuv_pixel_proofs: Option<&mut YuvTxType>,
+	) -> bool {
 		match self {
 			PackageSolvingData::RevokedOutput(ref outp) => {
-				let chan_keys = TxCreationKeys::derive_new(&onchain_handler.secp_ctx, &outp.per_commitment_point, &outp.counterparty_delayed_payment_base_key, &outp.counterparty_htlc_base_key, &onchain_handler.signer.pubkeys().revocation_basepoint, &onchain_handler.signer.pubkeys().htlc_basepoint);
-				let witness_script = chan_utils::get_revokeable_redeemscript(&chan_keys.revocation_key, outp.on_counterparty_tx_csv, &chan_keys.broadcaster_delayed_payment_key);
+				let chan_keys = TxCreationKeys::derive_new(&onchain_handler.secp_ctx, &outp.per_commitment_point, &outp.counterparty_delayed_payment_base_key, &outp.counterparty_htlc_base_key, &onchain_handler.signer.pubkeys().revocation_basepoint, &onchain_handler.signer.pubkeys().htlc_basepoint, None);
+				let yuv_pixel = outp.yuv_pixel_proof.as_ref().map(|proof| proof.pixel());
+				let revocation_key = chan_keys.revocation_key.maybe_tweak(yuv_pixel);
+				let witness_script = chan_utils::get_revokeable_redeemscript(&revocation_key, outp.on_counterparty_tx_csv, &chan_keys.broadcaster_delayed_payment_key);
 				//TODO: should we panic on signer failure ?
-				if let Ok(sig) = onchain_handler.signer.sign_justice_revoked_output(&bumped_tx, i, outp.amount, &outp.per_commitment_key, &onchain_handler.secp_ctx) {
+				if let Ok(sig) = onchain_handler.signer.sign_justice_revoked_output(&bumped_tx, i, outp.amount, &outp.per_commitment_key, yuv_pixel, &onchain_handler.secp_ctx) {
 					let mut ser_sig = sig.serialize_der().to_vec();
 					ser_sig.push(EcdsaSighashType::All as u8);
 					bumped_tx.input[i].witness.push(ser_sig);
 					bumped_tx.input[i].witness.push(vec!(1));
 					bumped_tx.input[i].witness.push(witness_script.clone().into_bytes());
+
+
+					add_proof_from_package_solving_data(i as u32, yuv_pixel_proofs, outp.yuv_pixel_proof.as_ref());
 				} else { return false; }
 			},
 			PackageSolvingData::RevokedHTLCOutput(ref outp) => {
-				let chan_keys = TxCreationKeys::derive_new(&onchain_handler.secp_ctx, &outp.per_commitment_point, &outp.counterparty_delayed_payment_base_key, &outp.counterparty_htlc_base_key, &onchain_handler.signer.pubkeys().revocation_basepoint, &onchain_handler.signer.pubkeys().htlc_basepoint);
-				let witness_script = chan_utils::get_htlc_redeemscript_with_explicit_keys(&outp.htlc, &onchain_handler.channel_type_features(), &chan_keys.broadcaster_htlc_key, &chan_keys.countersignatory_htlc_key, &chan_keys.revocation_key);
+				let chan_keys = TxCreationKeys::derive_new(&onchain_handler.secp_ctx, &outp.per_commitment_point, &outp.counterparty_delayed_payment_base_key, &outp.counterparty_htlc_base_key, &onchain_handler.signer.pubkeys().revocation_basepoint, &onchain_handler.signer.pubkeys().htlc_basepoint, None);
+				let yuv_pixel = outp.yuv_pixel_proof.as_ref().map(|proof| proof.pixel());
+				let countersignatory_htlc_key = chan_keys.countersignatory_htlc_key.maybe_tweak(yuv_pixel);
+				let witness_script = chan_utils::get_htlc_redeemscript_with_explicit_keys(&outp.htlc, &onchain_handler.channel_type_features(), &chan_keys.broadcaster_htlc_key, &countersignatory_htlc_key, &chan_keys.revocation_key);
 				//TODO: should we panic on signer failure ?
-				if let Ok(sig) = onchain_handler.signer.sign_justice_revoked_htlc(&bumped_tx, i, outp.amount, &outp.per_commitment_key, &outp.htlc, &onchain_handler.secp_ctx) {
+				if let Ok(sig) = onchain_handler.signer.sign_justice_revoked_htlc(&bumped_tx, i, outp.amount, &outp.per_commitment_key, &outp.htlc, yuv_pixel, &onchain_handler.secp_ctx) {
 					let mut ser_sig = sig.serialize_der().to_vec();
 					ser_sig.push(EcdsaSighashType::All as u8);
 					bumped_tx.input[i].witness.push(ser_sig);
 					bumped_tx.input[i].witness.push(chan_keys.revocation_key.clone().serialize().to_vec());
 					bumped_tx.input[i].witness.push(witness_script.clone().into_bytes());
+
+					add_proof_from_package_solving_data(i as u32, yuv_pixel_proofs, outp.yuv_pixel_proof.as_ref());
 				} else { return false; }
 			},
 			PackageSolvingData::CounterpartyOfferedHTLCOutput(ref outp) => {
-				let chan_keys = TxCreationKeys::derive_new(&onchain_handler.secp_ctx, &outp.per_commitment_point, &outp.counterparty_delayed_payment_base_key, &outp.counterparty_htlc_base_key, &onchain_handler.signer.pubkeys().revocation_basepoint, &onchain_handler.signer.pubkeys().htlc_basepoint);
-				let witness_script = chan_utils::get_htlc_redeemscript_with_explicit_keys(&outp.htlc, &onchain_handler.channel_type_features(), &chan_keys.broadcaster_htlc_key, &chan_keys.countersignatory_htlc_key, &chan_keys.revocation_key);
+				let chan_keys = TxCreationKeys::derive_new(&onchain_handler.secp_ctx, &outp.per_commitment_point, &outp.counterparty_delayed_payment_base_key, &outp.counterparty_htlc_base_key, &onchain_handler.signer.pubkeys().revocation_basepoint, &onchain_handler.signer.pubkeys().htlc_basepoint, None);
+				let yuv_pixel = outp.yuv_pixel_proof.as_ref().map(|proof| proof.pixel());
+				let countersignatory_htlc_key = chan_keys.countersignatory_htlc_key.maybe_tweak(yuv_pixel);
+				let witness_script = chan_utils::get_htlc_redeemscript_with_explicit_keys(&outp.htlc, &onchain_handler.channel_type_features(), &chan_keys.broadcaster_htlc_key, &countersignatory_htlc_key, &chan_keys.revocation_key);
 
-				if let Ok(sig) = onchain_handler.signer.sign_counterparty_htlc_transaction(&bumped_tx, i, &outp.htlc.amount_msat / 1000, &outp.per_commitment_point, &outp.htlc, &onchain_handler.secp_ctx) {
+				if let Ok(sig) = onchain_handler.signer.sign_counterparty_htlc_transaction(&bumped_tx, i, &outp.htlc.amount_msat / 1000, &outp.per_commitment_point, &outp.htlc, yuv_pixel, &onchain_handler.secp_ctx) {
 					let mut ser_sig = sig.serialize_der().to_vec();
 					ser_sig.push(EcdsaSighashType::All as u8);
 					bumped_tx.input[i].witness.push(ser_sig);
 					bumped_tx.input[i].witness.push(outp.preimage.0.to_vec());
 					bumped_tx.input[i].witness.push(witness_script.clone().into_bytes());
+
+					add_proof_from_package_solving_data(i as u32, yuv_pixel_proofs, outp.yuv_pixel_proof.as_ref());
 				}
 			},
 			PackageSolvingData::CounterpartyReceivedHTLCOutput(ref outp) => {
-				let chan_keys = TxCreationKeys::derive_new(&onchain_handler.secp_ctx, &outp.per_commitment_point, &outp.counterparty_delayed_payment_base_key, &outp.counterparty_htlc_base_key, &onchain_handler.signer.pubkeys().revocation_basepoint, &onchain_handler.signer.pubkeys().htlc_basepoint);
-				let witness_script = chan_utils::get_htlc_redeemscript_with_explicit_keys(&outp.htlc, &onchain_handler.channel_type_features(), &chan_keys.broadcaster_htlc_key, &chan_keys.countersignatory_htlc_key, &chan_keys.revocation_key);
+				let chan_keys = TxCreationKeys::derive_new(&onchain_handler.secp_ctx, &outp.per_commitment_point, &outp.counterparty_delayed_payment_base_key, &outp.counterparty_htlc_base_key, &onchain_handler.signer.pubkeys().revocation_basepoint, &onchain_handler.signer.pubkeys().htlc_basepoint, None);
+				let yuv_pixel = outp.yuv_pixel_proof.as_ref().map(|proof| proof.pixel());
+				let countersignatory_htlc_key = chan_keys.countersignatory_htlc_key.maybe_tweak(yuv_pixel);
+				let witness_script = chan_utils::get_htlc_redeemscript_with_explicit_keys(&outp.htlc, &onchain_handler.channel_type_features(), &chan_keys.broadcaster_htlc_key, &countersignatory_htlc_key, &chan_keys.revocation_key);
 
-				if let Ok(sig) = onchain_handler.signer.sign_counterparty_htlc_transaction(&bumped_tx, i, &outp.htlc.amount_msat / 1000, &outp.per_commitment_point, &outp.htlc, &onchain_handler.secp_ctx) {
+				if let Ok(sig) = onchain_handler.signer.sign_counterparty_htlc_transaction(&bumped_tx, i, &outp.htlc.amount_msat / 1000, &outp.per_commitment_point, &outp.htlc, yuv_pixel, &onchain_handler.secp_ctx) {
 					let mut ser_sig = sig.serialize_der().to_vec();
 					ser_sig.push(EcdsaSighashType::All as u8);
 					bumped_tx.input[i].witness.push(ser_sig);
 					// Due to BIP146 (MINIMALIF) this must be a zero-length element to relay.
 					bumped_tx.input[i].witness.push(vec![]);
 					bumped_tx.input[i].witness.push(witness_script.clone().into_bytes());
+
+					add_proof_from_package_solving_data(i as u32, yuv_pixel_proofs, outp.yuv_pixel_proof.as_ref());
 				}
 			},
 			_ => { panic!("API Error!"); }
 		}
 		true
 	}
-	fn get_finalized_tx<Signer: WriteableEcdsaChannelSigner>(&self, outpoint: &BitcoinOutPoint, onchain_handler: &mut OnchainTxHandler<Signer>) -> Option<Transaction> {
+	fn get_finalized_tx<Signer: WriteableEcdsaChannelSigner>(&self, outpoint: &BitcoinOutPoint, onchain_handler: &mut OnchainTxHandler<Signer>) -> Option<(Transaction, Option<YuvTxType>)> {
 		match self {
 			PackageSolvingData::HolderHTLCOutput(ref outp) => {
 				debug_assert!(!outp.channel_type_features.supports_anchors_zero_fee_htlc_tx());
 				return onchain_handler.get_fully_signed_htlc_tx(outpoint, &outp.preimage);
 			}
 			PackageSolvingData::HolderFundingOutput(ref outp) => {
-				return Some(onchain_handler.get_fully_signed_holder_tx(&outp.funding_redeemscript));
+				let holder_tx = onchain_handler.get_fully_signed_holder_tx(
+					&outp.funding_redeemscript,
+					None,
+				).0;
+				return Some((holder_tx, None));
 			}
 			_ => { panic!("API Error!"); }
 		}
@@ -669,11 +818,19 @@ impl PackageSolvingData {
 		// Post-anchor, aggregation of outputs of different types is unsafe. See https://github.com/lightning/bolts/pull/803.
 		let (malleability, aggregable) = match self {
 			PackageSolvingData::RevokedOutput(RevokedOutput { is_counterparty_balance_on_anchors: Some(()), .. }) => { (PackageMalleability::Malleable, false) },
+			PackageSolvingData::RevokedOutput(RevokedOutput { yuv_pixel_proof: Some(_), .. }) => { (PackageMalleability::Malleable, false) },
 			PackageSolvingData::RevokedOutput(RevokedOutput { is_counterparty_balance_on_anchors: None, .. }) => { (PackageMalleability::Malleable, true) },
+			PackageSolvingData::RevokedHTLCOutput(RevokedHTLCOutput { yuv_pixel_proof: Some(_), .. }) => { (PackageMalleability::Malleable, false) },
 			PackageSolvingData::RevokedHTLCOutput(..) => { (PackageMalleability::Malleable, true) },
+			PackageSolvingData::CounterpartyOfferedHTLCOutput(CounterpartyOfferedHTLCOutput { yuv_pixel_proof: Some(_), .. }) => { (PackageMalleability::Malleable, false) },
 			PackageSolvingData::CounterpartyOfferedHTLCOutput(..) => { (PackageMalleability::Malleable, true) },
+			PackageSolvingData::CounterpartyReceivedHTLCOutput(CounterpartyReceivedHTLCOutput { yuv_pixel_proof: Some(_), .. }) => { (PackageMalleability::Malleable, false) },
 			PackageSolvingData::CounterpartyReceivedHTLCOutput(..) => { (PackageMalleability::Malleable, false) },
 			PackageSolvingData::HolderHTLCOutput(ref outp) => if outp.channel_type_features.supports_anchors_zero_fee_htlc_tx() {
+				if outp.yuv_pixel_proof.is_some() {
+					return (PackageMalleability::Malleable, false)
+				};
+
 				(PackageMalleability::Malleable, outp.preimage.is_some())
 			} else {
 				(PackageMalleability::Untractable, false)
@@ -681,6 +838,34 @@ impl PackageSolvingData {
 			PackageSolvingData::HolderFundingOutput(..) => { (PackageMalleability::Untractable, false) },
 		};
 		(malleability, aggregable)
+	}
+
+	pub fn set_yuv_pixel_proof(&mut self, yuv_pixel_proof: PixelProof) {
+		match self {
+			PackageSolvingData::RevokedOutput(inner) => inner.set_yuv_pixel_proof(yuv_pixel_proof),
+			PackageSolvingData::RevokedHTLCOutput(inner) => inner.set_yuv_pixel_proof(yuv_pixel_proof),
+			PackageSolvingData::CounterpartyOfferedHTLCOutput(inner) => inner.set_yuv_pixel_proof(yuv_pixel_proof),
+			PackageSolvingData::CounterpartyReceivedHTLCOutput(inner) => inner.set_yuv_pixel_proof(yuv_pixel_proof),
+			PackageSolvingData::HolderHTLCOutput(inner) => inner.set_yuv_pixel_proof(yuv_pixel_proof),
+			PackageSolvingData::HolderFundingOutput(inner) => inner.set_yuv_pixel_proof(yuv_pixel_proof),
+		};
+	}
+
+}
+
+fn add_proof_from_package_solving_data(
+	idx: u32,
+	yuv_pixel_proofs: Option<&mut YuvTxType>,
+	yuv_pixel_proof: Option<&PixelProof>,
+) {
+	match (yuv_pixel_proofs, yuv_pixel_proof) {
+		(Some(YuvTxType::Transfer { ref mut input_proofs, .. }), Some(pixel_proof)) => {
+			input_proofs.insert(
+				idx,
+				pixel_proof.clone(),
+			);
+		},
+		_ => {},
 	}
 }
 
@@ -695,7 +880,7 @@ impl_writeable_tlv_based_enum!(PackageSolvingData, ;
 
 /// A malleable package might be aggregated with other packages to save on fees.
 /// A untractable package has been counter-signed and aggregable will break cached counterparty signatures.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum PackageMalleability {
 	Malleable,
 	Untractable,
@@ -710,7 +895,7 @@ pub(crate) enum PackageMalleability {
 ///
 /// As packages are time-sensitive, we fee-bump and rebroadcast them at scheduled intervals.
 /// Failing to confirm a package translate as a loss of funds for the user.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PackageTemplate {
 	// List of onchain outputs and solving data to generate satisfying witnesses.
 	inputs: Vec<(BitcoinOutPoint, PackageSolvingData)>,
@@ -744,6 +929,13 @@ pub struct PackageTemplate {
 	// Confirmation height of the claimed outputs set transaction. In case of reorg reaching
 	// it, we wipe out and forget the package.
 	height_original: u32,
+	// The summary YUV pixel of all pixels in the inputs. It can be used to build a transaction's
+	// output and check, that packahe uses YUV payments feature.
+	yuv_pixel: Option<Pixel>,
+	// The YUV commitment transaction which Justice transaction is spending from. It is presented
+	// only in case of Justice tx. Can be used to send to the YUV network in case if malicious
+	// counterparty didn't send it.
+	commitment_yuv_tx: Option<YuvTransaction>,
 }
 
 impl PackageTemplate {
@@ -774,6 +966,12 @@ impl PackageTemplate {
 	pub(crate) fn inputs(&self) -> impl ExactSizeIterator<Item = &PackageSolvingData> {
 		self.inputs.iter().map(|(_, i)| i)
 	}
+	pub(crate) fn yuv_commitment_tx(&self) -> Option<YuvTransaction> {
+		self.commitment_yuv_tx.clone()
+	}
+	pub(crate) fn set_yuv_commitment_tx(&mut self, yuv_tx: YuvTransaction) {
+		self.commitment_yuv_tx = Some(yuv_tx);
+	}
 	pub(crate) fn split_package(&mut self, split_outp: &BitcoinOutPoint) -> Option<PackageTemplate> {
 		match self.malleability {
 			PackageMalleability::Malleable => {
@@ -793,6 +991,8 @@ impl PackageTemplate {
 							feerate_previous,
 							height_timer,
 							height_original,
+							yuv_pixel: None,
+							commitment_yuv_tx: None,
 						});
 						return false;
 					}
@@ -910,8 +1110,40 @@ impl PackageTemplate {
 	pub(crate) fn finalize_malleable_package<L: Deref, Signer: WriteableEcdsaChannelSigner>(
 		&self, current_height: u32, onchain_handler: &mut OnchainTxHandler<Signer>, value: u64,
 		destination_script: Script, logger: &L
-	) -> Option<Transaction> where L::Target: Logger {
+	) -> (Option<Transaction>, Option<YuvTxType>) where L::Target: Logger {
 		debug_assert!(self.is_malleable());
+
+		// If YUV pixel is presented - build destination script with tweaked destination pubkey and
+		// build the YUV transaction proofs.
+		let (destination_script, mut yuv_pixel_proofs) = self.yuv_pixel.map(|yuv_pixel| {
+			let destination_pubkey = &onchain_handler.signer
+				.pubkeys()
+				.destination_pubkey
+				.expect("presented since YUV feature is appeared");
+
+			let wpubkey_hash = WPubkeyHash::hash(
+				&destination_pubkey.tweak(yuv_pixel).serialize(),
+			);
+
+			let destination_script = Builder::new()
+				.push_opcode(opcodes::all::OP_PUSHBYTES_0)
+				.push_slice(&wpubkey_hash.into_inner())
+				.into_script();
+
+			let mut yuv_output_proofs = BTreeMap::new();
+			yuv_output_proofs.insert(0, PixelProof::sig(yuv_pixel, *destination_pubkey));
+
+			let yuv_pixel_proofs = YuvTxType::Transfer {
+				input_proofs: BTreeMap::new(),
+				output_proofs: yuv_output_proofs,
+			};
+
+			onchain_handler.yuv_destination_scripts.push(destination_script.clone());
+
+			(destination_script, Some(yuv_pixel_proofs))
+		})
+		.unwrap_or((destination_script, None));
+
 		let mut bumped_tx = Transaction {
 			version: 2,
 			lock_time: PackedLockTime(self.package_locktime(current_height)),
@@ -926,20 +1158,22 @@ impl PackageTemplate {
 		}
 		for (i, (outpoint, out)) in self.inputs.iter().enumerate() {
 			log_debug!(logger, "Adding claiming input for outpoint {}:{}", outpoint.txid, outpoint.vout);
-			if !out.finalize_input(&mut bumped_tx, i, onchain_handler) { return None; }
+			if !out.finalize_input(&mut bumped_tx, i, onchain_handler, yuv_pixel_proofs.as_mut()) {
+				return (None, None)
+			}
 		}
 		log_debug!(logger, "Finalized transaction {} ready to broadcast", bumped_tx.txid());
-		Some(bumped_tx)
+		(Some(bumped_tx), yuv_pixel_proofs)
 	}
 	pub(crate) fn finalize_untractable_package<L: Deref, Signer: WriteableEcdsaChannelSigner>(
 		&self, onchain_handler: &mut OnchainTxHandler<Signer>, logger: &L,
-	) -> Option<Transaction> where L::Target: Logger {
+	) -> Option<(Transaction, Option<YuvTxType>)> where L::Target: Logger {
 		debug_assert!(!self.is_malleable());
 		if let Some((outpoint, outp)) = self.inputs.first() {
-			if let Some(final_tx) = outp.get_finalized_tx(outpoint, onchain_handler) {
+			if let Some((final_tx, yuv_proofs_opt)) = outp.get_finalized_tx(outpoint, onchain_handler) {
 				log_debug!(logger, "Adding claiming input for outpoint {}:{}", outpoint.txid, outpoint.vout);
 				log_debug!(logger, "Finalized transaction {} ready to broadcast", final_tx.txid());
-				return Some(final_tx);
+				return Some((final_tx, yuv_proofs_opt));
 			}
 			return None;
 		} else { panic!("API Error: Package must not be inputs empty"); }
@@ -1030,7 +1264,14 @@ impl PackageTemplate {
 		}).is_some()
 	}
 
-	pub (crate) fn build_package(txid: Txid, vout: u32, input_solving_data: PackageSolvingData, soonest_conf_deadline: u32, height_original: u32) -> Self {
+	pub (crate) fn build_package(
+		txid: Txid,
+		vout: u32,
+		input_solving_data: PackageSolvingData,
+		soonest_conf_deadline: u32,
+		height_original: u32,
+		yuv_pixel: Option<Pixel>
+	) -> Self {
 		let (malleability, aggregable) = PackageSolvingData::map_output_type_flags(&input_solving_data);
 		let mut inputs = Vec::with_capacity(1);
 		inputs.push((BitcoinOutPoint { txid, vout }, input_solving_data));
@@ -1042,6 +1283,8 @@ impl PackageTemplate {
 			feerate_previous: 0,
 			height_timer: height_original,
 			height_original,
+			yuv_pixel,
+			commitment_yuv_tx: None,
 		}
 	}
 }
@@ -1057,7 +1300,9 @@ impl Writeable for PackageTemplate {
 			(0, self.soonest_conf_deadline, required),
 			(2, self.feerate_previous, required),
 			(4, self.height_original, required),
-			(6, self.height_timer, required)
+			(6, self.height_timer, required),
+			(8, self.yuv_pixel, option),
+			(10, self.commitment_yuv_tx, option),
 		});
 		Ok(())
 	}
@@ -1079,11 +1324,15 @@ impl Readable for PackageTemplate {
 		let mut feerate_previous = 0;
 		let mut height_timer = None;
 		let mut height_original = 0;
+		let mut yuv_pixel: Option<Pixel> = None;
+		let mut commitment_yuv_proofs: Option<YuvTransaction> = None;
 		read_tlv_fields!(reader, {
 			(0, soonest_conf_deadline, required),
 			(2, feerate_previous, required),
 			(4, height_original, required),
 			(6, height_timer, option),
+			(8, yuv_pixel, option),
+			(10, commitment_yuv_proofs, option),
 		});
 		if height_timer.is_none() {
 			height_timer = Some(height_original);
@@ -1096,6 +1345,8 @@ impl Readable for PackageTemplate {
 			feerate_previous,
 			height_timer: height_timer.unwrap(),
 			height_original,
+			yuv_pixel,
+			commitment_yuv_tx: commitment_yuv_proofs,
 		})
 	}
 }
@@ -1194,6 +1445,56 @@ where
 	Some((new_fee, new_fee * 1000 / (predicted_weight as u64)))
 }
 
+pub(crate) fn get_yuv_htlc_pixel_proof(
+	yuv_pixel: Pixel,
+	htlc: &HTLCOutputInCommitment,
+	per_commitment_point: &PublicKey,
+	remote_htlc_basepoint: &PublicKey,
+	local_htlc_basepoint: &PublicKey,
+	remote_revocation_basepoint: &PublicKey,
+	secp_ctx: &Secp256k1<secp256k1::All>
+) -> PixelProof {
+	let htlc_kind = match htlc.offered {
+		true => HtlcScriptKind::Offered,
+		false => HtlcScriptKind::Received { cltv_expiry: htlc.cltv_expiry },
+	};
+
+	let remote_htlc_key = chan_utils::derive_public_key(
+		secp_ctx,
+		per_commitment_point,
+		remote_htlc_basepoint,
+	);
+
+	let local_htlc_key = chan_utils::derive_public_key(
+		secp_ctx,
+		per_commitment_point,
+		local_htlc_basepoint,
+	);
+
+	let revocation_key = chan_utils::derive_public_revocation_key(
+		secp_ctx,
+		per_commitment_point,
+		remote_revocation_basepoint,
+	);
+
+	let revocation_key_hash = PubkeyHash::hash(&revocation_key.serialize())
+		.as_hash();
+
+	let payment_hash = Hash160::from_inner(
+		Ripemd160::hash(&htlc.payment_hash.0[..]).into_inner(),
+	);
+
+	let htlc_data = LightningHtlcData {
+		revocation_key_hash,
+		remote_htlc_key,
+		local_htlc_key,
+		payment_hash,
+		kind: htlc_kind,
+	};
+
+	PixelProof::lightning_htlc(yuv_pixel, htlc_data)
+}
+
 #[cfg(test)]
 mod tests {
 	use crate::chain::package::{CounterpartyOfferedHTLCOutput, CounterpartyReceivedHTLCOutput, HolderHTLCOutput, PackageTemplate, PackageSolvingData, RevokedOutput, WEIGHT_REVOKED_OUTPUT, weight_offered_htlc, weight_received_htlc};
@@ -1227,7 +1528,7 @@ mod tests {
 				let dumb_scalar = SecretKey::from_slice(&hex::decode("0101010101010101010101010101010101010101010101010101010101010101").unwrap()[..]).unwrap();
 				let dumb_point = PublicKey::from_secret_key(&$secp_ctx, &dumb_scalar);
 				let hash = PaymentHash([1; 32]);
-				let htlc = HTLCOutputInCommitment { offered: true, amount_msat: $amt, cltv_expiry: 0, payment_hash: hash, transaction_output_index: None };
+				let htlc = HTLCOutputInCommitment { offered: true, amount_msat: $amt, yuv_amount: None, cltv_expiry: 0, payment_hash: hash, transaction_output_index: None };
 				PackageSolvingData::CounterpartyReceivedHTLCOutput(CounterpartyReceivedHTLCOutput::build(dumb_point, dumb_point, dumb_point, htlc, $opt_anchors))
 			}
 		}
@@ -1240,7 +1541,7 @@ mod tests {
 				let dumb_point = PublicKey::from_secret_key(&$secp_ctx, &dumb_scalar);
 				let hash = PaymentHash([1; 32]);
 				let preimage = PaymentPreimage([2;32]);
-				let htlc = HTLCOutputInCommitment { offered: false, amount_msat: $amt, cltv_expiry: 1000, payment_hash: hash, transaction_output_index: None };
+				let htlc = HTLCOutputInCommitment { offered: false, amount_msat: $amt, yuv_amount: None, cltv_expiry: 1000, payment_hash: hash, transaction_output_index: None };
 				PackageSolvingData::CounterpartyOfferedHTLCOutput(CounterpartyOfferedHTLCOutput::build(dumb_point, dumb_point, dumb_point, preimage, htlc, $opt_anchors))
 			}
 		}
@@ -1262,8 +1563,8 @@ mod tests {
 		let secp_ctx = Secp256k1::new();
 		let revk_outp = dumb_revk_output!(secp_ctx, false);
 
-		let mut package_one_hundred = PackageTemplate::build_package(txid, 0, revk_outp.clone(), 1000, 100);
-		let package_two_hundred = PackageTemplate::build_package(txid, 1, revk_outp.clone(), 1000, 200);
+		let mut package_one_hundred = PackageTemplate::build_package(txid, 0, revk_outp.clone(), 1000, 100, None);
+		let package_two_hundred = PackageTemplate::build_package(txid, 1, revk_outp.clone(), 1000, 200, None);
 		package_one_hundred.merge_package(package_two_hundred);
 	}
 
@@ -1275,8 +1576,8 @@ mod tests {
 		let revk_outp = dumb_revk_output!(secp_ctx, false);
 		let htlc_outp = dumb_htlc_output!();
 
-		let mut untractable_package = PackageTemplate::build_package(txid, 0, revk_outp.clone(), 1000, 100);
-		let malleable_package = PackageTemplate::build_package(txid, 1, htlc_outp.clone(), 1000, 100);
+		let mut untractable_package = PackageTemplate::build_package(txid, 0, revk_outp.clone(), 1000, 100, None);
+		let malleable_package = PackageTemplate::build_package(txid, 1, htlc_outp.clone(), 1000, 100, None);
 		untractable_package.merge_package(malleable_package);
 	}
 
@@ -1288,8 +1589,8 @@ mod tests {
 		let htlc_outp = dumb_htlc_output!();
 		let revk_outp = dumb_revk_output!(secp_ctx, false);
 
-		let mut malleable_package = PackageTemplate::build_package(txid, 0, htlc_outp.clone(), 1000, 100);
-		let untractable_package = PackageTemplate::build_package(txid, 1, revk_outp.clone(), 1000, 100);
+		let mut malleable_package = PackageTemplate::build_package(txid, 0, htlc_outp.clone(), 1000, 100, None);
+		let untractable_package = PackageTemplate::build_package(txid, 1, revk_outp.clone(), 1000, 100, None);
 		malleable_package.merge_package(untractable_package);
 	}
 
@@ -1301,8 +1602,8 @@ mod tests {
 		let revk_outp = dumb_revk_output!(secp_ctx, false);
 		let revk_outp_counterparty_balance = dumb_revk_output!(secp_ctx, true);
 
-		let mut noaggregation_package = PackageTemplate::build_package(txid, 0, revk_outp_counterparty_balance.clone(), 1000, 100);
-		let aggregation_package = PackageTemplate::build_package(txid, 1, revk_outp.clone(), 1000, 100);
+		let mut noaggregation_package = PackageTemplate::build_package(txid, 0, revk_outp_counterparty_balance.clone(), 1000, 100, None);
+		let aggregation_package = PackageTemplate::build_package(txid, 1, revk_outp.clone(), 1000, 100, None);
 		noaggregation_package.merge_package(aggregation_package);
 	}
 
@@ -1314,8 +1615,8 @@ mod tests {
 		let revk_outp = dumb_revk_output!(secp_ctx, false);
 		let revk_outp_counterparty_balance = dumb_revk_output!(secp_ctx, true);
 
-		let mut aggregation_package = PackageTemplate::build_package(txid, 0, revk_outp.clone(), 1000, 100);
-		let noaggregation_package = PackageTemplate::build_package(txid, 1, revk_outp_counterparty_balance.clone(), 1000, 100);
+		let mut aggregation_package = PackageTemplate::build_package(txid, 0, revk_outp.clone(), 1000, 100, None);
+		let noaggregation_package = PackageTemplate::build_package(txid, 1, revk_outp_counterparty_balance.clone(), 1000, 100, None);
 		aggregation_package.merge_package(noaggregation_package);
 	}
 
@@ -1326,9 +1627,9 @@ mod tests {
 		let secp_ctx = Secp256k1::new();
 		let revk_outp = dumb_revk_output!(secp_ctx, false);
 
-		let mut empty_package = PackageTemplate::build_package(txid, 0, revk_outp.clone(), 1000, 100);
+		let mut empty_package = PackageTemplate::build_package(txid, 0, revk_outp.clone(), 1000, 100, None);
 		empty_package.inputs = vec![];
-		let package = PackageTemplate::build_package(txid, 1, revk_outp.clone(), 1000, 100);
+		let package = PackageTemplate::build_package(txid, 1, revk_outp.clone(), 1000, 100, None);
 		empty_package.merge_package(package);
 	}
 
@@ -1340,8 +1641,8 @@ mod tests {
 		let revk_outp = dumb_revk_output!(secp_ctx, false);
 		let counterparty_outp = dumb_counterparty_output!(secp_ctx, 0, ChannelTypeFeatures::only_static_remote_key());
 
-		let mut revoked_package = PackageTemplate::build_package(txid, 0, revk_outp, 1000, 100);
-		let counterparty_package = PackageTemplate::build_package(txid, 1, counterparty_outp, 1000, 100);
+		let mut revoked_package = PackageTemplate::build_package(txid, 0, revk_outp, 1000, 100, None);
+		let counterparty_package = PackageTemplate::build_package(txid, 1, counterparty_outp, 1000, 100, None);
 		revoked_package.merge_package(counterparty_package);
 	}
 
@@ -1353,9 +1654,9 @@ mod tests {
 		let revk_outp_two = dumb_revk_output!(secp_ctx, false);
 		let revk_outp_three = dumb_revk_output!(secp_ctx, false);
 
-		let mut package_one = PackageTemplate::build_package(txid, 0, revk_outp_one, 1000, 100);
-		let package_two = PackageTemplate::build_package(txid, 1, revk_outp_two, 1000, 100);
-		let package_three = PackageTemplate::build_package(txid, 2, revk_outp_three, 1000, 100);
+		let mut package_one = PackageTemplate::build_package(txid, 0, revk_outp_one, 1000, 100, None);
+		let package_two = PackageTemplate::build_package(txid, 1, revk_outp_two, 1000, 100, None);
+		let package_three = PackageTemplate::build_package(txid, 2, revk_outp_three, 1000, 100, None);
 
 		package_one.merge_package(package_two);
 		package_one.merge_package(package_three);
@@ -1378,7 +1679,7 @@ mod tests {
 		let txid = Txid::from_hex("c2d4449afa8d26140898dd54d3390b057ba2a5afcf03ba29d7dc0d8b9ffe966e").unwrap();
 		let htlc_outp_one = dumb_htlc_output!();
 
-		let mut package_one = PackageTemplate::build_package(txid, 0, htlc_outp_one, 1000, 100);
+		let mut package_one = PackageTemplate::build_package(txid, 0, htlc_outp_one, 1000, 100, None);
 		let ret_split = package_one.split_package(&BitcoinOutPoint { txid, vout: 0});
 		assert!(ret_split.is_none());
 	}
@@ -1389,7 +1690,7 @@ mod tests {
 		let secp_ctx = Secp256k1::new();
 		let revk_outp = dumb_revk_output!(secp_ctx, false);
 
-		let mut package = PackageTemplate::build_package(txid, 0, revk_outp, 1000, 100);
+		let mut package = PackageTemplate::build_package(txid, 0, revk_outp, 1000, 100, None);
 		assert_eq!(package.timer(), 100);
 		package.set_timer(101);
 		assert_eq!(package.timer(), 101);
@@ -1401,7 +1702,7 @@ mod tests {
 		let secp_ctx = Secp256k1::new();
 		let counterparty_outp = dumb_counterparty_output!(secp_ctx, 1_000_000, ChannelTypeFeatures::only_static_remote_key());
 
-		let package = PackageTemplate::build_package(txid, 0, counterparty_outp, 1000, 100);
+		let package = PackageTemplate::build_package(txid, 0, counterparty_outp, 1000, 100, None);
 		assert_eq!(package.package_amount(), 1000);
 	}
 
@@ -1415,14 +1716,14 @@ mod tests {
 
 		{
 			let revk_outp = dumb_revk_output!(secp_ctx, false);
-			let package = PackageTemplate::build_package(txid, 0, revk_outp, 0, 100);
+			let package = PackageTemplate::build_package(txid, 0, revk_outp, 0, 100, None);
 			assert_eq!(package.package_weight(&Script::new()),  weight_sans_output + WEIGHT_REVOKED_OUTPUT as usize);
 		}
 
 		{
 			for channel_type_features in [ChannelTypeFeatures::only_static_remote_key(), ChannelTypeFeatures::anchors_zero_htlc_fee_and_dependencies()].iter() {
 				let counterparty_outp = dumb_counterparty_output!(secp_ctx, 1_000_000, channel_type_features.clone());
-				let package = PackageTemplate::build_package(txid, 0, counterparty_outp, 1000, 100);
+				let package = PackageTemplate::build_package(txid, 0, counterparty_outp, 1000, 100, None);
 				assert_eq!(package.package_weight(&Script::new()), weight_sans_output + weight_received_htlc(channel_type_features) as usize);
 			}
 		}
@@ -1430,7 +1731,7 @@ mod tests {
 		{
 			for channel_type_features in [ChannelTypeFeatures::only_static_remote_key(), ChannelTypeFeatures::anchors_zero_htlc_fee_and_dependencies()].iter() {
 				let counterparty_outp = dumb_counterparty_offered_output!(secp_ctx, 1_000_000, channel_type_features.clone());
-				let package = PackageTemplate::build_package(txid, 0, counterparty_outp, 1000, 100);
+				let package = PackageTemplate::build_package(txid, 0, counterparty_outp, 1000, 100, None);
 				assert_eq!(package.package_weight(&Script::new()), weight_sans_output + weight_offered_htlc(channel_type_features) as usize);
 			}
 		}

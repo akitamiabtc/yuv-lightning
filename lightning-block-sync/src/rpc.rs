@@ -1,13 +1,14 @@
 //! Simple RPC client implementation which implements [`BlockSource`] against a Bitcoin Core RPC
 //! endpoint.
 
-use crate::{BlockData, BlockHeaderData, BlockSource, AsyncBlockSourceResult};
+use crate::{AsyncBlockSourceResult, AsyncYuvSourceResult, BlockData, BlockHeaderData, BlockSource};
 use crate::http::{HttpClient, HttpEndpoint, HttpError, JsonResponse};
-use crate::gossip::UtxoSource;
+use crate::gossip::{UtxoSource, YuvTransactionSource};
 
 use bitcoin::hash_types::BlockHash;
 use bitcoin::hashes::hex::ToHex;
-use bitcoin::OutPoint;
+use bitcoin::{OutPoint, Txid};
+use yuv_rpc_api::transactions::GetRawYuvTransactionResponse;
 
 use std::sync::Mutex;
 
@@ -156,6 +157,45 @@ impl UtxoSource for RpcClient {
 			let utxo_opt: serde_json::Value = self.call_method(
 				"gettxout", &[txid_param, vout_param, include_mempool]).await?;
 			Ok(!utxo_opt.is_null())
+		})
+	}
+}
+
+struct YuvTransactionWrapper(GetRawYuvTransactionResponse);
+
+impl From<YuvTransactionWrapper> for GetRawYuvTransactionResponse {
+	fn from(wrapper: YuvTransactionWrapper) -> Self {
+		wrapper.0
+	}
+}
+
+impl TryFrom<Vec<u8>> for YuvTransactionWrapper {
+	type Error = std::io::Error;
+
+	fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
+		Ok(YuvTransactionWrapper(serde_json::from_slice(&value)?))
+	}
+}
+
+impl TryFrom<JsonResponse> for YuvTransactionWrapper {
+	type Error = std::io::Error;
+
+	fn try_from(response: JsonResponse) -> Result<Self, Self::Error> {
+		match serde_json::from_value(response.0) {
+			Ok(tx) => Ok(YuvTransactionWrapper(tx)),
+			Err(e) => Err(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
+		}
+	}
+}
+
+impl YuvTransactionSource for RpcClient {
+	fn yuv_transaction_by_id<'a>(&'a self, txid: &'a Txid) -> AsyncYuvSourceResult<'a, GetRawYuvTransactionResponse> {
+		Box::pin(async move {
+			let txid_param = serde_json::json!(txid.to_hex());
+
+			let YuvTransactionWrapper(response) = self.call_method("getrawyuvtransaction", &[txid_param]).await?;
+
+			Ok(response)
 		})
 	}
 }

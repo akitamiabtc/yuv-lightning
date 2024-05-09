@@ -28,7 +28,7 @@ use bitcoin::hash_types::{Txid, BlockHash};
 
 use crate::chain;
 use crate::chain::{ChannelMonitorUpdateStatus, Filter, WatchedOutput};
-use crate::chain::chaininterface::{BroadcasterInterface, FeeEstimator};
+use crate::chain::chaininterface::{BroadcasterInterface, FeeEstimator, YuvBroadcaster};
 use crate::chain::channelmonitor::{ChannelMonitor, ChannelMonitorUpdate, Balance, MonitorEvent, TransactionOutputs, LATENCY_GRACE_PERIOD_BLOCKS};
 use crate::chain::transaction::{OutPoint, TransactionData};
 use crate::sign::WriteableEcdsaChannelSigner;
@@ -46,6 +46,7 @@ use core::iter::FromIterator;
 use core::ops::Deref;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use bitcoin::secp256k1::PublicKey;
+use yuv_types::YuvTransaction;
 
 mod update_origin {
 	#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
@@ -268,9 +269,10 @@ impl<ChannelSigner: WriteableEcdsaChannelSigner> Deref for LockedChannelMonitor<
 /// [`ChannelManager`]: crate::ln::channelmanager::ChannelManager
 /// [module-level documentation]: crate::chain::chainmonitor
 /// [`rebroadcast_pending_claims`]: Self::rebroadcast_pending_claims
-pub struct ChainMonitor<ChannelSigner: WriteableEcdsaChannelSigner, C: Deref, T: Deref, F: Deref, L: Deref, P: Deref>
+pub struct ChainMonitor<ChannelSigner: WriteableEcdsaChannelSigner, C: Deref, T: Deref, YT: Deref, F: Deref, L: Deref, P: Deref>
 	where C::Target: chain::Filter,
         T::Target: BroadcasterInterface,
+		YT::Target: YuvBroadcaster,
         F::Target: FeeEstimator,
         L::Target: Logger,
         P::Target: Persist<ChannelSigner>,
@@ -282,6 +284,7 @@ pub struct ChainMonitor<ChannelSigner: WriteableEcdsaChannelSigner, C: Deref, T:
 	sync_persistence_id: AtomicCounter,
 	chain_source: Option<C>,
 	broadcaster: T,
+	yuv_broadcaster: Option<YT>,
 	logger: L,
 	fee_estimator: F,
 	persister: P,
@@ -294,9 +297,10 @@ pub struct ChainMonitor<ChannelSigner: WriteableEcdsaChannelSigner, C: Deref, T:
 	event_notifier: Notifier,
 }
 
-impl<ChannelSigner: WriteableEcdsaChannelSigner, C: Deref, T: Deref, F: Deref, L: Deref, P: Deref> ChainMonitor<ChannelSigner, C, T, F, L, P>
+impl<ChannelSigner: WriteableEcdsaChannelSigner, C: Deref, T: Deref, YT: Deref, F: Deref, L: Deref, P: Deref> ChainMonitor<ChannelSigner, C, T, YT, F, L, P>
 where C::Target: chain::Filter,
 	    T::Target: BroadcasterInterface,
+	    YT::Target: YuvBroadcaster,
 	    F::Target: FeeEstimator,
 	    L::Target: Logger,
 	    P::Target: Persist<ChannelSigner>,
@@ -415,12 +419,13 @@ where C::Target: chain::Filter,
 	/// pre-filter blocks or only fetch blocks matching a compact filter. Otherwise, clients may
 	/// always need to fetch full blocks absent another means for determining which blocks contain
 	/// transactions relevant to the watched channels.
-	pub fn new(chain_source: Option<C>, broadcaster: T, logger: L, feeest: F, persister: P) -> Self {
+	pub fn new(chain_source: Option<C>, broadcaster: T,  yuv_broadcaster: Option<YT>, logger: L, feeest: F, persister: P) -> Self {
 		Self {
 			monitors: RwLock::new(HashMap::new()),
 			sync_persistence_id: AtomicCounter::new(),
 			chain_source,
 			broadcaster,
+			yuv_broadcaster,
 			logger,
 			fee_estimator: feeest,
 			persister,
@@ -620,17 +625,21 @@ where C::Target: chain::Filter,
 		let monitors = self.monitors.read().unwrap();
 		for (_, monitor_holder) in &*monitors {
 			monitor_holder.monitor.rebroadcast_pending_claims(
-				&*self.broadcaster, &*self.fee_estimator, &*self.logger
+				&*self.broadcaster,
+				self.yuv_broadcaster.as_deref(),
+				&*self.fee_estimator,
+				&*self.logger,
 			)
 		}
 	}
 }
 
-impl<ChannelSigner: WriteableEcdsaChannelSigner, C: Deref, T: Deref, F: Deref, L: Deref, P: Deref>
-chain::Listen for ChainMonitor<ChannelSigner, C, T, F, L, P>
+impl<ChannelSigner: WriteableEcdsaChannelSigner, C: Deref, T: Deref, YT: Deref, F: Deref, L: Deref, P: Deref>
+chain::Listen for ChainMonitor<ChannelSigner, C, T, YT, F, L, P>
 where
 	C::Target: chain::Filter,
 	T::Target: BroadcasterInterface,
+	YT::Target: YuvBroadcaster,
 	F::Target: FeeEstimator,
 	L::Target: Logger,
 	P::Target: Persist<ChannelSigner>,
@@ -639,7 +648,8 @@ where
 		log_debug!(self.logger, "New best block {} at height {} provided via block_connected", header.block_hash(), height);
 		self.process_chain_data(header, Some(height), &txdata, |monitor, txdata| {
 			monitor.block_connected(
-				header, txdata, height, &*self.broadcaster, &*self.fee_estimator, &*self.logger)
+				header, txdata, height, &*self.broadcaster, self.yuv_broadcaster.as_deref(), &*self.fee_estimator, &*self.logger,
+			)
 		});
 	}
 
@@ -648,16 +658,18 @@ where
 		log_debug!(self.logger, "Latest block {} at height {} removed via block_disconnected", header.block_hash(), height);
 		for monitor_state in monitor_states.values() {
 			monitor_state.monitor.block_disconnected(
-				header, height, &*self.broadcaster, &*self.fee_estimator, &*self.logger);
+				header, height, &*self.broadcaster, self.yuv_broadcaster.as_deref(), &*self.fee_estimator, &*self.logger,
+			);
 		}
 	}
 }
 
-impl<ChannelSigner: WriteableEcdsaChannelSigner, C: Deref, T: Deref, F: Deref, L: Deref, P: Deref>
-chain::Confirm for ChainMonitor<ChannelSigner, C, T, F, L, P>
+impl<ChannelSigner: WriteableEcdsaChannelSigner, C: Deref, T: Deref, YT: Deref, F: Deref, L: Deref, P: Deref>
+chain::Confirm for ChainMonitor<ChannelSigner, C, T, YT, F, L, P>
 where
 	C::Target: chain::Filter,
 	T::Target: BroadcasterInterface,
+	YT::Target: YuvBroadcaster,
 	F::Target: FeeEstimator,
 	L::Target: Logger,
 	P::Target: Persist<ChannelSigner>,
@@ -666,7 +678,8 @@ where
 		log_debug!(self.logger, "{} provided transactions confirmed at height {} in block {}", txdata.len(), height, header.block_hash());
 		self.process_chain_data(header, None, txdata, |monitor, txdata| {
 			monitor.transactions_confirmed(
-				header, txdata, height, &*self.broadcaster, &*self.fee_estimator, &*self.logger)
+				header, txdata, height, &*self.broadcaster, self.yuv_broadcaster.as_deref(), &*self.fee_estimator, &*self.logger,
+			)
 		});
 	}
 
@@ -674,7 +687,7 @@ where
 		log_debug!(self.logger, "Transaction {} reorganized out of chain", txid);
 		let monitor_states = self.monitors.read().unwrap();
 		for monitor_state in monitor_states.values() {
-			monitor_state.monitor.transaction_unconfirmed(txid, &*self.broadcaster, &*self.fee_estimator, &*self.logger);
+			monitor_state.monitor.transaction_unconfirmed(txid, &*self.broadcaster, self.yuv_broadcaster.as_deref(), &*self.fee_estimator, &*self.logger);
 		}
 	}
 
@@ -685,7 +698,8 @@ where
 			// it's still possible if a chain::Filter implementation returns a transaction.
 			debug_assert!(txdata.is_empty());
 			monitor.best_block_updated(
-				header, height, &*self.broadcaster, &*self.fee_estimator, &*self.logger)
+				header, height, &*self.broadcaster, self.yuv_broadcaster.as_deref(), &*self.fee_estimator, &*self.logger,
+			)
 		});
 	}
 
@@ -702,13 +716,71 @@ where
 	}
 }
 
-impl<ChannelSigner: WriteableEcdsaChannelSigner, C: Deref , T: Deref , F: Deref , L: Deref , P: Deref >
-chain::Watch<ChannelSigner> for ChainMonitor<ChannelSigner, C, T, F, L, P>
-where C::Target: chain::Filter,
-	    T::Target: BroadcasterInterface,
-	    F::Target: FeeEstimator,
-	    L::Target: Logger,
-	    P::Target: Persist<ChannelSigner>,
+impl<ChannelSigner: WriteableEcdsaChannelSigner, C: Deref, T: Deref, YT: Deref, F: Deref, L: Deref, P: Deref>
+chain::YuvConfirm for ChainMonitor<ChannelSigner, C, T, YT, F, L, P>
+	where
+		C::Target: Filter,
+		T::Target: BroadcasterInterface,
+		YT::Target: YuvBroadcaster,
+		F::Target: FeeEstimator,
+		L::Target: Logger,
+		P::Target: Persist<ChannelSigner>,
+{
+	fn yuv_transactions_confirmed(&self, yuv_txs: Vec<YuvTransaction>) {
+		let monitor_states = self.monitors.write().unwrap();
+
+		for (funding_outpoint, monitor_state) in monitor_states.iter() {
+			for yuv_tx in yuv_txs.iter() {
+				let monitor = &monitor_state.monitor;
+				if monitor.is_pending_yuv_tx(&yuv_tx.bitcoin_tx.txid()) {
+					monitor.yuv_transaction_confirmed(yuv_tx.clone());
+					let update_id = MonitorUpdateId {
+						contents: UpdateOrigin::ChainSync(self.sync_persistence_id.get_increment()),
+					};
+					let mut pending_monitor_updates = monitor_state.pending_monitor_updates
+						.lock()
+						.unwrap();
+
+					log_trace!(self.logger, "Syncing Channel Monitor for channel {}", log_funding_info!(monitor));
+					match self.persister.update_persisted_channel(*funding_outpoint, None, monitor, update_id) {
+						ChannelMonitorUpdateStatus::Completed =>
+							log_trace!(self.logger, "Finished syncing Channel Monitor for channel {}", log_funding_info!(monitor)),
+						ChannelMonitorUpdateStatus::InProgress => {
+							log_debug!(self.logger, "Channel Monitor sync for channel {} in progress, holding events until completion!", log_funding_info!(monitor));
+							pending_monitor_updates.push(update_id);
+						},
+						ChannelMonitorUpdateStatus::UnrecoverableError => {
+							const ERR_STR: &str = "ChannelMonitor[Update] persistence failed unrecoverably. This indicates we cannot continue normal operation and must shut down.";
+							log_error!(self.logger, "{}", ERR_STR);
+							panic!("{}", ERR_STR);
+						},
+					}
+				}
+			}
+		}
+	}
+
+	fn get_pending_yuv_txs(&self) -> Vec<Txid> {
+		let mut pending_yuv_txs = Vec::new();
+		let monitor_states = self.monitors.read().unwrap();
+
+		for (_, monitor_state) in monitor_states.iter() {
+			pending_yuv_txs.append(&mut monitor_state.monitor.get_pending_yuv_transactions());
+		}
+
+		pending_yuv_txs
+	}
+}
+
+impl<ChannelSigner: WriteableEcdsaChannelSigner, C: Deref , T: Deref, YT: Deref, F: Deref , L: Deref , P: Deref>
+chain::Watch<ChannelSigner> for ChainMonitor<ChannelSigner, C, T, YT, F, L, P>
+where
+	C::Target: chain::Filter,
+	T::Target: BroadcasterInterface,
+	YT::Target: YuvBroadcaster,
+	F::Target: FeeEstimator,
+	L::Target: Logger,
+	P::Target: Persist<ChannelSigner>,
 {
 	fn watch_channel(&self, funding_outpoint: OutPoint, monitor: ChannelMonitor<ChannelSigner>) -> Result<ChannelMonitorUpdateStatus, ()> {
 		let mut monitors = self.monitors.write().unwrap();
@@ -766,7 +838,7 @@ where C::Target: chain::Filter,
 			Some(monitor_state) => {
 				let monitor = &monitor_state.monitor;
 				log_trace!(self.logger, "Updating ChannelMonitor for channel {}", log_funding_info!(monitor));
-				let update_res = monitor.update_monitor(update, &self.broadcaster, &self.fee_estimator, &self.logger);
+				let update_res = monitor.update_monitor(update, &self.broadcaster, self.yuv_broadcaster.as_deref(), &self.fee_estimator, &self.logger);
 
 				let update_id = MonitorUpdateId::from_monitor_update(update);
 				let mut pending_monitor_updates = monitor_state.pending_monitor_updates.lock().unwrap();
@@ -837,9 +909,10 @@ where C::Target: chain::Filter,
 	}
 }
 
-impl<ChannelSigner: WriteableEcdsaChannelSigner, C: Deref, T: Deref, F: Deref, L: Deref, P: Deref> events::EventsProvider for ChainMonitor<ChannelSigner, C, T, F, L, P>
+impl<ChannelSigner: WriteableEcdsaChannelSigner, C: Deref, T: Deref, YT: Deref, F: Deref, L: Deref, P: Deref> events::EventsProvider for ChainMonitor<ChannelSigner, C, T, YT, F, L, P>
 	where C::Target: chain::Filter,
 	      T::Target: BroadcasterInterface,
+		  YT::Target: YuvBroadcaster,
 	      F::Target: FeeEstimator,
 	      L::Target: Logger,
 	      P::Target: Persist<ChannelSigner>,

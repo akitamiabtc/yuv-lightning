@@ -89,6 +89,7 @@ pub(crate) enum Message<T> where T: core::fmt::Debug + Type + TestEq {
 	QueryChannelRange(msgs::QueryChannelRange),
 	ReplyChannelRange(msgs::ReplyChannelRange),
 	GossipTimestampFilter(msgs::GossipTimestampFilter),
+	UpdateBalance(msgs::UpdateBalance),
 	/// A message that could not be decoded because its type is unknown.
 	Unknown(u16),
 	/// A message that was produced by a [`CustomMessageReader`] and is to be handled by a
@@ -127,6 +128,7 @@ impl<T> Writeable for Message<T> where T: core::fmt::Debug + Type + TestEq {
 			&Message::UpdateFulfillHTLC(ref msg) => msg.write(writer),
 			&Message::UpdateFailHTLC(ref msg) => msg.write(writer),
 			&Message::UpdateFailMalformedHTLC(ref msg) => msg.write(writer),
+			&Message::UpdateBalance(ref msg) => msg.write(writer),
 			&Message::CommitmentSigned(ref msg) => msg.write(writer),
 			&Message::RevokeAndACK(ref msg) => msg.write(writer),
 			&Message::UpdateFee(ref msg) => msg.write(writer),
@@ -178,6 +180,7 @@ impl<T> Type for Message<T> where T: core::fmt::Debug + Type + TestEq {
 			&Message::UpdateFulfillHTLC(ref msg) => msg.type_id(),
 			&Message::UpdateFailHTLC(ref msg) => msg.type_id(),
 			&Message::UpdateFailMalformedHTLC(ref msg) => msg.type_id(),
+			&Message::UpdateBalance(ref msg) => msg.type_id(),
 			&Message::CommitmentSigned(ref msg) => msg.type_id(),
 			&Message::RevokeAndACK(ref msg) => msg.type_id(),
 			&Message::UpdateFee(ref msg) => msg.type_id(),
@@ -308,6 +311,9 @@ fn do_read<R: io::Read, T, H: core::ops::Deref>(buffer: &mut R, message_type: u1
 		},
 		msgs::UpdateFailMalformedHTLC::TYPE => {
 			Ok(Message::UpdateFailMalformedHTLC(Readable::read(buffer)?))
+		},
+		msgs::UpdateBalance::TYPE => {
+			Ok(Message::UpdateBalance(Readable::read(buffer)?))
 		},
 		msgs::CommitmentSigned::TYPE => {
 			Ok(Message::CommitmentSigned(Readable::read(buffer)?))
@@ -570,6 +576,11 @@ impl Encode for msgs::ReplyChannelRange {
 
 impl Encode for msgs::GossipTimestampFilter {
 	const TYPE: u16 = 265;
+}
+
+// TODO: Add to https://github.com/lightning/bolts/issues/716 if it will be used in the future.
+impl Encode for msgs::UpdateBalance {
+	const TYPE: u16 = 56789;
 }
 
 #[cfg(test)]

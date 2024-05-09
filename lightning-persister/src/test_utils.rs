@@ -8,6 +8,7 @@ use lightning::{check_closed_broadcast, check_closed_event, check_added_monitors
 use lightning::events::ClosureReason;
 
 use std::panic::RefUnwindSafe;
+use lightning::chain::chaininterface::YuvBroadcaster;
 
 pub(crate) fn do_read_write_remove_list_persist<K: KVStore + RefUnwindSafe>(kv_store: &K) {
 	let data = [42u8; 32];
@@ -62,8 +63,10 @@ pub(crate) fn do_read_write_remove_list_persist<K: KVStore + RefUnwindSafe>(kv_s
 pub(crate) fn do_test_store<K: KVStore>(store_0: &K, store_1: &K) {
 	let chanmon_cfgs = create_chanmon_cfgs(2);
 	let mut node_cfgs = create_node_cfgs(2, &chanmon_cfgs);
-	let chain_mon_0 = test_utils::TestChainMonitor::new(Some(&chanmon_cfgs[0].chain_source), &chanmon_cfgs[0].tx_broadcaster, &chanmon_cfgs[0].logger, &chanmon_cfgs[0].fee_estimator, store_0, node_cfgs[0].keys_manager);
-	let chain_mon_1 = test_utils::TestChainMonitor::new(Some(&chanmon_cfgs[1].chain_source), &chanmon_cfgs[1].tx_broadcaster, &chanmon_cfgs[1].logger, &chanmon_cfgs[1].fee_estimator, store_1, node_cfgs[1].keys_manager);
+	let yuv_broadcaster_0 = chanmon_cfgs[0].yuv_tx_broadcaster.as_ref().map(|v| v as &dyn YuvBroadcaster);
+	let yuv_broadcaster_1 = chanmon_cfgs[1].yuv_tx_broadcaster.as_ref().map(|v| v as &dyn YuvBroadcaster);
+	let chain_mon_0 = test_utils::TestChainMonitor::new(Some(&chanmon_cfgs[0].chain_source), &chanmon_cfgs[0].tx_broadcaster, yuv_broadcaster_0, &chanmon_cfgs[0].logger, &chanmon_cfgs[0].fee_estimator, store_0, node_cfgs[0].keys_manager);
+	let chain_mon_1 = test_utils::TestChainMonitor::new(Some(&chanmon_cfgs[1].chain_source), &chanmon_cfgs[1].tx_broadcaster, yuv_broadcaster_1, &chanmon_cfgs[1].logger, &chanmon_cfgs[1].fee_estimator, store_1, node_cfgs[1].keys_manager);
 	node_cfgs[0].chain_monitor = chain_mon_0;
 	node_cfgs[1].chain_monitor = chain_mon_1;
 	let node_chanmgrs = create_node_chanmgrs(2, &node_cfgs, &[None, None]);

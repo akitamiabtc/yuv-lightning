@@ -12,8 +12,8 @@
 //! claim outputs on-chain.
 
 use crate::chain;
-use crate::chain::{ChannelMonitorUpdateStatus, Confirm, Listen, Watch};
-use crate::chain::chaininterface::LowerBoundedFeeEstimator;
+use crate::chain::{ChannelMonitorUpdateStatus, Confirm, Listen, Watch, YuvConfirm};
+use crate::chain::chaininterface::{LowerBoundedFeeEstimator, YuvBroadcaster};
 use crate::chain::channelmonitor;
 use crate::chain::channelmonitor::{CLOSED_CHANNEL_UPDATE_ID, CLTV_CLAIM_BUFFER, LATENCY_GRACE_PERIOD_BLOCKS, ANTI_REORG_DELAY};
 use crate::chain::transaction::OutPoint;
@@ -56,6 +56,7 @@ use alloc::collections::BTreeSet;
 use core::default::Default;
 use core::iter::repeat;
 use bitcoin::hashes::Hash;
+use yuv_pixels::Luma;
 use crate::sync::{Arc, Mutex, RwLock};
 
 use crate::ln::functional_test_utils::*;
@@ -81,7 +82,7 @@ fn test_insane_channel_opens() {
 	let push_msat = (channel_value_sat - channel_reserve_satoshis) * 1000;
 
 	// Have node0 initiate a channel to node1 with aforementioned parameters
-	nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), channel_value_sat, push_msat, 42, None).unwrap();
+	nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), channel_value_sat, push_msat, 42, None, None).unwrap();
 
 	// Extract the channel open message from node0 to node1
 	let open_channel_message = get_event_msg!(nodes[0], MessageSendEvent::SendOpenChannel, nodes[1].node.get_our_node_id());
@@ -135,7 +136,7 @@ fn test_funding_exceeds_no_wumbo_limit() {
 	let node_chanmgrs = create_node_chanmgrs(2, &node_cfgs, &[None, None]);
 	let nodes = create_network(2, &node_cfgs, &node_chanmgrs);
 
-	match nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), MAX_FUNDING_SATOSHIS_NO_WUMBO + 1, 0, 42, None) {
+	match nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), MAX_FUNDING_SATOSHIS_NO_WUMBO + 1, 0, 42, None, None) {
 		Err(APIError::APIMisuseError { err }) => {
 			assert_eq!(format!("funding_value must not exceed {}, it was {}", MAX_FUNDING_SATOSHIS_NO_WUMBO, MAX_FUNDING_SATOSHIS_NO_WUMBO + 1), err);
 		},
@@ -161,7 +162,7 @@ fn do_test_counterparty_no_reserve(send_from_initiator: bool) {
 	push_amt -= feerate_per_kw as u64 * (commitment_tx_base_weight(&channel_type_features) + 4 * COMMITMENT_TX_WEIGHT_PER_HTLC) / 1000 * 1000;
 	push_amt -= get_holder_selected_channel_reserve_satoshis(100_000, &default_config) * 1000;
 
-	let temp_channel_id = nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 100_000, if send_from_initiator { 0 } else { push_amt }, 42, None).unwrap();
+	let temp_channel_id = nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 100_000, if send_from_initiator { 0 } else { push_amt }, 42, None, None).unwrap();
 	let mut open_channel_message = get_event_msg!(nodes[0], MessageSendEvent::SendOpenChannel, nodes[1].node.get_our_node_id());
 	if !send_from_initiator {
 		open_channel_message.channel_reserve_satoshis = 0;
@@ -455,12 +456,12 @@ fn test_multi_flight_update_fee() {
 	// Create the (3) update_fee message that nodes[0] will generate before it does...
 	let mut update_msg_2 = msgs::UpdateFee {
 		channel_id: update_msg_1.channel_id.clone(),
-		feerate_per_kw: (initial_feerate + 30) as u32,
+		feerate_per_kw: initial_feerate + 30,
 	};
 
 	nodes[1].node.handle_update_fee(&nodes[0].node.get_our_node_id(), &update_msg_2);
 
-	update_msg_2.feerate_per_kw = (initial_feerate + 40) as u32;
+	update_msg_2.feerate_per_kw = initial_feerate + 40;
 	// Deliver (3)
 	nodes[1].node.handle_update_fee(&nodes[0].node.get_our_node_id(), &update_msg_2);
 
@@ -523,7 +524,7 @@ fn do_test_sanity_on_in_flight_opens(steps: u8) {
 	}
 
 	if steps & 0x0f == 0 { return; }
-	nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 100000, 10001, 42, None).unwrap();
+	nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 100000, 10001, 42, None, None).unwrap();
 	let open_channel = get_event_msg!(nodes[0], MessageSendEvent::SendOpenChannel, nodes[1].node.get_our_node_id());
 
 	if steps & 0x0f == 1 { return; }
@@ -536,7 +537,7 @@ fn do_test_sanity_on_in_flight_opens(steps: u8) {
 	let (temporary_channel_id, tx, funding_output) = create_funding_transaction(&nodes[0], &nodes[1].node.get_our_node_id(), 100000, 42);
 
 	if steps & 0x0f == 3 { return; }
-	nodes[0].node.funding_transaction_generated(&temporary_channel_id, &nodes[1].node.get_our_node_id(), tx.clone()).unwrap();
+	nodes[0].node.funding_transaction_generated(&temporary_channel_id, &nodes[1].node.get_our_node_id(), tx.clone(), None).unwrap();
 	check_added_monitors!(nodes[0], 0);
 	let funding_created = get_event_msg!(nodes[0], MessageSendEvent::SendFundingCreated, nodes[1].node.get_our_node_id());
 
@@ -725,7 +726,7 @@ fn test_update_fee_that_funder_cannot_afford() {
 
 	// Assemble the set of keys we can use for signatures for our commitment_signed message.
 	let commit_tx_keys = chan_utils::TxCreationKeys::derive_new(&secp_ctx, &remote_point, &remote_delayed_payment_basepoint,
-		&remote_htlc_basepoint, &local_revocation_basepoint, &local_htlc_basepoint);
+		&remote_htlc_basepoint, &local_revocation_basepoint, &local_htlc_basepoint, None);
 
 	let res = {
 		let per_peer_state = nodes[0].node.per_peer_state.read().unwrap();
@@ -743,9 +744,10 @@ fn test_update_fee_that_funder_cannot_afford() {
 			commit_tx_keys.clone(),
 			non_buffer_feerate + 4,
 			&mut htlcs,
-			&local_chan.context.channel_transaction_parameters.as_counterparty_broadcastable()
+			&local_chan.context.channel_transaction_parameters.as_counterparty_broadcastable(),
+			None, None, None,
 		);
-		local_chan_signer.as_ecdsa().unwrap().sign_counterparty_commitment(&commitment_tx, Vec::new(), &secp_ctx).unwrap()
+		local_chan_signer.as_ecdsa().unwrap().sign_counterparty_commitment(&commitment_tx, Vec::new(), None, &secp_ctx).unwrap()
 	};
 
 	let commit_signed_msg = msgs::CommitmentSigned {
@@ -795,7 +797,7 @@ fn test_update_fee_with_fundee_update_add_htlc() {
 	let events_0 = nodes[0].node.get_and_clear_pending_msg_events();
 	assert_eq!(events_0.len(), 1);
 	let (update_msg, commitment_signed) = match events_0[0] {
-			MessageSendEvent::UpdateHTLCs { node_id:_, updates: msgs::CommitmentUpdate { update_add_htlcs:_, update_fulfill_htlcs:_, update_fail_htlcs:_, update_fail_malformed_htlcs:_, ref update_fee, ref commitment_signed } } => {
+		MessageSendEvent::UpdateHTLCs { node_id:_, updates: msgs::CommitmentUpdate { update_add_htlcs:_, update_fulfill_htlcs:_, update_fail_htlcs:_, update_fail_malformed_htlcs:_, ref update_fee, ref commitment_signed } } => {
 			(update_fee.as_ref(), commitment_signed)
 		},
 		_ => panic!("Unexpected event"),
@@ -809,7 +811,7 @@ fn test_update_fee_with_fundee_update_add_htlc() {
 
 	// nothing happens since node[1] is in AwaitingRemoteRevoke
 	nodes[1].node.send_payment_with_route(&route, our_payment_hash,
-		RecipientOnionFields::secret_only(our_payment_secret), PaymentId(our_payment_hash.0)).unwrap();
+	RecipientOnionFields::secret_only(our_payment_secret), PaymentId(our_payment_hash.0)).unwrap();
 	{
 		let mut added_monitors = nodes[0].chain_monitor.added_monitors.lock().unwrap();
 		assert_eq!(added_monitors.len(), 0);
@@ -1038,6 +1040,7 @@ fn fake_network_test() {
 		fee_msat: 0,
 		cltv_expiry_delta: chan_3.0.contents.cltv_expiry_delta as u32,
 		maybe_announced_channel: true,
+		// yuv_fee: None,
 	});
 	hops.push(RouteHop {
 		pubkey: nodes[3].node.get_our_node_id(),
@@ -1047,6 +1050,7 @@ fn fake_network_test() {
 		fee_msat: 0,
 		cltv_expiry_delta: chan_4.1.contents.cltv_expiry_delta as u32,
 		maybe_announced_channel: true,
+		// yuv_fee: None,
 	});
 	hops.push(RouteHop {
 		pubkey: nodes[1].node.get_our_node_id(),
@@ -1056,11 +1060,12 @@ fn fake_network_test() {
 		fee_msat: 1000000,
 		cltv_expiry_delta: TEST_FINAL_CLTV,
 		maybe_announced_channel: true,
+		// yuv_fee: None,
 	});
 	hops[1].fee_msat = chan_4.1.contents.fee_base_msat as u64 + chan_4.1.contents.fee_proportional_millionths as u64 * hops[2].fee_msat as u64 / 1000000;
 	hops[0].fee_msat = chan_3.0.contents.fee_base_msat as u64 + chan_3.0.contents.fee_proportional_millionths as u64 * hops[1].fee_msat as u64 / 1000000;
 	let payment_preimage_1 = send_along_route(&nodes[1],
-		Route { paths: vec![Path { hops, blinded_tail: None }], route_params: None },
+		Route { paths: vec![Path { hops, blinded_tail: None, chroma: None, }], route_params: None },
 			&vec!(&nodes[2], &nodes[3], &nodes[1])[..], 1000000).0;
 
 	let mut hops = Vec::with_capacity(3);
@@ -1072,6 +1077,7 @@ fn fake_network_test() {
 		fee_msat: 0,
 		cltv_expiry_delta: chan_3.1.contents.cltv_expiry_delta as u32,
 		maybe_announced_channel: true,
+		// yuv_fee: None,
 	});
 	hops.push(RouteHop {
 		pubkey: nodes[2].node.get_our_node_id(),
@@ -1081,6 +1087,7 @@ fn fake_network_test() {
 		fee_msat: 0,
 		cltv_expiry_delta: chan_2.1.contents.cltv_expiry_delta as u32,
 		maybe_announced_channel: true,
+		// yuv_fee: None,
 	});
 	hops.push(RouteHop {
 		pubkey: nodes[1].node.get_our_node_id(),
@@ -1090,11 +1097,12 @@ fn fake_network_test() {
 		fee_msat: 1000000,
 		cltv_expiry_delta: TEST_FINAL_CLTV,
 		maybe_announced_channel: true,
+		// yuv_fee: None,
 	});
 	hops[1].fee_msat = chan_2.1.contents.fee_base_msat as u64 + chan_2.1.contents.fee_proportional_millionths as u64 * hops[2].fee_msat as u64 / 1000000;
 	hops[0].fee_msat = chan_3.1.contents.fee_base_msat as u64 + chan_3.1.contents.fee_proportional_millionths as u64 * hops[1].fee_msat as u64 / 1000000;
 	let payment_hash_2 = send_along_route(&nodes[1],
-		Route { paths: vec![Path { hops, blinded_tail: None }], route_params: None },
+		Route { paths: vec![Path { hops, blinded_tail: None, chroma: None, }], route_params: None },
 			&vec!(&nodes[3], &nodes[2], &nodes[1])[..], 1000000).1;
 
 	// Claim the rebalances...
@@ -1414,6 +1422,7 @@ fn test_fee_spike_violation_fails_htlc() {
 		cltv_expiry: htlc_cltv,
 		onion_routing_packet: onion_packet,
 		skimmed_fee_msat: None,
+		yuv_amount: None,
 	};
 
 	nodes[1].node.handle_update_add_htlc(&nodes[0].node.get_our_node_id(), &msg);
@@ -1459,7 +1468,7 @@ fn test_fee_spike_violation_fails_htlc() {
 
 	// Assemble the set of keys we can use for signatures for our commitment_signed message.
 	let commit_tx_keys = chan_utils::TxCreationKeys::derive_new(&secp_ctx, &remote_point, &remote_delayed_payment_basepoint,
-		&remote_htlc_basepoint, &local_revocation_basepoint, &local_htlc_basepoint);
+		&remote_htlc_basepoint, &local_revocation_basepoint, &local_htlc_basepoint, None);
 
 	// Build the remote commitment transaction so we can sign it, and then later use the
 	// signature for the commitment_signed message.
@@ -1468,6 +1477,7 @@ fn test_fee_spike_violation_fails_htlc() {
 	let accepted_htlc_info = chan_utils::HTLCOutputInCommitment {
 		offered: false,
 		amount_msat: 3460001,
+		yuv_amount: None,
 		cltv_expiry: htlc_cltv,
 		payment_hash,
 		transaction_output_index: Some(1),
@@ -1490,9 +1500,10 @@ fn test_fee_spike_violation_fails_htlc() {
 			commit_tx_keys.clone(),
 			feerate_per_kw,
 			&mut vec![(accepted_htlc_info, ())],
-			&local_chan.context.channel_transaction_parameters.as_counterparty_broadcastable()
+			&local_chan.context.channel_transaction_parameters.as_counterparty_broadcastable(),
+			None, None, None,
 		);
-		local_chan_signer.as_ecdsa().unwrap().sign_counterparty_commitment(&commitment_tx, Vec::new(), &secp_ctx).unwrap()
+		local_chan_signer.as_ecdsa().unwrap().sign_counterparty_commitment(&commitment_tx, Vec::new(), None, &secp_ctx).unwrap()
 	};
 
 	let commit_signed_msg = msgs::CommitmentSigned {
@@ -1610,6 +1621,7 @@ fn test_chan_reserve_violation_inbound_htlc_outbound_channel() {
 		cltv_expiry: htlc_cltv,
 		onion_routing_packet: onion_packet,
 		skimmed_fee_msat: None,
+		yuv_amount: None,
 	};
 
 	nodes[0].node.handle_update_add_htlc(&nodes[1].node.get_our_node_id(), &msg);
@@ -1681,13 +1693,13 @@ fn test_chan_init_feerate_unaffordability() {
 	// HTLC.
 	let mut push_amt = 100_000_000;
 	push_amt -= commit_tx_fee_msat(feerate_per_kw, MIN_AFFORDABLE_HTLC_COUNT as u64, &channel_type_features);
-	assert_eq!(nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 100_000, push_amt + 1, 42, None).unwrap_err(),
+	assert_eq!(nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 100_000, push_amt + 1, 42, None, None).unwrap_err(),
 		APIError::APIMisuseError { err: "Funding amount (356) can't even pay fee for initial commitment transaction fee of 357.".to_string() });
 
 	// During open, we don't have a "counterparty channel reserve" to check against, so that
 	// requirement only comes into play on the open_channel handling side.
 	push_amt -= get_holder_selected_channel_reserve_satoshis(100_000, &default_config) * 1000;
-	nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 100_000, push_amt, 42, None).unwrap();
+	nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 100_000, push_amt, 42, None, None).unwrap();
 	let mut open_channel_msg = get_event_msg!(nodes[0], MessageSendEvent::SendOpenChannel, nodes[1].node.get_our_node_id());
 	open_channel_msg.push_msat += 1;
 	nodes[1].node.handle_open_channel(&nodes[0].node.get_our_node_id(), &open_channel_msg);
@@ -1788,6 +1800,7 @@ fn test_chan_reserve_violation_inbound_htlc_inbound_chan() {
 		cltv_expiry: htlc_cltv,
 		onion_routing_packet: onion_packet,
 		skimmed_fee_msat: None,
+		yuv_amount: None,
 	};
 
 	nodes[1].node.handle_update_add_htlc(&nodes[0].node.get_our_node_id(), &msg);
@@ -2880,7 +2893,7 @@ fn test_htlc_on_chain_success() {
 	}
 	let chan_id = Some(chan_1.2);
 	match forwarded_events[1] {
-		Event::PaymentForwarded { fee_earned_msat, prev_channel_id, claim_from_onchain_tx, next_channel_id, outbound_amount_forwarded_msat } => {
+		Event::PaymentForwarded { fee_earned_msat, prev_channel_id, claim_from_onchain_tx, next_channel_id, outbound_amount_forwarded_msat, .. } => {
 			assert_eq!(fee_earned_msat, Some(1000));
 			assert_eq!(prev_channel_id, chan_id);
 			assert_eq!(claim_from_onchain_tx, true);
@@ -2890,7 +2903,7 @@ fn test_htlc_on_chain_success() {
 		_ => panic!()
 	}
 	match forwarded_events[2] {
-		Event::PaymentForwarded { fee_earned_msat, prev_channel_id, claim_from_onchain_tx, next_channel_id, outbound_amount_forwarded_msat } => {
+		Event::PaymentForwarded { fee_earned_msat, prev_channel_id, claim_from_onchain_tx, next_channel_id, outbound_amount_forwarded_msat, .. } => {
 			assert_eq!(fee_earned_msat, Some(1000));
 			assert_eq!(prev_channel_id, chan_id);
 			assert_eq!(claim_from_onchain_tx, true);
@@ -3509,6 +3522,7 @@ fn fail_backward_pending_htlc_upon_channel_failure() {
 			cltv_expiry,
 			onion_routing_packet,
 			skimmed_fee_msat: None,
+			yuv_amount: None,
 		};
 		nodes[0].node.handle_update_add_htlc(&nodes[1].node.get_our_node_id(), &update_add_htlc);
 	}
@@ -3640,7 +3654,7 @@ fn test_force_close_fail_back() {
 	// Now check that if we add the preimage to ChannelMonitor it broadcasts our HTLC-Success..
 	{
 		get_monitor!(nodes[2], payment_event.commitment_msg.channel_id)
-			.provide_payment_preimage(&our_payment_hash, &our_payment_preimage, &node_cfgs[2].tx_broadcaster, &LowerBoundedFeeEstimator::new(node_cfgs[2].fee_estimator), &node_cfgs[2].logger);
+			.provide_payment_preimage(&our_payment_hash, &our_payment_preimage, &node_cfgs[2].tx_broadcaster, node_cfgs[2].yuv_tx_broadcaster.as_deref(), &LowerBoundedFeeEstimator::new(node_cfgs[2].fee_estimator), &node_cfgs[2].logger);
 	}
 	mine_transaction(&nodes[2], &tx);
 	let node_txn = nodes[2].tx_broadcaster.txn_broadcasted.lock().unwrap();
@@ -3695,7 +3709,7 @@ fn test_peer_disconnected_before_funding_broadcasted() {
 
 	// Open a channel between `nodes[0]` and `nodes[1]`, for which the funding transaction is never
 	// broadcasted, even though it's created by `nodes[0]`.
-	let expected_temporary_channel_id = nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 1_000_000, 500_000_000, 42, None).unwrap();
+	let expected_temporary_channel_id = nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 1_000_000, 500_000_000, 42, None, None).unwrap();
 	let open_channel = get_event_msg!(nodes[0], MessageSendEvent::SendOpenChannel, nodes[1].node.get_our_node_id());
 	nodes[1].node.handle_open_channel(&nodes[0].node.get_our_node_id(), &open_channel);
 	let accept_channel = get_event_msg!(nodes[1], MessageSendEvent::SendAcceptChannel, nodes[0].node.get_our_node_id());
@@ -3704,7 +3718,7 @@ fn test_peer_disconnected_before_funding_broadcasted() {
 	let (temporary_channel_id, tx, _funding_output) = create_funding_transaction(&nodes[0], &nodes[1].node.get_our_node_id(), 1_000_000, 42);
 	assert_eq!(temporary_channel_id, expected_temporary_channel_id);
 
-	assert!(nodes[0].node.funding_transaction_generated(&temporary_channel_id, &nodes[1].node.get_our_node_id(), tx.clone()).is_ok());
+	assert!(nodes[0].node.funding_transaction_generated(&temporary_channel_id, &nodes[1].node.get_our_node_id(), tx.clone(), None).is_ok());
 
 	let funding_created_msg = get_event_msg!(nodes[0], MessageSendEvent::SendFundingCreated, nodes[1].node.get_our_node_id());
 	assert_eq!(funding_created_msg.temporary_channel_id, expected_temporary_channel_id);
@@ -4904,7 +4918,7 @@ fn test_onchain_to_onchain_claim() {
 		_ => panic!("Unexpected event"),
 	}
 	match events[1] {
-		Event::PaymentForwarded { fee_earned_msat, prev_channel_id, claim_from_onchain_tx, next_channel_id, outbound_amount_forwarded_msat } => {
+		Event::PaymentForwarded { fee_earned_msat, prev_channel_id, claim_from_onchain_tx, next_channel_id, outbound_amount_forwarded_msat, .. } => {
 			assert_eq!(fee_earned_msat, Some(1000));
 			assert_eq!(prev_channel_id, Some(chan_1.2));
 			assert_eq!(claim_from_onchain_tx, true);
@@ -5521,12 +5535,13 @@ fn test_key_derivation_params() {
 
 	// We manually create the node configuration to backup the seed.
 	let seed = [42; 32];
+	let yuv_broadcaster = chanmon_cfgs[0].yuv_tx_broadcaster.as_ref().map(|v| v as &YuvBroadcaster);
 	let keys_manager = test_utils::TestKeysInterface::new(&seed, Network::Testnet);
-	let chain_monitor = test_utils::TestChainMonitor::new(Some(&chanmon_cfgs[0].chain_source), &chanmon_cfgs[0].tx_broadcaster, &chanmon_cfgs[0].logger, &chanmon_cfgs[0].fee_estimator, &chanmon_cfgs[0].persister, &keys_manager);
+	let chain_monitor = test_utils::TestChainMonitor::new(Some(&chanmon_cfgs[0].chain_source), &chanmon_cfgs[0].tx_broadcaster, yuv_broadcaster, &chanmon_cfgs[0].logger, &chanmon_cfgs[0].fee_estimator, &chanmon_cfgs[0].persister, &keys_manager);
 	let network_graph = Arc::new(NetworkGraph::new(Network::Testnet, &chanmon_cfgs[0].logger));
 	let scorer = RwLock::new(test_utils::TestScorer::new());
 	let router = test_utils::TestRouter::new(network_graph.clone(), &scorer);
-	let node = NodeCfg { chain_source: &chanmon_cfgs[0].chain_source, logger: &chanmon_cfgs[0].logger, tx_broadcaster: &chanmon_cfgs[0].tx_broadcaster, fee_estimator: &chanmon_cfgs[0].fee_estimator, router, chain_monitor, keys_manager: &keys_manager, network_graph, node_seed: seed, override_init_features: alloc::rc::Rc::new(core::cell::RefCell::new(None)) };
+	let node = NodeCfg { chain_source: &chanmon_cfgs[0].chain_source, logger: &chanmon_cfgs[0].logger, tx_broadcaster: &chanmon_cfgs[0].tx_broadcaster, yuv_tx_broadcaster: chanmon_cfgs[0].yuv_tx_broadcaster.as_ref(), fee_estimator: &chanmon_cfgs[0].fee_estimator, router, chain_monitor, keys_manager: &keys_manager, network_graph, node_seed: seed, override_init_features: alloc::rc::Rc::new(core::cell::RefCell::new(None)) };
 	let mut node_cfgs = create_node_cfgs(3, &chanmon_cfgs);
 	node_cfgs.remove(0);
 	node_cfgs.insert(0, node);
@@ -5786,14 +5801,14 @@ fn bolt2_open_channel_sending_node_checks_part1() { //This test needs to be on i
 	// BOLT #2 spec: Sending node must ensure temporary_channel_id is unique from any other channel ID with the same peer.
 	let channel_value_satoshis=10000;
 	let push_msat=10001;
-	nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), channel_value_satoshis, push_msat, 42, None).unwrap();
+	nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), channel_value_satoshis, push_msat, 42, None, None).unwrap();
 	let node0_to_1_send_open_channel = get_event_msg!(nodes[0], MessageSendEvent::SendOpenChannel, nodes[1].node.get_our_node_id());
 	nodes[1].node.handle_open_channel(&nodes[0].node.get_our_node_id(), &node0_to_1_send_open_channel);
 	get_event_msg!(nodes[1], MessageSendEvent::SendAcceptChannel, nodes[0].node.get_our_node_id());
 
 	// Create a second channel with the same random values. This used to panic due to a colliding
 	// channel_id, but now panics due to a colliding outbound SCID alias.
-	assert!(nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), channel_value_satoshis, push_msat, 42, None).is_err());
+	assert!(nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), channel_value_satoshis, push_msat, 42, None, None).is_err());
 }
 
 #[test]
@@ -5806,18 +5821,18 @@ fn bolt2_open_channel_sending_node_checks_part2() {
 	// BOLT #2 spec: Sending node must set funding_satoshis to less than 2^24 satoshis
 	let channel_value_satoshis=2^24;
 	let push_msat=10001;
-	assert!(nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), channel_value_satoshis, push_msat, 42, None).is_err());
+	assert!(nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), channel_value_satoshis, push_msat, 42, None, None).is_err());
 
 	// BOLT #2 spec: Sending node must set push_msat to equal or less than 1000 * funding_satoshis
 	let channel_value_satoshis=10000;
 	// Test when push_msat is equal to 1000 * funding_satoshis.
 	let push_msat=1000*channel_value_satoshis+1;
-	assert!(nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), channel_value_satoshis, push_msat, 42, None).is_err());
+	assert!(nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), channel_value_satoshis, push_msat, 42, None, None).is_err());
 
 	// BOLT #2 spec: Sending node must set set channel_reserve_satoshis greater than or equal to dust_limit_satoshis
 	let channel_value_satoshis=10000;
 	let push_msat=10001;
-	assert!(nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), channel_value_satoshis, push_msat, 42, None).is_ok()); //Create a valid channel
+	assert!(nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), channel_value_satoshis, push_msat, 42, None, None).is_ok()); //Create a valid channel
 	let node0_to_1_send_open_channel = get_event_msg!(nodes[0], MessageSendEvent::SendOpenChannel, nodes[1].node.get_our_node_id());
 	assert!(node0_to_1_send_open_channel.channel_reserve_satoshis>=node0_to_1_send_open_channel.dust_limit_satoshis);
 
@@ -5850,7 +5865,7 @@ fn bolt2_open_channel_sane_dust_limit() {
 
 	let channel_value_satoshis=1000000;
 	let push_msat=10001;
-	nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), channel_value_satoshis, push_msat, 42, None).unwrap();
+	nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), channel_value_satoshis, push_msat, 42, None, None).unwrap();
 	let mut node0_to_1_send_open_channel = get_event_msg!(nodes[0], MessageSendEvent::SendOpenChannel, nodes[1].node.get_our_node_id());
 	node0_to_1_send_open_channel.dust_limit_satoshis = 547;
 	node0_to_1_send_open_channel.channel_reserve_satoshis = 100001;
@@ -6456,6 +6471,7 @@ fn test_update_add_htlc_bolt2_receiver_check_max_htlc_limit() {
 		cltv_expiry: htlc_cltv,
 		onion_routing_packet: onion_packet.clone(),
 		skimmed_fee_msat: None,
+		yuv_amount: None,
 	};
 
 	for i in 0..50 {
@@ -7156,7 +7172,7 @@ fn test_user_configurable_csv_delay() {
 	// We test config.our_to_self > BREAKDOWN_TIMEOUT is enforced in OutboundV1Channel::new()
 	if let Err(error) = OutboundV1Channel::new(&LowerBoundedFeeEstimator::new(&test_utils::TestFeeEstimator { sat_per_kw: Mutex::new(253) }),
 		&nodes[0].keys_manager, &nodes[0].keys_manager, nodes[1].node.get_our_node_id(), &nodes[1].node.init_features(), 1000000, 1000000, 0,
-		&low_our_to_self_config, 0, 42)
+		&low_our_to_self_config, 0, 42, None)
 	{
 		match error {
 			APIError::APIMisuseError { err } => { assert!(regex::Regex::new(r"Configured with an unreasonable our_to_self_delay \(\d+\) putting user funds at risks").unwrap().is_match(err.as_str())); },
@@ -7165,7 +7181,7 @@ fn test_user_configurable_csv_delay() {
 	} else { assert!(false) }
 
 	// We test config.our_to_self > BREAKDOWN_TIMEOUT is enforced in InboundV1Channel::new()
-	nodes[1].node.create_channel(nodes[0].node.get_our_node_id(), 1000000, 1000000, 42, None).unwrap();
+	nodes[1].node.create_channel(nodes[0].node.get_our_node_id(), 1000000, 1000000, 42, None, None).unwrap();
 	let mut open_channel = get_event_msg!(nodes[1], MessageSendEvent::SendOpenChannel, nodes[0].node.get_our_node_id());
 	open_channel.to_self_delay = 200;
 	if let Err(error) = InboundV1Channel::new(&LowerBoundedFeeEstimator::new(&test_utils::TestFeeEstimator { sat_per_kw: Mutex::new(253) }),
@@ -7179,7 +7195,7 @@ fn test_user_configurable_csv_delay() {
 	} else { assert!(false); }
 
 	// We test msg.to_self_delay <= config.their_to_self_delay is enforced in Chanel::accept_channel()
-	nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 1000000, 1000000, 42, None).unwrap();
+	nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 1000000, 1000000, 42, None, None).unwrap();
 	nodes[1].node.handle_open_channel(&nodes[0].node.get_our_node_id(), &get_event_msg!(nodes[0], MessageSendEvent::SendOpenChannel, nodes[1].node.get_our_node_id()));
 	let mut accept_channel = get_event_msg!(nodes[1], MessageSendEvent::SendAcceptChannel, nodes[0].node.get_our_node_id());
 	accept_channel.to_self_delay = 200;
@@ -7197,7 +7213,7 @@ fn test_user_configurable_csv_delay() {
 	check_closed_event!(nodes[0], 1, ClosureReason::ProcessingError { err: reason_msg }, [nodes[1].node.get_our_node_id()], 1000000);
 
 	// We test msg.to_self_delay <= config.their_to_self_delay is enforced in InboundV1Channel::new()
-	nodes[1].node.create_channel(nodes[0].node.get_our_node_id(), 1000000, 1000000, 42, None).unwrap();
+	nodes[1].node.create_channel(nodes[0].node.get_our_node_id(), 1000000, 1000000, 42, None, None).unwrap();
 	let mut open_channel = get_event_msg!(nodes[1], MessageSendEvent::SendOpenChannel, nodes[0].node.get_our_node_id());
 	open_channel.to_self_delay = 200;
 	if let Err(error) = InboundV1Channel::new(&LowerBoundedFeeEstimator::new(&test_utils::TestFeeEstimator { sat_per_kw: Mutex::new(253) }),
@@ -7879,7 +7895,7 @@ fn test_override_channel_config() {
 	let mut override_config = UserConfig::default();
 	override_config.channel_handshake_config.our_to_self_delay = 200;
 
-	nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 16_000_000, 12_000_000, 42, Some(override_config)).unwrap();
+	nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 16_000_000, 12_000_000, 42, None, Some(override_config)).unwrap();
 
 	// Assert the channel created by node0 is using the override config.
 	let res = get_event_msg!(nodes[0], MessageSendEvent::SendOpenChannel, nodes[1].node.get_our_node_id());
@@ -7896,7 +7912,7 @@ fn test_override_0msat_htlc_minimum() {
 	let node_chanmgrs = create_node_chanmgrs(2, &node_cfgs, &[None, Some(zero_config.clone())]);
 	let nodes = create_network(2, &node_cfgs, &node_chanmgrs);
 
-	nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 16_000_000, 12_000_000, 42, Some(zero_config)).unwrap();
+	nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 16_000_000, 12_000_000, 42, None, Some(zero_config)).unwrap();
 	let res = get_event_msg!(nodes[0], MessageSendEvent::SendOpenChannel, nodes[1].node.get_our_node_id());
 	assert_eq!(res.htlc_minimum_msat, 1);
 
@@ -7966,7 +7982,7 @@ fn test_manually_accept_inbound_channel_request() {
 	let node_chanmgrs = create_node_chanmgrs(2, &node_cfgs, &[None, Some(manually_accept_conf.clone())]);
 	let nodes = create_network(2, &node_cfgs, &node_chanmgrs);
 
-	let temp_channel_id = nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 100000, 10001, 42, Some(manually_accept_conf)).unwrap();
+	let temp_channel_id = nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 100000, 10001, 42, None, Some(manually_accept_conf)).unwrap();
 	let res = get_event_msg!(nodes[0], MessageSendEvent::SendOpenChannel, nodes[1].node.get_our_node_id());
 
 	nodes[1].node.handle_open_channel(&nodes[0].node.get_our_node_id(), &res);
@@ -8016,7 +8032,7 @@ fn test_manually_reject_inbound_channel_request() {
 	let node_chanmgrs = create_node_chanmgrs(2, &node_cfgs, &[None, Some(manually_accept_conf.clone())]);
 	let nodes = create_network(2, &node_cfgs, &node_chanmgrs);
 
-	nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 100000, 10001, 42, Some(manually_accept_conf)).unwrap();
+	nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 100000, 10001, 42, None, Some(manually_accept_conf)).unwrap();
 	let res = get_event_msg!(nodes[0], MessageSendEvent::SendOpenChannel, nodes[1].node.get_our_node_id());
 
 	nodes[1].node.handle_open_channel(&nodes[0].node.get_our_node_id(), &res);
@@ -8056,7 +8072,7 @@ fn test_can_not_accept_inbound_channel_twice() {
 	let node_chanmgrs = create_node_chanmgrs(2, &node_cfgs, &[None, Some(manually_accept_conf.clone())]);
 	let nodes = create_network(2, &node_cfgs, &node_chanmgrs);
 
-	nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 100000, 10001, 42, Some(manually_accept_conf)).unwrap();
+	nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 100000, 10001, 42, None, Some(manually_accept_conf)).unwrap();
 	let res = get_event_msg!(nodes[0], MessageSendEvent::SendOpenChannel, nodes[1].node.get_our_node_id());
 
 	nodes[1].node.handle_open_channel(&nodes[0].node.get_our_node_id(), &res);
@@ -8452,7 +8468,8 @@ fn test_update_err_monitor_lockdown() {
 			assert!(new_monitor == *monitor);
 			new_monitor
 		};
-		let watchtower = test_utils::TestChainMonitor::new(Some(&chain_source), &chanmon_cfgs[0].tx_broadcaster, &logger, &chanmon_cfgs[0].fee_estimator, &persister, &node_cfgs[0].keys_manager);
+		let yuv_broadcaster = chanmon_cfgs[0].yuv_tx_broadcaster.as_ref().map(|v| v as &YuvBroadcaster);
+		let watchtower = test_utils::TestChainMonitor::new(Some(&chain_source), &chanmon_cfgs[0].tx_broadcaster, yuv_broadcaster, &logger, &chanmon_cfgs[0].fee_estimator, &persister, &node_cfgs[0].keys_manager);
 		assert_eq!(watchtower.watch_channel(outpoint, new_monitor), Ok(ChannelMonitorUpdateStatus::Completed));
 		watchtower
 	};
@@ -8525,7 +8542,8 @@ fn test_concurrent_monitor_claim() {
 			assert!(new_monitor == *monitor);
 			new_monitor
 		};
-		let watchtower = test_utils::TestChainMonitor::new(Some(&chain_source), &alice_broadcaster, &logger, &chanmon_cfgs[0].fee_estimator, &persister, &node_cfgs[0].keys_manager);
+		let alice_yuv_broadcaster = chanmon_cfgs[0].yuv_tx_broadcaster.as_ref().map(|v| v as &YuvBroadcaster);
+		let watchtower = test_utils::TestChainMonitor::new(Some(&chain_source), &alice_broadcaster, alice_yuv_broadcaster, &logger, &chanmon_cfgs[0].fee_estimator, &persister, &node_cfgs[0].keys_manager);
 		assert_eq!(watchtower.watch_channel(outpoint, new_monitor), Ok(ChannelMonitorUpdateStatus::Completed));
 		watchtower
 	};
@@ -8548,6 +8566,7 @@ fn test_concurrent_monitor_claim() {
 	let logger = test_utils::TestLogger::with_id(format!("node {}", "Bob"));
 	let persister = test_utils::TestPersister::new();
 	let bob_broadcaster = test_utils::TestBroadcaster::with_blocks(Arc::clone(&alice_broadcaster.blocks));
+	let bob_yuv_broadcaster = &test_utils::TestYuvBroadcaster::new() as &YuvBroadcaster;
 	let watchtower_bob = {
 		let new_monitor = {
 			let monitor = nodes[0].chain_monitor.chain_monitor.get_monitor(outpoint).unwrap();
@@ -8556,7 +8575,7 @@ fn test_concurrent_monitor_claim() {
 			assert!(new_monitor == *monitor);
 			new_monitor
 		};
-		let watchtower = test_utils::TestChainMonitor::new(Some(&chain_source), &bob_broadcaster, &logger, &chanmon_cfgs[0].fee_estimator, &persister, &node_cfgs[0].keys_manager);
+		let watchtower = test_utils::TestChainMonitor::new(Some(&chain_source), &bob_broadcaster, Some(bob_yuv_broadcaster), &logger, &chanmon_cfgs[0].fee_estimator, &persister, &node_cfgs[0].keys_manager);
 		assert_eq!(watchtower.watch_channel(outpoint, new_monitor), Ok(ChannelMonitorUpdateStatus::Completed));
 		watchtower
 	};
@@ -8636,7 +8655,7 @@ fn test_pre_lockin_no_chan_closed_update() {
 	let nodes = create_network(2, &node_cfgs, &node_chanmgrs);
 
 	// Create an initial channel
-	nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 100000, 10001, 42, None).unwrap();
+	nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 100000, 10001, 42, None, None).unwrap();
 	let mut open_chan_msg = get_event_msg!(nodes[0], MessageSendEvent::SendOpenChannel, nodes[1].node.get_our_node_id());
 	nodes[1].node.handle_open_channel(&nodes[0].node.get_our_node_id(), &open_chan_msg);
 	let accept_chan_msg = get_event_msg!(nodes[1], MessageSendEvent::SendAcceptChannel, nodes[0].node.get_our_node_id());
@@ -8645,7 +8664,7 @@ fn test_pre_lockin_no_chan_closed_update() {
 	// Move the first channel through the funding flow...
 	let (temporary_channel_id, tx, _) = create_funding_transaction(&nodes[0], &nodes[1].node.get_our_node_id(), 100000, 42);
 
-	nodes[0].node.funding_transaction_generated(&temporary_channel_id, &nodes[1].node.get_our_node_id(), tx.clone()).unwrap();
+	nodes[0].node.funding_transaction_generated(&temporary_channel_id, &nodes[1].node.get_our_node_id(), tx.clone(), None).unwrap();
 	check_added_monitors!(nodes[0], 0);
 
 	let funding_created_msg = get_event_msg!(nodes[0], MessageSendEvent::SendFundingCreated, nodes[1].node.get_our_node_id());
@@ -8899,11 +8918,11 @@ fn test_duplicate_temporary_channel_id_from_different_peers() {
 	let nodes = create_network(3, &node_cfgs, &node_chanmgrs);
 
 	// Create an first channel channel
-	nodes[1].node.create_channel(nodes[0].node.get_our_node_id(), 100000, 10001, 42, None).unwrap();
+	nodes[1].node.create_channel(nodes[0].node.get_our_node_id(), 100000, 10001, 42, None, None).unwrap();
 	let mut open_chan_msg_chan_1_0 = get_event_msg!(nodes[1], MessageSendEvent::SendOpenChannel, nodes[0].node.get_our_node_id());
 
 	// Create an second channel
-	nodes[2].node.create_channel(nodes[0].node.get_our_node_id(), 100000, 10001, 43, None).unwrap();
+	nodes[2].node.create_channel(nodes[0].node.get_our_node_id(), 100000, 10001, 43, None, None).unwrap();
 	let mut open_chan_msg_chan_2_0 = get_event_msg!(nodes[2], MessageSendEvent::SendOpenChannel, nodes[0].node.get_our_node_id());
 
 	// Modify the `OpenChannel` from `nodes[2]` to `nodes[0]` to ensure that it uses the same
@@ -8954,7 +8973,7 @@ fn test_duplicate_chan_id() {
 	let nodes = create_network(2, &node_cfgs, &node_chanmgrs);
 
 	// Create an initial channel
-	nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 100000, 10001, 42, None).unwrap();
+	nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 100000, 10001, 42, None, None).unwrap();
 	let mut open_chan_msg = get_event_msg!(nodes[0], MessageSendEvent::SendOpenChannel, nodes[1].node.get_our_node_id());
 	nodes[1].node.handle_open_channel(&nodes[0].node.get_our_node_id(), &open_chan_msg);
 	nodes[0].node.handle_accept_channel(&nodes[1].node.get_our_node_id(), &get_event_msg!(nodes[1], MessageSendEvent::SendAcceptChannel, nodes[0].node.get_our_node_id()));
@@ -8981,7 +9000,7 @@ fn test_duplicate_chan_id() {
 	// Move the first channel through the funding flow...
 	let (temporary_channel_id, tx, funding_output) = create_funding_transaction(&nodes[0], &nodes[1].node.get_our_node_id(), 100000, 42);
 
-	nodes[0].node.funding_transaction_generated(&temporary_channel_id, &nodes[1].node.get_our_node_id(), tx.clone()).unwrap();
+	nodes[0].node.funding_transaction_generated(&temporary_channel_id, &nodes[1].node.get_our_node_id(), tx.clone(), None).unwrap();
 	check_added_monitors!(nodes[0], 0);
 
 	let mut funding_created_msg = get_event_msg!(nodes[0], MessageSendEvent::SendFundingCreated, nodes[1].node.get_our_node_id());
@@ -9022,7 +9041,7 @@ fn test_duplicate_chan_id() {
 	}
 
 	// Now try to create a second channel which has a duplicate funding output.
-	nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 100000, 10001, 42, None).unwrap();
+	nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 100000, 10001, 42, None, None).unwrap();
 	let open_chan_2_msg = get_event_msg!(nodes[0], MessageSendEvent::SendOpenChannel, nodes[1].node.get_our_node_id());
 	nodes[1].node.handle_open_channel(&nodes[0].node.get_our_node_id(), &open_chan_2_msg);
 	nodes[0].node.handle_accept_channel(&nodes[1].node.get_our_node_id(), &get_event_msg!(nodes[1], MessageSendEvent::SendAcceptChannel, nodes[0].node.get_our_node_id()));
@@ -9038,7 +9057,7 @@ fn test_duplicate_chan_id() {
 		match a_peer_state.channel_by_id.remove(&open_chan_2_msg.temporary_channel_id).unwrap() {
 			ChannelPhase::UnfundedOutboundV1(chan) => {
 				let logger = test_utils::TestLogger::new();
-				chan.get_funding_created(tx.clone(), funding_outpoint, false, &&logger).map_err(|_| ()).unwrap()
+				chan.get_funding_created(tx.clone(), funding_outpoint, false, None, &&logger).map_err(|_| ()).unwrap()
 			},
 			_ => panic!("Unexpected ChannelPhase variant"),
 		}
@@ -9170,7 +9189,7 @@ fn test_invalid_funding_tx() {
 	let node_chanmgrs = create_node_chanmgrs(2, &node_cfgs, &[None, None]);
 	let nodes = create_network(2, &node_cfgs, &node_chanmgrs);
 
-	nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 100_000, 10_000, 42, None).unwrap();
+	nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 100_000, 10_000, 42, None, None).unwrap();
 	nodes[1].node.handle_open_channel(&nodes[0].node.get_our_node_id(), &get_event_msg!(nodes[0], MessageSendEvent::SendOpenChannel, nodes[1].node.get_our_node_id()));
 	nodes[0].node.handle_accept_channel(&nodes[1].node.get_our_node_id(), &get_event_msg!(nodes[1], MessageSendEvent::SendAcceptChannel, nodes[0].node.get_our_node_id()));
 
@@ -9255,7 +9274,7 @@ fn test_coinbase_funding_tx() {
 	let node_chanmgrs = create_node_chanmgrs(2, &node_cfgs, &[None, None]);
 	let nodes = create_network(2, &node_cfgs, &node_chanmgrs);
 
-	nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 100000, 10001, 42, None).unwrap();
+	nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 100000, 10001, 42, None, None).unwrap();
 	let open_channel = get_event_msg!(nodes[0], MessageSendEvent::SendOpenChannel, nodes[1].node.get_our_node_id());
 
 	nodes[1].node.handle_open_channel(&nodes[0].node.get_our_node_id(), &open_channel);
@@ -9266,7 +9285,7 @@ fn test_coinbase_funding_tx() {
 	// Create the coinbase funding transaction.
 	let (temporary_channel_id, tx, _) = create_coinbase_funding_transaction(&nodes[0], &nodes[1].node.get_our_node_id(), 100000, 42);
 
-	nodes[0].node.funding_transaction_generated(&temporary_channel_id, &nodes[1].node.get_our_node_id(), tx.clone()).unwrap();
+	nodes[0].node.funding_transaction_generated(&temporary_channel_id, &nodes[1].node.get_our_node_id(), tx.clone(), None).unwrap();
 	check_added_monitors!(nodes[0], 0);
 	let funding_created = get_event_msg!(nodes[0], MessageSendEvent::SendFundingCreated, nodes[1].node.get_our_node_id());
 
@@ -9690,7 +9709,7 @@ fn do_test_max_dust_htlc_exposure(dust_outbound_balance: bool, exposure_breach_e
 	let node_chanmgrs = create_node_chanmgrs(2, &node_cfgs, &[Some(config), None]);
 	let mut nodes = create_network(2, &node_cfgs, &node_chanmgrs);
 
-	nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 1_000_000, 500_000_000, 42, None).unwrap();
+	nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 1_000_000, 500_000_000, 42, None, None).unwrap();
 	let mut open_channel = get_event_msg!(nodes[0], MessageSendEvent::SendOpenChannel, nodes[1].node.get_our_node_id());
 	open_channel.max_htlc_value_in_flight_msat = 50_000_000;
 	open_channel.max_accepted_htlcs = 60;
@@ -9716,7 +9735,7 @@ fn do_test_max_dust_htlc_exposure(dust_outbound_balance: bool, exposure_breach_e
 		}
 	}
 
-	nodes[0].node.funding_transaction_generated(&temporary_channel_id, &nodes[1].node.get_our_node_id(), tx.clone()).unwrap();
+	nodes[0].node.funding_transaction_generated(&temporary_channel_id, &nodes[1].node.get_our_node_id(), tx.clone(), None).unwrap();
 	nodes[1].node.handle_funding_created(&nodes[0].node.get_our_node_id(), &get_event_msg!(nodes[0], MessageSendEvent::SendFundingCreated, nodes[1].node.get_our_node_id()));
 	check_added_monitors!(nodes[1], 1);
 	expect_channel_pending_event(&nodes[1], &nodes[0].node.get_our_node_id());
@@ -9872,7 +9891,7 @@ fn test_non_final_funding_tx() {
 	let node_chanmgrs = create_node_chanmgrs(2, &node_cfgs, &[None, None]);
 	let nodes = create_network(2, &node_cfgs, &node_chanmgrs);
 
-	let temp_channel_id = nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 100_000, 0, 42, None).unwrap();
+	let temp_channel_id = nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 100_000, 0, 42, None, None).unwrap();
 	let open_channel_message = get_event_msg!(nodes[0], MessageSendEvent::SendOpenChannel, nodes[1].node.get_our_node_id());
 	nodes[1].node.handle_open_channel(&nodes[0].node.get_our_node_id(), &open_channel_message);
 	let accept_channel_message = get_event_msg!(nodes[1], MessageSendEvent::SendAcceptChannel, nodes[0].node.get_our_node_id());
@@ -9894,7 +9913,7 @@ fn test_non_final_funding_tx() {
 		_ => panic!("Unexpected event"),
 	};
 	// Transaction should fail as it's evaluated as non-final for propagation.
-	match nodes[0].node.funding_transaction_generated(&temp_channel_id, &nodes[1].node.get_our_node_id(), tx.clone()) {
+	match nodes[0].node.funding_transaction_generated(&temp_channel_id, &nodes[1].node.get_our_node_id(), tx.clone(), None) {
 		Err(APIError::APIMisuseError { err }) => {
 			assert_eq!(format!("Funding transaction absolute timelock is non-final"), err);
 		},
@@ -9917,7 +9936,7 @@ fn test_non_final_funding_tx_within_headroom() {
 	let node_chanmgrs = create_node_chanmgrs(2, &node_cfgs, &[None, None]);
 	let nodes = create_network(2, &node_cfgs, &node_chanmgrs);
 
-	let temp_channel_id = nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 100_000, 0, 42, None).unwrap();
+	let temp_channel_id = nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 100_000, 0, 42, None, None).unwrap();
 	let open_channel_message = get_event_msg!(nodes[0], MessageSendEvent::SendOpenChannel, nodes[1].node.get_our_node_id());
 	nodes[1].node.handle_open_channel(&nodes[0].node.get_our_node_id(), &open_channel_message);
 	let accept_channel_message = get_event_msg!(nodes[1], MessageSendEvent::SendAcceptChannel, nodes[0].node.get_our_node_id());
@@ -9940,7 +9959,7 @@ fn test_non_final_funding_tx_within_headroom() {
 	};
 
 	// Transaction should be accepted if it's in a +1 headroom from best block.
-	assert!(nodes[0].node.funding_transaction_generated(&temp_channel_id, &nodes[1].node.get_our_node_id(), tx.clone()).is_ok());
+	assert!(nodes[0].node.funding_transaction_generated(&temp_channel_id, &nodes[1].node.get_our_node_id(), tx.clone(), None).is_ok());
 	get_event_msg!(nodes[0], MessageSendEvent::SendFundingCreated, nodes[1].node.get_our_node_id());
 }
 
@@ -10217,7 +10236,7 @@ fn test_remove_expired_outbound_unfunded_channels() {
 	let node_chanmgrs = create_node_chanmgrs(2, &node_cfgs, &[None, None]);
 	let nodes = create_network(2, &node_cfgs, &node_chanmgrs);
 
-	let temp_channel_id = nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 100_000, 0, 42, None).unwrap();
+	let temp_channel_id = nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 100_000, 0, 42, None, None).unwrap();
 	let open_channel_message = get_event_msg!(nodes[0], MessageSendEvent::SendOpenChannel, nodes[1].node.get_our_node_id());
 	nodes[1].node.handle_open_channel(&nodes[0].node.get_our_node_id(), &open_channel_message);
 	let accept_channel_message = get_event_msg!(nodes[1], MessageSendEvent::SendAcceptChannel, nodes[0].node.get_our_node_id());
@@ -10268,7 +10287,7 @@ fn test_remove_expired_inbound_unfunded_channels() {
 	let node_chanmgrs = create_node_chanmgrs(2, &node_cfgs, &[None, None]);
 	let nodes = create_network(2, &node_cfgs, &node_chanmgrs);
 
-	let temp_channel_id = nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 100_000, 0, 42, None).unwrap();
+	let temp_channel_id = nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 100_000, 0, 42, None, None).unwrap();
 	let open_channel_message = get_event_msg!(nodes[0], MessageSendEvent::SendOpenChannel, nodes[1].node.get_our_node_id());
 	nodes[1].node.handle_open_channel(&nodes[0].node.get_our_node_id(), &open_channel_message);
 	let accept_channel_message = get_event_msg!(nodes[1], MessageSendEvent::SendAcceptChannel, nodes[0].node.get_our_node_id());
@@ -10574,7 +10593,8 @@ fn test_batch_funding_close_after_funding_signed() {
 	// Force-close the channel for which we've completed the initial monitor.
 	let channel_id_1 = OutPoint { txid: tx.txid(), index: 0 }.to_channel_id();
 	let channel_id_2 = OutPoint { txid: tx.txid(), index: 1 }.to_channel_id();
-	nodes[0].node.force_close_broadcasting_latest_txn(&channel_id_1, &nodes[1].node.get_our_node_id()).unwrap();
+	let counterparty_node_id = &nodes[1].node.get_our_node_id();
+	nodes[0].node.force_close_broadcasting_latest_txn(&channel_id_1, counterparty_node_id).unwrap();
 	check_added_monitors(&nodes[0], 2);
 	{
 		let mut monitor_updates = nodes[0].chain_monitor.monitor_updates.lock().unwrap();
@@ -10681,4 +10701,373 @@ fn do_test_funding_and_commitment_tx_confirm_same_block(confirm_remote_commitmen
 fn test_funding_and_commitment_tx_confirm_same_block() {
 	do_test_funding_and_commitment_tx_confirm_same_block(false);
 	do_test_funding_and_commitment_tx_confirm_same_block(true);
+}
+
+/// Just open and instantly close the channel with YUV tokens.
+///
+/// - `is_confirm_yuv_first`: if true, confirm firstly on YUV network and then on Bitcoin network.
+/// - `close_inbound_first`: if true, close inbound channel firstly.
+fn do_test_open_and_close_yuv_channel(close_inbound_first: bool) {
+	let mut node_cfg_with_yuv_support = test_default_channel_config();
+	node_cfg_with_yuv_support.support_yuv_payments = true;
+
+	let chanmon_cfgs = create_chanmon_cfgs(3);
+	let node_cfgs = create_node_cfgs(3, &chanmon_cfgs);
+	let node_chanmgrs = create_node_chanmgrs(
+		3, &node_cfgs, &[Some(node_cfg_with_yuv_support), Some(node_cfg_with_yuv_support), Some(node_cfg_with_yuv_support)],
+	);
+	let nodes = create_network(3, &node_cfgs, &node_chanmgrs);
+
+	let secp_ctx = Secp256k1::new();
+	let funding_yuv_pixel = new_test_pixel(None, None, &secp_ctx);
+
+	let chan_capacity_sat = 100_000;
+	let chan1 = create_chan_with_yuv(&nodes, 0, 1, chan_capacity_sat, 0, funding_yuv_pixel);
+	let chan2 = create_chan_with_yuv(&nodes, 0, 2, chan_capacity_sat, 0, funding_yuv_pixel);
+
+	close_yuv_channel(&nodes[0], &nodes[1], &chan1.2, chan1.3, close_inbound_first);
+	check_closed_event!(nodes[0], 1, ClosureReason::CooperativeClosure, [nodes[1].node.get_our_node_id()], chan_capacity_sat);
+	check_closed_event!(nodes[1], 1, ClosureReason::CooperativeClosure, [nodes[0].node.get_our_node_id()], chan_capacity_sat);
+	close_yuv_channel(&nodes[0], &nodes[2], &chan2.2, chan2.3, close_inbound_first);
+	check_closed_event!(nodes[0], 1, ClosureReason::CooperativeClosure, [nodes[2].node.get_our_node_id()], chan_capacity_sat);
+	check_closed_event!(nodes[2], 1, ClosureReason::CooperativeClosure, [nodes[0].node.get_our_node_id()], chan_capacity_sat);
+}
+
+/// Check if we can properly open and close the channel with YUVPayments feature.
+#[test]
+fn test_open_and_close_yuv_channel() {
+	do_test_open_and_close_yuv_channel(false);
+	do_test_open_and_close_yuv_channel(true);
+}
+
+fn do_test_yuv_payments_feature(is_outb_support_yuv: bool, is_inb_support_yuv: bool) {
+	let mut outb_node_cfg = test_default_channel_config();
+	outb_node_cfg.support_yuv_payments = is_outb_support_yuv;
+
+	let mut inb_node_cfg = test_default_channel_config();
+	inb_node_cfg.support_yuv_payments = is_inb_support_yuv;
+
+	let chanmon_cfgs = create_chanmon_cfgs(2);
+	let node_cfgs = create_node_cfgs(2, &chanmon_cfgs);
+	let node_chanmgrs = create_node_chanmgrs(
+		2, &node_cfgs, &[Some(outb_node_cfg), Some(inb_node_cfg)],
+	);
+	let nodes = create_network(2, &node_cfgs, &node_chanmgrs);
+
+	let secp_ctx = Secp256k1::new();
+	let funding_yuv_pixel = new_test_pixel(None, None, &secp_ctx);
+
+	let chan_capacity_sat = 100_000;
+
+	create_chan_with_yuv(&nodes, 0, 1, chan_capacity_sat, 0, funding_yuv_pixel);
+}
+
+/// Check different situations of present/absent YUVPayments feature in both of parties.
+#[test]
+fn test_yuv_payments_feature() {
+	assert_panic!(do_test_yuv_payments_feature(false, false));
+	assert_panic!(do_test_yuv_payments_feature(false, true));
+	assert_panic!(do_test_yuv_payments_feature(true, false));
+	do_test_yuv_payments_feature(true, true);
+}
+
+#[test]
+fn test_yuv_channel_force_close() {
+	let mut node_cfg_with_yuv_support = test_default_channel_config();
+	node_cfg_with_yuv_support.support_yuv_payments = true;
+	node_cfg_with_yuv_support.manually_accept_inbound_channels = true;
+
+	let chanmon_cfgs = create_chanmon_cfgs(2);
+	let node_cfgs = create_node_cfgs(2, &chanmon_cfgs);
+	let node_chanmgrs = create_node_chanmgrs(
+		2, &node_cfgs, &[Some(node_cfg_with_yuv_support), Some(node_cfg_with_yuv_support)],
+	);
+	let nodes = create_network(2, &node_cfgs, &node_chanmgrs);
+
+	let secp_ctx = Secp256k1::new();
+	let funding_yuv_pixel = new_test_pixel(None, None, &secp_ctx);
+
+	let chan_capacity_sat = 100_000;
+	let yuv_chan = create_chan_with_yuv(&nodes, 1, 0, chan_capacity_sat, 10001, funding_yuv_pixel);
+	let chan = (yuv_chan.0.clone(), yuv_chan.1.clone(), yuv_chan.2, yuv_chan.3.bitcoin_tx.clone());
+
+	nodes[1].node.force_close_broadcasting_latest_txn(&chan.2, &nodes[0].node.get_our_node_id()).unwrap();
+	check_added_monitors!(nodes[1], 1);
+	check_closed_broadcast!(nodes[1], true);
+	{
+		let mut node_txn = test_txn_broadcast(&nodes[1], &chan, None, HTLCType::NONE);
+		assert_eq!(node_txn.len(), 1);
+		mine_transaction(&nodes[0], &node_txn[0]);
+
+		let mut yuv_txn_broadcasted = nodes[1].yuv_tx_broadcaster.unwrap().txn_broadcasted.lock().unwrap();
+		let closing_yuv_tx = yuv_txn_broadcasted.remove(0);
+		nodes[0].node.yuv_transactions_confirmed(vec![closing_yuv_tx.clone()]);
+		nodes[0].chain_monitor.yuv_transactions_confirmed(vec![closing_yuv_tx.clone()]);
+		nodes[0].node.test_process_background_events();
+
+		check_added_monitors!(nodes[0], 1);
+		test_txn_broadcast(&nodes[0], &chan, Some(node_txn[0].clone()), HTLCType::NONE);
+		// TODO(yuv): add YUV output proofs check
+	}
+
+	check_closed_broadcast!(nodes[0], true);
+	assert_eq!(nodes[0].node.list_channels().len(), 0);
+	assert_eq!(nodes[1].node.list_channels().len(), 0);
+	check_closed_event!(nodes[0], 1, ClosureReason::CommitmentTxConfirmed, [nodes[1].node.get_our_node_id()], 100000);
+	check_closed_event!(nodes[1], 1, ClosureReason::HolderForceClosed, [nodes[0].node.get_our_node_id()], 100000);
+}
+
+fn do_test_update_balance(is_yuv: bool, balances: Vec<(u64, Option<u128>, u64, Option<u128>, bool)>) {
+	let mut node_cfg_with_yuv_support = test_default_channel_config();
+	node_cfg_with_yuv_support.support_yuv_payments = is_yuv;
+
+	let chanmon_cfgs = create_chanmon_cfgs(2);
+	let node_cfgs = create_node_cfgs(2, &chanmon_cfgs);
+	let node_chanmgrs = create_node_chanmgrs(
+		2, &node_cfgs, &[Some(node_cfg_with_yuv_support), Some(node_cfg_with_yuv_support)],
+	);
+	let nodes = create_network(2, &node_cfgs, &node_chanmgrs);
+
+	let funding_sat_amount = 100_000;
+	let funding_yuv_amount = 100;
+
+	let secp_ctx = Secp256k1::new();
+	let funding_yuv_pixel = new_test_pixel(Some(Luma::from(funding_yuv_amount)), None, &secp_ctx);
+
+	let (chan, yuv_tx_opt) = if is_yuv {
+		let yuv_chan = create_chan_with_yuv(&nodes, 0, 1, funding_sat_amount, 0, funding_yuv_pixel);
+		let chan = (yuv_chan.0.clone(), yuv_chan.1.clone(), yuv_chan.2, yuv_chan.3.bitcoin_tx.clone());
+		(chan, Some(yuv_chan.3))
+	} else {
+		let chan = create_announced_chan_between_nodes(&nodes, 0, 1);
+		(chan, None)
+	};
+
+	for (new_msat_a, new_yuv_a, new_msat_b, new_yuv_b, is_should_update) in balances {
+		update_balance(&nodes[0], &nodes[1], &chan.2, new_msat_a, new_yuv_a, false);
+		let is_update_happened = update_balance(&nodes[1], &nodes[0], &chan.2, new_msat_b, new_yuv_b, false);
+		assert_eq!(is_update_happened, is_should_update);
+		if is_should_update {
+			assert_eq!(nodes[0].node.get_and_clear_pending_events().len(), 1);
+			assert_eq!(nodes[1].node.get_and_clear_pending_events().len(), 1);
+		}
+	}
+
+	if is_yuv {
+		close_yuv_channel(&nodes[0], &nodes[1], &chan.2, yuv_tx_opt.unwrap(), false);
+	} else {
+		close_channel(&nodes[0], &nodes[1], &chan.2, chan.3, true);
+	};
+
+	check_closed_event!(nodes[0], 1, ClosureReason::CooperativeClosure, [nodes[1].node.get_our_node_id()], funding_sat_amount);
+	check_closed_event!(nodes[1], 1, ClosureReason::CooperativeClosure, [nodes[0].node.get_our_node_id()], funding_sat_amount);
+}
+
+#[test]
+fn test_update_balance() {
+	do_test_update_balance(true, vec![(70_000_000, Some(30), 30_000_000, Some(70), true)]);
+	do_test_update_balance(true, vec![
+		(70_000_000, Some(30), 70_000_000, Some(70), false),
+		(50_000_000, Some(50), 50_000_000, Some(50), true),
+	]);
+	do_test_update_balance(true, vec![(70_000_000, Some(0), 30_000_000, Some(100), true)]);
+	do_test_update_balance(true, vec![(70_000_000, Some(100), 30_000_000, Some(0), true)]);
+	do_test_update_balance(true, vec![
+		(70_000_000, Some(30), 70_000_000, Some(70), false),
+		(50_000_000, Some(50), 50_000_000, Some(50), true),
+		(70_000_000, Some(30), 30_000_000, Some(70), true),
+	]);
+	assert_panic!(do_test_update_balance(true, vec![(100_000_001, Some(30), 0, Some(0), false)]));
+	assert_panic!(do_test_update_balance(true, vec![(0, Some(101), 0, Some(0), false)]));
+	assert_panic!(do_test_update_balance(true, vec![(0, Some(0), 0, Some(0), false)]));
+
+	do_test_update_balance(false, vec![(70_000_000, None, 30_000_000, None, true)]);
+	do_test_update_balance(false, vec![
+		(70_000_000, None, 70_000_000, None, false),
+		(50_000_000, None, 50_000_000, None, true),
+	]);
+}
+
+#[test]
+fn test_revoke_update_balance() {
+	let mut node_cfg_with_yuv_support = test_default_channel_config();
+	node_cfg_with_yuv_support.support_yuv_payments = true;
+
+	let chanmon_cfgs = create_chanmon_cfgs(2);
+	let node_cfgs = create_node_cfgs(2, &chanmon_cfgs);
+	let node_chanmgrs = create_node_chanmgrs(
+		2, &node_cfgs, &[Some(node_cfg_with_yuv_support), Some(node_cfg_with_yuv_support)],
+	);
+	let nodes = create_network(2, &node_cfgs, &node_chanmgrs);
+
+	let funding_sat_amount = 100_000;
+	let funding_yuv_amount = 100;
+
+	let secp_ctx = Secp256k1::new();
+	let funding_yuv_pixel = new_test_pixel(Some(Luma::from(funding_yuv_amount)), None, &secp_ctx);
+
+	let yuv_chan = create_chan_with_yuv(&nodes, 0, 1, funding_sat_amount, 0, funding_yuv_pixel);
+
+	update_balance(&nodes[0], &nodes[1], &yuv_chan.2, 70_000_000, Some(50), false);
+	update_balance(&nodes[0], &nodes[1], &yuv_chan.2, 100_000_000, Some(100), true);
+	let mut is_update_happened = update_balance(&nodes[1], &nodes[0], &yuv_chan.2, 30_000_000, Some(50), false);
+	assert!(!is_update_happened);
+	is_update_happened = update_balance(&nodes[0], &nodes[1], &yuv_chan.2, 70_000_000, Some(50), false);
+	assert!(is_update_happened);
+	assert_eq!(nodes[0].node.get_and_clear_pending_events().len(), 1);
+	assert_eq!(nodes[1].node.get_and_clear_pending_events().len(), 1);
+
+	close_yuv_channel(&nodes[0], &nodes[1], &yuv_chan.2, yuv_chan.3, false);
+	check_closed_event!(nodes[0], 1, ClosureReason::CooperativeClosure, [nodes[1].node.get_our_node_id()], funding_sat_amount);
+	check_closed_event!(nodes[1], 1, ClosureReason::CooperativeClosure, [nodes[0].node.get_our_node_id()], funding_sat_amount);
+}
+
+fn do_test_yuv_htlcs_flow(node_count: usize, channel_capacity: u128, payment_amount: u128) {
+	let mut node_cfg_with_yuv_support = test_default_channel_config();
+	node_cfg_with_yuv_support.support_yuv_payments = true;
+
+	let chanmon_cfgs = create_chanmon_cfgs(node_count);
+	let node_cfgs = create_node_cfgs(node_count, &chanmon_cfgs);
+	let node_chanmgrs = create_node_chanmgrs(
+		node_count, &node_cfgs, &vec![Some(node_cfg_with_yuv_support); node_count],
+	);
+	let nodes = create_network(node_count, &node_cfgs, &node_chanmgrs);
+
+	let secp_ctx = Secp256k1::new();
+	let funding_yuv_pixel = new_test_pixel(Some(Luma::from(channel_capacity)), None, &secp_ctx);
+
+	let chan_capacity_sat = 100_000;
+
+	// ----------------------------------
+	// Create channels between all nodes.
+	// ----------------------------------
+	let mut channels = Vec::new();
+	for i in 0..(node_count-1) {
+		channels.push(create_chan_with_yuv(&nodes, i, i+1, chan_capacity_sat, 10001, funding_yuv_pixel));
+	}
+
+	// ----------------------------------
+	// Check that last balance is zero
+	// ----------------------------------
+	let last = &node_chanmgrs[node_count-1];
+	let channel = &last.list_usable_channels()[0];
+	let amount = channel.yuv_holder_pixel.expect("YUV channel must have a pixel").luma.amount;
+	assert_eq!(amount, 0, "Last balance of last node must updated");
+
+	// ----------------------------------
+	// Send payment from first to last node.
+	// ----------------------------------
+	let payment_msat = 6_000_000;
+	let expected_route = nodes.iter().skip(1).collect::<Vec<_>>();
+	send_payment_with_yuv(&nodes[0], &expected_route, payment_msat, payment_amount);
+
+	// ----------------------------------
+	// Check that last node received payment.
+	// ----------------------------------
+	let last = &node_chanmgrs[node_count-1];
+	let channel = &last.list_usable_channels()[0];
+	let amount = channel.yuv_holder_pixel.expect("YUV channel must have a pixel").luma.amount;
+	assert_eq!(amount, payment_amount, "Last balance of last node must updated");
+
+	// ----------------------------------
+	// Close channels between all nodes.
+	// ----------------------------------
+	for i in 0..(node_count-1) {
+		close_yuv_channel(&nodes[i], &nodes[i+1], &channels[i].2, channels[i].3.clone(), false);
+		check_closed_event!(nodes[i], 1, ClosureReason::CooperativeClosure, [nodes[i+1].node.get_our_node_id()], chan_capacity_sat);
+		check_closed_event!(nodes[i+1], 1, ClosureReason::CooperativeClosure, [nodes[i].node.get_our_node_id()], chan_capacity_sat);
+	}
+}
+
+#[test]
+fn test_yuv_htlc_multihops() {
+    const LARGE_CAPACITY: u128 = 1_000_000;
+    const SMALL_PAYMENT: u128 = 10_000;
+
+	// Simple tests with different hops number.
+	do_test_yuv_htlcs_flow(2, LARGE_CAPACITY, SMALL_PAYMENT);
+	do_test_yuv_htlcs_flow(3, LARGE_CAPACITY, SMALL_PAYMENT);
+	do_test_yuv_htlcs_flow(4, LARGE_CAPACITY, SMALL_PAYMENT);
+
+   	do_test_yuv_htlcs_flow(2, 10_000, 9_999);
+}
+
+#[test]
+fn test_update_balance_during_htlc() {
+	let mut node_cfg_with_yuv_support = test_default_channel_config();
+	node_cfg_with_yuv_support.support_yuv_payments = true;
+
+	let nodes_count = 4;
+
+	let chanmon_cfgs = create_chanmon_cfgs(nodes_count);
+	let node_cfgs = create_node_cfgs(nodes_count, &chanmon_cfgs);
+	let node_chanmgrs = create_node_chanmgrs(
+		nodes_count, &node_cfgs, &vec![Some(node_cfg_with_yuv_support); nodes_count],
+	);
+	let nodes = create_network(nodes_count, &node_cfgs, &node_chanmgrs);
+
+	let chan_capacity_sat = 150_000;
+	let chan_capacity_yuv = 10_000;
+	let payment_amount_yuv = 100;
+
+	let secp_ctx = Secp256k1::new();
+	let funding_yuv_pixel = new_test_pixel(Some(Luma::from(chan_capacity_yuv)), None, &secp_ctx);
+
+	// ----------------------------------
+	// Create channels between all nodes.
+	// ----------------------------------
+	let mut channels = Vec::new();
+	for i in 0..(nodes_count-1) {
+		channels.push(create_chan_with_yuv(&nodes, i, i+1, chan_capacity_sat, 75_000_000, funding_yuv_pixel));
+	}
+
+	// ----------------------------------
+	// Check that last balance is zero
+	// ----------------------------------
+	let last = &node_chanmgrs[nodes_count-1];
+	let channel = &last.list_usable_channels()[0];
+	let amount = channel.yuv_holder_pixel.expect("YUV channel must have a pixel").luma.amount;
+	assert_eq!(amount, 0, "Last balance of last node must updated");
+
+	// ----------------------------------
+	// Send payment from first to last node.
+	// ----------------------------------
+	let payment_msat = 14_000_000;
+	let expected_route = nodes.iter().skip(1).collect::<Vec<_>>();
+	let route = route_payment_with_yuv(&nodes[0], &expected_route, payment_msat, payment_amount_yuv);
+
+	let updated_balance_yuv = (chan_capacity_yuv - payment_amount_yuv)/2;
+
+	for i in 0..(nodes_count - 1) {
+		// The new holder's and counterparty's balance == general channel's balance in half.
+		// (channel_balance_msat - payment_msat - hop_fee_msat)/2
+		// (150_000_000 - 15_000_000 - hop_fee_msat)/2 = 6749900
+		let hop_fee_msat = (nodes_count - i - 2) * 1000;
+		let new_balance_msat = (chan_capacity_sat * 1000 - payment_msat - hop_fee_msat as u64)/2;
+
+		update_balance(&nodes[i], &nodes[i + 1], &channels[i].2, new_balance_msat, Some(updated_balance_yuv), false);
+		let is_update_applied = update_balance(&nodes[i + 1], &nodes[i], &channels[i].2, new_balance_msat, Some(updated_balance_yuv), false);
+		assert!(is_update_applied);
+		assert_eq!(nodes[i].node.get_and_clear_pending_events().len(), 1);
+		assert_eq!(nodes[i + 1].node.get_and_clear_pending_events().len(), 1);
+	}
+
+	claim_payment(&nodes[0], &expected_route, route.0);
+
+	// ----------------------------------
+	// Check that last node received payment.
+	// ----------------------------------
+	let last = &node_chanmgrs[nodes_count-1];
+	let channel = &last.list_usable_channels()[0];
+	let amount = channel.yuv_holder_pixel.expect("YUV channel must have a pixel").luma.amount;
+	assert_eq!(amount, updated_balance_yuv + payment_amount_yuv, "Last balance of last node must updated");
+
+	// ----------------------------------
+	// Close channels between all nodes.
+	// ----------------------------------
+	for i in 0..(nodes_count - 1) {
+		close_yuv_channel(&nodes[i], &nodes[i+1], &channels[i].2, channels[i].3.clone(), false);
+		check_closed_event!(nodes[i], 1, ClosureReason::CooperativeClosure, [nodes[i+1].node.get_our_node_id()], chan_capacity_sat);
+		check_closed_event!(nodes[i+1], 1, ClosureReason::CooperativeClosure, [nodes[i].node.get_our_node_id()], chan_capacity_sat);
+	}
 }

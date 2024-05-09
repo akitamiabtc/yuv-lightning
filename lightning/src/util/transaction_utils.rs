@@ -7,10 +7,15 @@
 // You may not use this file except in accordance with one or both of these
 // licenses.
 
+use bitcoin::WPubkeyHash;
 use bitcoin::blockdata::transaction::{Transaction, TxOut};
 use bitcoin::blockdata::script::Script;
 use bitcoin::consensus::Encodable;
 use bitcoin::consensus::encode::VarInt;
+use bitcoin::hashes::Hash;
+use bitcoin::secp256k1::PublicKey;
+use yuv_pixels::{Chroma, PixelProof, Pixel, Tweakable};
+use yuv_types::ProofMap;
 
 use crate::ln::msgs::MAX_VALUE_MSAT;
 
@@ -28,12 +33,84 @@ pub fn sort_outputs<T, C : Fn(&T, &T) -> Ordering>(outputs: &mut Vec<(TxOut, T)>
 	});
 }
 
+/// Mostly the same as [`maybe_add_change_output`], but with the addition of a
+/// YUV Chroma and a public key instead of a script for change destination.
+///
+/// The difference is that [`maybe_add_yuv_change_output`] will create P2WPKH
+/// script pubkey with tweaked by `chroma` and zero amount keys and insert proof
+/// into `output_proofs`.
+pub(crate) fn maybe_add_yuv_change_output(
+	tx: &mut Transaction,
+	output_proofs: &mut ProofMap,
+	input_value: u64,
+	witness_max_weight: usize,
+	feerate_sat_per_1000_weight: u32,
+	change_destination_pubkey: &PublicKey,
+	chroma: Chroma,
+) -> Result<usize, ()> {
+	let pixel = Pixel::new(0, chroma);
+	let pixel_key = change_destination_pubkey.tweak(pixel);
+
+	let pubkey_hash = WPubkeyHash::hash(&pixel_key.serialize());
+	let change_destination_script = Script::new_v0_p2wpkh(&pubkey_hash);
+
+	let AddChangeOutputResult { weight, added } = maybe_add_change_output_internal(
+		tx, input_value,
+		witness_max_weight,
+		feerate_sat_per_1000_weight,
+		change_destination_script,
+	)?;
+
+	if added {
+		let proof = PixelProof::sig(pixel, *change_destination_pubkey);
+
+		// TODO: a hack for now to push the proof to the end of the proofs map
+		// as in future `ProofMap` will be a vector.
+		output_proofs.insert(
+			output_proofs.len() as u32,
+			proof,
+		);
+	}
+
+	Ok(weight)
+}
+
+/// Result of the `maybe_add_change_output_internal` function.
+pub(crate) struct AddChangeOutputResult {
+	/// New calculated weight of the transaction.
+	pub(crate) weight: usize,
+
+	/// True if a change output was added, false otherwise.
+	pub(crate) added: bool,
+}
+
+impl AddChangeOutputResult {
+	pub(crate) fn new_added(weight: usize) -> Self { Self { weight, added: true } }
+	pub(crate) fn new(weight: usize) -> Self { Self { weight, added: false } }
+}
+
 /// Possibly adds a change output to the given transaction, always doing so if there are excess
 /// funds available beyond the requested feerate.
 /// Assumes at least one input will have a witness (ie spends a segwit output).
 /// Returns an Err(()) if the requested feerate cannot be met.
 /// Returns the expected maximum weight of the fully signed transaction on success.
 pub(crate) fn maybe_add_change_output(tx: &mut Transaction, input_value: u64, witness_max_weight: usize, feerate_sat_per_1000_weight: u32, change_destination_script: Script) -> Result<usize, ()> {
+	maybe_add_change_output_internal(
+		tx, input_value,
+		witness_max_weight,
+		feerate_sat_per_1000_weight,
+		change_destination_script,
+	).map(|res| res.weight)
+}
+
+/// For more info see [`maybe_add_change_output`] and [`AddChangeOutputResult`].
+fn maybe_add_change_output_internal(
+	tx: &mut Transaction,
+	input_value: u64,
+	witness_max_weight: usize,
+	feerate_sat_per_1000_weight: u32,
+	change_destination_script: Script
+) -> Result<AddChangeOutputResult, ()> {
 	if input_value > MAX_VALUE_MSAT / 1000 { return Err(()); }
 
 	const WITNESS_FLAG_BYTES: i64 = 2;
@@ -59,11 +136,12 @@ pub(crate) fn maybe_add_change_output(tx: &mut Transaction, input_value: u64, wi
 	if change_value >= dust_value.to_sat() as i64 {
 		change_output.value = change_value as u64;
 		tx.output.push(change_output);
-		Ok(weight_with_change as usize)
+
+		Ok(AddChangeOutputResult::new_added(weight_with_change as usize))
 	} else if (input_value - output_value) as i64 - (starting_weight as i64) * feerate_sat_per_1000_weight as i64 / 1000 < 0 {
 		Err(())
 	} else {
-		Ok(starting_weight)
+		Ok(AddChangeOutputResult::new(starting_weight as usize))
 	}
 }
 

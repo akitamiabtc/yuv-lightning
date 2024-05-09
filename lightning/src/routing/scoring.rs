@@ -375,6 +375,16 @@ pub struct ChannelUsage {
 	/// as part of a multi-path payment.
 	pub inflight_htlc_msat: u64,
 
+	/// The YUV amount to send through the channel.
+	///
+	/// Not empty if the `YuvPayments` feature is enabled.
+	pub yuv_amount: Option<u128>,
+
+	/// Total YUV amount already allocated to send through the channel.
+	///
+	/// Not empty if the `YuvPayments` feature is enabled.
+	pub inflight_yuv: Option<u128>,
+
 	/// The effective capacity of the channel.
 	pub effective_capacity: EffectiveCapacity,
 }
@@ -1355,8 +1365,8 @@ impl<G: Deref<Target = NetworkGraph<L>>, L: Deref, T: Time> ScoreLookUp for Prob
 
 		let mut anti_probing_penalty_msat = 0;
 		match usage.effective_capacity {
-			EffectiveCapacity::ExactLiquidity { liquidity_msat: amount_msat } |
-				EffectiveCapacity::HintMaxHTLC { amount_msat } =>
+			EffectiveCapacity::ExactLiquidity { liquidity_msat: amount_msat, ..} |
+				EffectiveCapacity::HintMaxHTLC { amount_msat, .. } =>
 			{
 				if usage.amount_msat > amount_msat {
 					return u64::max_value();
@@ -1364,7 +1374,7 @@ impl<G: Deref<Target = NetworkGraph<L>>, L: Deref, T: Time> ScoreLookUp for Prob
 					return base_penalty_msat;
 				}
 			},
-			EffectiveCapacity::Total { capacity_msat, htlc_maximum_msat } => {
+			EffectiveCapacity::Total { capacity_msat, htlc_maximum_msat, .. } => {
 				if htlc_maximum_msat >= capacity_msat/2 {
 					anti_probing_penalty_msat = score_params.anti_probing_penalty_msat;
 				}
@@ -2302,6 +2312,7 @@ mod tests {
 			fee_base_msat: 1,
 			fee_proportional_millionths: 0,
 			excess_data: Vec::new(),
+			htlc_maximum_yuv: None,
 		};
 		let msghash = hash_to_message!(&Sha256dHash::hash(&unsigned_update.encode()[..])[..]);
 		let signed_update = ChannelUpdate {
@@ -2321,6 +2332,7 @@ mod tests {
 			fee_msat,
 			cltv_expiry_delta: 18,
 			maybe_announced_channel: true,
+			// yuv_fee: None,
 		}
 	}
 
@@ -2331,6 +2343,7 @@ mod tests {
 				path_hop(target_pubkey(), 42, 2),
 				path_hop(recipient_pubkey(), 43, amount_msat),
 			], blinded_tail: None,
+			chroma: None,
 		}
 	}
 
@@ -2546,7 +2559,14 @@ mod tests {
 		let usage = ChannelUsage {
 			amount_msat: 1_024,
 			inflight_htlc_msat: 0,
-			effective_capacity: EffectiveCapacity::Total { capacity_msat: 1_024_000, htlc_maximum_msat: 1_000 },
+			yuv_amount: None,
+			inflight_yuv: None,
+			effective_capacity: EffectiveCapacity::Total {
+				capacity_msat: 1_024_000,
+				htlc_maximum_msat: 1_000,
+				capacity_yuv: None,
+				htlc_maximum_yuv: None,
+			},
 		};
 		assert_eq!(scorer.channel_penalty_msat(42, &source, &target, usage, &params), 0);
 		let usage = ChannelUsage { amount_msat: 10_240, ..usage };
@@ -2559,7 +2579,14 @@ mod tests {
 		let usage = ChannelUsage {
 			amount_msat: 128,
 			inflight_htlc_msat: 0,
-			effective_capacity: EffectiveCapacity::Total { capacity_msat: 1_024, htlc_maximum_msat: 1_000 },
+			yuv_amount: None,
+			inflight_yuv: None,
+			effective_capacity: EffectiveCapacity::Total {
+				capacity_msat: 1_024,
+				htlc_maximum_msat: 1_000,
+				capacity_yuv: None,
+				htlc_maximum_yuv: None,
+			},
 		};
 		assert_eq!(scorer.channel_penalty_msat(42, &source, &target, usage, &params), 58);
 		let usage = ChannelUsage { amount_msat: 256, ..usage };
@@ -2602,7 +2629,14 @@ mod tests {
 		let usage = ChannelUsage {
 			amount_msat: 39,
 			inflight_htlc_msat: 0,
-			effective_capacity: EffectiveCapacity::Total { capacity_msat: 100, htlc_maximum_msat: 1_000 },
+			yuv_amount: None,
+			inflight_yuv: None,
+			effective_capacity: EffectiveCapacity::Total {
+				capacity_msat: 100,
+				htlc_maximum_msat: 1_000,
+				capacity_yuv: None,
+				htlc_maximum_yuv: None,
+			},
 		};
 		assert_eq!(scorer.channel_penalty_msat(42, &source, &target, usage, &params), 0);
 		let usage = ChannelUsage { amount_msat: 50, ..usage };
@@ -2626,7 +2660,14 @@ mod tests {
 		let usage = ChannelUsage {
 			amount_msat: 500,
 			inflight_htlc_msat: 0,
-			effective_capacity: EffectiveCapacity::Total { capacity_msat: 1_000, htlc_maximum_msat: 1_000 },
+			yuv_amount: None,
+			inflight_yuv: None,
+			effective_capacity: EffectiveCapacity::Total {
+				capacity_msat: 1_000,
+				htlc_maximum_msat: 1_000,
+				capacity_yuv: None,
+				htlc_maximum_yuv: None,
+			},
 		};
 		let failed_path = payment_path_for_amount(500);
 		let successful_path = payment_path_for_amount(200);
@@ -2656,7 +2697,14 @@ mod tests {
 		let usage = ChannelUsage {
 			amount_msat: 250,
 			inflight_htlc_msat: 0,
-			effective_capacity: EffectiveCapacity::Total { capacity_msat: 1_000, htlc_maximum_msat: 1_000 },
+			yuv_amount: None,
+			inflight_yuv: None,
+			effective_capacity: EffectiveCapacity::Total {
+				capacity_msat: 1_000,
+				htlc_maximum_msat: 1_000,
+				capacity_yuv: None,
+				htlc_maximum_yuv: None,
+			},
 		};
 		assert_eq!(scorer.channel_penalty_msat(42, &source, &target, usage, &params), 128);
 		let usage = ChannelUsage { amount_msat: 500, ..usage };
@@ -2691,7 +2739,14 @@ mod tests {
 		let usage = ChannelUsage {
 			amount_msat: 250,
 			inflight_htlc_msat: 0,
-			effective_capacity: EffectiveCapacity::Total { capacity_msat: 1_000, htlc_maximum_msat: 1_000 },
+			yuv_amount: None,
+			inflight_yuv: None,
+			effective_capacity: EffectiveCapacity::Total {
+				capacity_msat: 1_000,
+				htlc_maximum_msat: 1_000,
+				capacity_yuv: None,
+				htlc_maximum_yuv: None,
+			},
 		};
 		assert_eq!(scorer.channel_penalty_msat(42, &source, &target, usage, &params), 128);
 		let usage = ChannelUsage { amount_msat: 500, ..usage };
@@ -2752,14 +2807,21 @@ mod tests {
 		let usage = ChannelUsage {
 			amount_msat: 250,
 			inflight_htlc_msat: 0,
-			effective_capacity: EffectiveCapacity::Total { capacity_msat: 1_000, htlc_maximum_msat: 1_000 },
+			yuv_amount: None,
+			inflight_yuv: None,
+			effective_capacity: EffectiveCapacity::Total {
+				capacity_msat: 1_000,
+				htlc_maximum_msat: 1_000,
+				capacity_yuv: None,
+				htlc_maximum_yuv: None,
+			},
 		};
 		assert_eq!(scorer.channel_penalty_msat(42, &node_a, &node_b, usage, &params), 128);
 		// Note that a default liquidity bound is used for B -> C as no channel exists
 		assert_eq!(scorer.channel_penalty_msat(43, &node_b, &node_c, usage, &params), 128);
 		assert_eq!(scorer.channel_penalty_msat(44, &node_c, &node_d, usage, &params), 128);
 
-		scorer.payment_path_failed(&Path { hops: path, blinded_tail: None }, 43);
+		scorer.payment_path_failed(&Path { hops: path, blinded_tail: None, chroma: None, }, 43);
 
 		assert_eq!(scorer.channel_penalty_msat(42, &node_a, &node_b, usage, &params), 80);
 		// Note that a default liquidity bound is used for B -> C as no channel exists
@@ -2783,7 +2845,14 @@ mod tests {
 		let usage = ChannelUsage {
 			amount_msat: 250,
 			inflight_htlc_msat: 0,
-			effective_capacity: EffectiveCapacity::Total { capacity_msat: 1_000, htlc_maximum_msat: 1_000 },
+			yuv_amount: None,
+			inflight_yuv: None,
+			effective_capacity: EffectiveCapacity::Total {
+				capacity_msat: 1_000,
+				htlc_maximum_msat: 1_000,
+				capacity_yuv: None,
+				htlc_maximum_yuv: None,
+			},
 		};
 
 		assert_eq!(scorer.channel_penalty_msat(41, &sender, &source, usage, &params), 128);
@@ -2817,7 +2886,14 @@ mod tests {
 		let usage = ChannelUsage {
 			amount_msat: 0,
 			inflight_htlc_msat: 0,
-			effective_capacity: EffectiveCapacity::Total { capacity_msat: 1_024, htlc_maximum_msat: 1_024 },
+			yuv_amount: None,
+			inflight_yuv: None,
+			effective_capacity: EffectiveCapacity::Total {
+				capacity_msat: 1_024,
+				htlc_maximum_msat: 1_024,
+				capacity_yuv: None,
+				htlc_maximum_yuv: None,
+			},
 		};
 		assert_eq!(scorer.channel_penalty_msat(42, &source, &target, usage, &params), 0);
 		let usage = ChannelUsage { amount_msat: 1_023, ..usage };
@@ -2912,7 +2988,14 @@ mod tests {
 		let usage = ChannelUsage {
 			amount_msat: 256,
 			inflight_htlc_msat: 0,
-			effective_capacity: EffectiveCapacity::Total { capacity_msat: 1_024, htlc_maximum_msat: 1_000 },
+			yuv_amount: None,
+			inflight_yuv: None,
+			effective_capacity: EffectiveCapacity::Total {
+				capacity_msat: 1_024,
+				htlc_maximum_msat: 1_000,
+				capacity_yuv: None,
+				htlc_maximum_yuv: None,
+			},
 		};
 		assert_eq!(scorer.channel_penalty_msat(42, &source, &target, usage, &params), 125);
 
@@ -2946,7 +3029,14 @@ mod tests {
 		let usage = ChannelUsage {
 			amount_msat: 512,
 			inflight_htlc_msat: 0,
-			effective_capacity: EffectiveCapacity::Total { capacity_msat: 1_024, htlc_maximum_msat: 1_000 },
+			yuv_amount: None,
+			inflight_yuv: None,
+			effective_capacity: EffectiveCapacity::Total {
+				capacity_msat: 1_024,
+				htlc_maximum_msat: 1_000,
+				capacity_yuv: None,
+				htlc_maximum_yuv: None,
+			},
 		};
 
 		assert_eq!(scorer.channel_penalty_msat(42, &source, &target, usage, &params), 300);
@@ -2994,7 +3084,14 @@ mod tests {
 		let usage = ChannelUsage {
 			amount_msat: 500,
 			inflight_htlc_msat: 0,
-			effective_capacity: EffectiveCapacity::Total { capacity_msat: 1_000, htlc_maximum_msat: 1_000 },
+			yuv_amount: None,
+			inflight_yuv: None,
+			effective_capacity: EffectiveCapacity::Total {
+				capacity_msat: 1_000,
+				htlc_maximum_msat: 1_000,
+				capacity_yuv: None,
+				htlc_maximum_yuv: None,
+			},
 		};
 
 		scorer.payment_path_failed(&payment_path_for_amount(500), 42);
@@ -3034,7 +3131,14 @@ mod tests {
 		let usage = ChannelUsage {
 			amount_msat: 500,
 			inflight_htlc_msat: 0,
-			effective_capacity: EffectiveCapacity::Total { capacity_msat: 1_000, htlc_maximum_msat: 1_000 },
+			yuv_amount: None,
+			inflight_yuv: None,
+			effective_capacity: EffectiveCapacity::Total {
+				capacity_msat: 1_000,
+				htlc_maximum_msat: 1_000,
+				capacity_yuv: None,
+				htlc_maximum_yuv: None,
+			},
 		};
 
 		scorer.payment_path_failed(&payment_path_for_amount(500), 42);
@@ -3071,47 +3175,49 @@ mod tests {
 		let usage = ChannelUsage {
 			amount_msat: 100_000_000,
 			inflight_htlc_msat: 0,
-			effective_capacity: EffectiveCapacity::Total { capacity_msat: 950_000_000, htlc_maximum_msat: 1_000 },
+			yuv_amount: None,
+			inflight_yuv: None,
+			effective_capacity: EffectiveCapacity::Total { capacity_msat: 950_000_000, htlc_maximum_msat: 1_000, capacity_yuv: None, htlc_maximum_yuv: None },
 		};
 		assert_eq!(scorer.channel_penalty_msat(42, &source, &target, usage, &params), 11497);
 		let usage = ChannelUsage {
-			effective_capacity: EffectiveCapacity::Total { capacity_msat: 1_950_000_000, htlc_maximum_msat: 1_000 }, ..usage
+			effective_capacity: EffectiveCapacity::Total { capacity_msat: 1_950_000_000, htlc_maximum_msat: 1_000, capacity_yuv: None, htlc_maximum_yuv: None }, ..usage
 		};
 		assert_eq!(scorer.channel_penalty_msat(42, &source, &target, usage, &params), 7408);
 		let usage = ChannelUsage {
-			effective_capacity: EffectiveCapacity::Total { capacity_msat: 2_950_000_000, htlc_maximum_msat: 1_000 }, ..usage
+			effective_capacity: EffectiveCapacity::Total { capacity_msat: 2_950_000_000, htlc_maximum_msat: 1_000, capacity_yuv: None, htlc_maximum_yuv: None }, ..usage
 		};
 		assert_eq!(scorer.channel_penalty_msat(42, &source, &target, usage, &params), 6151);
 		let usage = ChannelUsage {
-			effective_capacity: EffectiveCapacity::Total { capacity_msat: 3_950_000_000, htlc_maximum_msat: 1_000 }, ..usage
+			effective_capacity: EffectiveCapacity::Total { capacity_msat: 3_950_000_000, htlc_maximum_msat: 1_000, capacity_yuv: None, htlc_maximum_yuv: None }, ..usage
 		};
 		assert_eq!(scorer.channel_penalty_msat(42, &source, &target, usage, &params), 5427);
 		let usage = ChannelUsage {
-			effective_capacity: EffectiveCapacity::Total { capacity_msat: 4_950_000_000, htlc_maximum_msat: 1_000 }, ..usage
+			effective_capacity: EffectiveCapacity::Total { capacity_msat: 4_950_000_000, htlc_maximum_msat: 1_000, capacity_yuv: None, htlc_maximum_yuv: None }, ..usage
 		};
 		assert_eq!(scorer.channel_penalty_msat(42, &source, &target, usage, &params), 4955);
 		let usage = ChannelUsage {
-			effective_capacity: EffectiveCapacity::Total { capacity_msat: 5_950_000_000, htlc_maximum_msat: 1_000 }, ..usage
+			effective_capacity: EffectiveCapacity::Total { capacity_msat: 5_950_000_000, htlc_maximum_msat: 1_000, capacity_yuv: None, htlc_maximum_yuv: None }, ..usage
 		};
 		assert_eq!(scorer.channel_penalty_msat(42, &source, &target, usage, &params), 4736);
 		let usage = ChannelUsage {
-			effective_capacity: EffectiveCapacity::Total { capacity_msat: 6_950_000_000, htlc_maximum_msat: 1_000 }, ..usage
+			effective_capacity: EffectiveCapacity::Total { capacity_msat: 6_950_000_000, htlc_maximum_msat: 1_000, capacity_yuv: None, htlc_maximum_yuv: None }, ..usage
 		};
 		assert_eq!(scorer.channel_penalty_msat(42, &source, &target, usage, &params), 4484);
 		let usage = ChannelUsage {
-			effective_capacity: EffectiveCapacity::Total { capacity_msat: 7_450_000_000, htlc_maximum_msat: 1_000 }, ..usage
+			effective_capacity: EffectiveCapacity::Total { capacity_msat: 7_450_000_000, htlc_maximum_msat: 1_000, capacity_yuv: None, htlc_maximum_yuv: None }, ..usage
 		};
 		assert_eq!(scorer.channel_penalty_msat(42, &source, &target, usage, &params), 4484);
 		let usage = ChannelUsage {
-			effective_capacity: EffectiveCapacity::Total { capacity_msat: 7_950_000_000, htlc_maximum_msat: 1_000 }, ..usage
+			effective_capacity: EffectiveCapacity::Total { capacity_msat: 7_950_000_000, htlc_maximum_msat: 1_000, capacity_yuv: None, htlc_maximum_yuv: None  }, ..usage
 		};
 		assert_eq!(scorer.channel_penalty_msat(42, &source, &target, usage, &params), 4263);
 		let usage = ChannelUsage {
-			effective_capacity: EffectiveCapacity::Total { capacity_msat: 8_950_000_000, htlc_maximum_msat: 1_000 }, ..usage
+			effective_capacity: EffectiveCapacity::Total { capacity_msat: 8_950_000_000, htlc_maximum_msat: 1_000, capacity_yuv: None, htlc_maximum_yuv: None }, ..usage
 		};
 		assert_eq!(scorer.channel_penalty_msat(42, &source, &target, usage, &params), 4263);
 		let usage = ChannelUsage {
-			effective_capacity: EffectiveCapacity::Total { capacity_msat: 9_950_000_000, htlc_maximum_msat: 1_000 }, ..usage
+			effective_capacity: EffectiveCapacity::Total { capacity_msat: 9_950_000_000, htlc_maximum_msat: 1_000, capacity_yuv: None, htlc_maximum_yuv: None }, ..usage
 		};
 		assert_eq!(scorer.channel_penalty_msat(42, &source, &target, usage, &params), 4044);
 	}
@@ -3125,7 +3231,9 @@ mod tests {
 		let usage = ChannelUsage {
 			amount_msat: 128,
 			inflight_htlc_msat: 0,
-			effective_capacity: EffectiveCapacity::Total { capacity_msat: 1_024, htlc_maximum_msat: 1_000 },
+			yuv_amount: None,
+			inflight_yuv: None,
+			effective_capacity: EffectiveCapacity::Total { capacity_msat: 1_024, htlc_maximum_msat: 1_000, capacity_yuv: None, htlc_maximum_yuv: None },
 		};
 
 		let params = ProbabilisticScoringFeeParameters {
@@ -3161,7 +3269,9 @@ mod tests {
 		let usage = ChannelUsage {
 			amount_msat: 512_000,
 			inflight_htlc_msat: 0,
-			effective_capacity: EffectiveCapacity::Total { capacity_msat: 1_024_000, htlc_maximum_msat: 1_000 },
+			yuv_amount: None,
+			inflight_yuv: None,
+			effective_capacity: EffectiveCapacity::Total { capacity_msat: 1_024_000, htlc_maximum_msat: 1_000, capacity_yuv: None, htlc_maximum_yuv: None },
 		};
 
 		let params = ProbabilisticScoringFeeParameters {
@@ -3190,6 +3300,8 @@ mod tests {
 		let usage = ChannelUsage {
 			amount_msat: u64::max_value(),
 			inflight_htlc_msat: 0,
+			yuv_amount: None,
+			inflight_yuv: None,
 			effective_capacity: EffectiveCapacity::Infinite,
 		};
 
@@ -3217,7 +3329,9 @@ mod tests {
 		let usage = ChannelUsage {
 			amount_msat: 750,
 			inflight_htlc_msat: 0,
-			effective_capacity: EffectiveCapacity::Total { capacity_msat: 1_000, htlc_maximum_msat: 1_000 },
+			yuv_amount: None,
+			inflight_yuv: None,
+			effective_capacity: EffectiveCapacity::Total { capacity_msat: 1_000, htlc_maximum_msat: 1_000, capacity_yuv: None, htlc_maximum_yuv: None },
 		};
 		assert_ne!(scorer.channel_penalty_msat(42, &source, &target, usage, &params), u64::max_value());
 
@@ -3238,7 +3352,9 @@ mod tests {
 		let usage = ChannelUsage {
 			amount_msat: 750,
 			inflight_htlc_msat: 0,
-			effective_capacity: EffectiveCapacity::ExactLiquidity { liquidity_msat: 1_000 },
+			yuv_amount: None,
+			inflight_yuv: None,
+			effective_capacity: EffectiveCapacity::ExactLiquidity { liquidity_msat: 1_000, liquidity_yuv: None },
 		};
 		assert_eq!(scorer.channel_penalty_msat(42, &source, &target, usage, &params), base_penalty_msat);
 
@@ -3269,12 +3385,16 @@ mod tests {
 		let usage = ChannelUsage {
 			amount_msat: 100,
 			inflight_htlc_msat: 0,
-			effective_capacity: EffectiveCapacity::Total { capacity_msat: 1_024, htlc_maximum_msat: 1_024 },
+			yuv_amount: None,
+			inflight_yuv: None,
+			effective_capacity: EffectiveCapacity::Total { capacity_msat: 1_024, htlc_maximum_msat: 1_024, capacity_yuv: None, htlc_maximum_yuv: None },
 		};
 		let usage_1 = ChannelUsage {
 			amount_msat: 1,
 			inflight_htlc_msat: 0,
-			effective_capacity: EffectiveCapacity::Total { capacity_msat: 1_024, htlc_maximum_msat: 1_024 },
+			yuv_amount: None,
+			inflight_yuv: None,
+			effective_capacity: EffectiveCapacity::Total { capacity_msat: 1_024, htlc_maximum_msat: 1_024, capacity_yuv: None, htlc_maximum_yuv: None },
 		};
 
 		// With no historical data the normal liquidity penalty calculation is used.
@@ -3330,7 +3450,9 @@ mod tests {
 		let mut usage = ChannelUsage {
 			amount_msat: 100,
 			inflight_htlc_msat: 1024,
-			effective_capacity: EffectiveCapacity::Total { capacity_msat: 1_024, htlc_maximum_msat: 1_024 },
+			yuv_amount: None,
+			inflight_yuv: None,
+			effective_capacity: EffectiveCapacity::Total { capacity_msat: 1_024, htlc_maximum_msat: 1_024, capacity_yuv: None, htlc_maximum_yuv: None },
 		};
 		scorer.payment_path_failed(&payment_path_for_amount(1), 42);
 		assert_eq!(scorer.channel_penalty_msat(42, &source, &target, usage, &params), 2050);
@@ -3340,7 +3462,9 @@ mod tests {
 		let usage = ChannelUsage {
 			amount_msat: 1,
 			inflight_htlc_msat: 0,
-			effective_capacity: EffectiveCapacity::AdvertisedMaxHTLC { amount_msat: 0 },
+			yuv_amount: None,
+			inflight_yuv: None,
+			effective_capacity: EffectiveCapacity::AdvertisedMaxHTLC { amount_msat: 0, amount_yuv: None },
 		};
 		assert_eq!(scorer.channel_penalty_msat(42, &target, &source, usage, &params), 2048);
 
@@ -3354,7 +3478,7 @@ mod tests {
 			path_hop(source_pubkey(), 42, 1),
 			path_hop(sender_pubkey(), 41, 0),
 		];
-		scorer.payment_path_failed(&Path { hops: path, blinded_tail: None }, 42);
+		scorer.payment_path_failed(&Path { hops: path, blinded_tail: None, chroma: None, }, 42);
 	}
 
 	#[test]
@@ -3373,7 +3497,9 @@ mod tests {
 		let usage = ChannelUsage {
 			amount_msat: 512_000,
 			inflight_htlc_msat: 0,
-			effective_capacity: EffectiveCapacity::Total { capacity_msat: 1_024_000, htlc_maximum_msat: 1_000 },
+			yuv_amount: None,
+			inflight_yuv: None,
+			effective_capacity: EffectiveCapacity::Total { capacity_msat: 1_024_000, htlc_maximum_msat: 1_000, capacity_yuv: None, htlc_maximum_yuv: None },
 		};
 		assert_eq!(scorer.channel_penalty_msat(42, &source, &target, usage, &params), 0);
 
@@ -3381,7 +3507,9 @@ mod tests {
 		let usage = ChannelUsage {
 			amount_msat: 512_000,
 			inflight_htlc_msat: 0,
-			effective_capacity: EffectiveCapacity::Total { capacity_msat: 1_024_000, htlc_maximum_msat: 1_024_000 },
+			yuv_amount: None,
+			inflight_yuv: None,
+			effective_capacity: EffectiveCapacity::Total { capacity_msat: 1_024_000, htlc_maximum_msat: 1_024_000, capacity_yuv: None, htlc_maximum_yuv: None },
 		};
 		assert_eq!(scorer.channel_penalty_msat(42, &source, &target, usage, &params), 500);
 
@@ -3389,7 +3517,9 @@ mod tests {
 		let usage = ChannelUsage {
 			amount_msat: 512_000,
 			inflight_htlc_msat: 0,
-			effective_capacity: EffectiveCapacity::Total { capacity_msat: 1_024_000, htlc_maximum_msat: 512_000 },
+			yuv_amount: None,
+			inflight_yuv: None,
+			effective_capacity: EffectiveCapacity::Total { capacity_msat: 1_024_000, htlc_maximum_msat: 512_000, capacity_yuv: None, htlc_maximum_yuv: None },
 		};
 		assert_eq!(scorer.channel_penalty_msat(42, &source, &target, usage, &params), 500);
 
@@ -3397,7 +3527,9 @@ mod tests {
 		let usage = ChannelUsage {
 			amount_msat: 512_000,
 			inflight_htlc_msat: 0,
-			effective_capacity: EffectiveCapacity::Total { capacity_msat: 1_024_000, htlc_maximum_msat: 511_999 },
+			yuv_amount: None,
+			inflight_yuv: None,
+			effective_capacity: EffectiveCapacity::Total { capacity_msat: 1_024_000, htlc_maximum_msat: 511_999, capacity_yuv: None, htlc_maximum_yuv: None },
 		};
 		assert_eq!(scorer.channel_penalty_msat(42, &source, &target, usage, &params), 0);
 	}
@@ -3418,7 +3550,9 @@ mod tests {
 		let usage = ChannelUsage {
 			amount_msat: 512,
 			inflight_htlc_msat: 0,
-			effective_capacity: EffectiveCapacity::Total { capacity_msat: 1_024, htlc_maximum_msat: 1_000 },
+			yuv_amount: None,
+			inflight_yuv: None,
+			effective_capacity: EffectiveCapacity::Total { capacity_msat: 1_024, htlc_maximum_msat: 1_000, capacity_yuv: None, htlc_maximum_yuv: None },
 		};
 		assert_eq!(scorer.channel_penalty_msat(42, &source, &target, usage, &params), 300);
 
@@ -3436,6 +3570,7 @@ mod tests {
 			blinding_point: blinded_path.blinding_point,
 			excess_final_cltv_expiry_delta: recipient_hop.cltv_expiry_delta,
 			final_value_msat: recipient_hop.fee_msat,
+			final_value_yuv: None,
 		});
 
 		// Check the liquidity before and after scoring payment failures to ensure the blinded path's
@@ -3482,7 +3617,9 @@ mod tests {
 		let usage = ChannelUsage {
 			amount_msat,
 			inflight_htlc_msat: 0,
-			effective_capacity: EffectiveCapacity::Total { capacity_msat, htlc_maximum_msat: capacity_msat },
+			yuv_amount: None,
+			inflight_yuv: None,
+			effective_capacity: EffectiveCapacity::Total { capacity_msat, htlc_maximum_msat: capacity_msat, capacity_yuv: None, htlc_maximum_yuv: None },
 		};
 		// With no historical data the normal liquidity penalty calculation is used, which results
 		// in a success probability of ~75%.

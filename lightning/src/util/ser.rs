@@ -25,23 +25,28 @@ use core::ops::Deref;
 use alloc::collections::BTreeMap;
 
 use bitcoin::secp256k1::{PublicKey, SecretKey};
-use bitcoin::secp256k1::constants::{PUBLIC_KEY_SIZE, SECRET_KEY_SIZE, COMPACT_SIGNATURE_SIZE, SCHNORR_SIGNATURE_SIZE};
+use bitcoin::secp256k1::constants::{PUBLIC_KEY_SIZE, SECRET_KEY_SIZE, COMPACT_SIGNATURE_SIZE, SCHNORR_SIGNATURE_SIZE, SCHNORR_PUBLIC_KEY_SIZE};
 use bitcoin::secp256k1::ecdsa;
 use bitcoin::secp256k1::schnorr;
 use bitcoin::blockdata::constants::ChainHash;
 use bitcoin::blockdata::script::{self, Script};
 use bitcoin::blockdata::transaction::{OutPoint, Transaction, TxOut};
-use bitcoin::{consensus, Witness};
+use bitcoin::{consensus, Witness, XOnlyPublicKey};
 use bitcoin::consensus::Encodable;
 use bitcoin::hashes::sha256d::Hash as Sha256dHash;
 use bitcoin::hash_types::{Txid, BlockHash};
 use core::marker::Sized;
 use core::time::Duration;
+use bitcoin::hashes::{Hash as Hash160, hash160};
+use yuv_pixels::{Chroma, EmptyPixelProof, HtlcScriptKind, LightningCommitmentProof, LightningHtlcData, LightningHtlcProof, Luma, MultisigPixelProof, Pixel, PixelProof, SigPixelProof, CHROMA_SIZE, LUMA_SIZE, PIXEL_SIZE};
+use yuv_types::{YuvTransaction, YuvTxType};
+use yuv_types::announcements::IssueAnnouncement;
 use crate::chain::ClaimId;
-use crate::ln::msgs::DecodeError;
+use crate::ln::msgs::{DecodeError, UpdateBalance};
 #[cfg(taproot)]
 use crate::ln::msgs::PartialSignatureWithNonce;
-use crate::ln::{PaymentPreimage, PaymentHash, PaymentSecret};
+use crate::ln::{PaymentPreimage, PaymentHash, PaymentSecret, ChannelId};
+use crate::ln::channel::{UpdateBalanceInfo, UpdateBalanceRequest, YuvPayment};
 
 use crate::util::byte_utils::{be48_to_array, slice_to_be48};
 use crate::util::string::UntrustedString;
@@ -841,6 +846,10 @@ impl_for_vec!(ecdsa::Signature);
 impl_for_vec!(crate::chain::channelmonitor::ChannelMonitorUpdate);
 impl_for_vec!(crate::ln::channelmanager::MonitorUpdateCompletionAction);
 impl_for_vec!((A, B), A, B);
+impl_for_vec!(PublicKey);
+impl_for_vec!(Script);
+impl_for_vec!(Option<u64>);
+impl_for_vec!(Option<u128>);
 impl_writeable_for_vec!(&crate::routing::router::BlindedTail);
 impl_readable_for_vec!(crate::routing::router::BlindedTail);
 
@@ -911,6 +920,61 @@ impl Readable for PublicKey {
 			Ok(key) => Ok(key),
 			Err(_) => return Err(DecodeError::InvalidValue),
 		}
+	}
+}
+
+impl Writeable for XOnlyPublicKey {
+	fn write<W: Writer>(&self, w: &mut W) -> Result<(), io::Error> {
+		self.serialize().write(w)
+	}
+	#[inline]
+	fn serialized_length(&self) -> usize {
+		SCHNORR_PUBLIC_KEY_SIZE
+	}
+}
+
+impl Readable for XOnlyPublicKey {
+	fn read<R: Read>(r: &mut R) -> Result<Self, DecodeError> {
+		let buf: [u8; SCHNORR_PUBLIC_KEY_SIZE] = Readable::read(r)?;
+		match XOnlyPublicKey::from_slice(&buf) {
+			Ok(key) => Ok(key),
+			Err(_) => Err(DecodeError::InvalidValue),
+		}
+	}
+}
+
+impl Writeable for Luma {
+	fn write<W: Writer>(&self, w: &mut W) -> Result<(), io::Error> {
+		self.to_bytes().write(w)
+	}
+	#[inline]
+	fn serialized_length(&self) -> usize {
+		LUMA_SIZE
+	}
+}
+
+impl Readable for Luma {
+	fn read<R: Read>(r: &mut R) -> Result<Self, DecodeError> {
+		let buf: [u8; LUMA_SIZE] = Readable::read(r)?;
+		Ok(Luma::from_array(buf))
+	}
+}
+
+impl Writeable for Chroma {
+	fn write<W: Writer>(&self, w: &mut W) -> Result<(), io::Error> {
+		self.xonly().write(w)
+	}
+	#[inline]
+	fn serialized_length(&self) -> usize {
+		CHROMA_SIZE
+	}
+}
+
+impl Readable for Chroma {
+	fn read<R: Read>(r: &mut R) -> Result<Self, DecodeError> {
+		let xonly: XOnlyPublicKey = Readable::read(r)?;
+
+		Ok(Chroma::new(xonly))
 	}
 }
 
@@ -1424,6 +1488,478 @@ impl Writeable for ClaimId {
 impl Readable for ClaimId {
 	fn read<R: io::Read>(reader: &mut R) -> Result<Self, DecodeError> {
 		Ok(Self(Readable::read(reader)?))
+	}
+}
+
+impl Writeable for Pixel {
+	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), io::Error> {
+		self.to_bytes().write(writer)
+	}
+}
+
+impl Readable for Pixel {
+	fn read<R: io::Read>(reader: &mut R) -> Result<Self, DecodeError> {
+		let pixel_bytes: [u8; PIXEL_SIZE] = Readable::read(reader)?;
+
+		let pixel = Pixel::from_bytes(&pixel_bytes).map_err(|_| DecodeError::InvalidValue)?;
+
+		Ok(pixel)
+	}
+}
+
+impl Writeable for SigPixelProof {
+	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), io::Error> {
+		self.pixel.write(writer)?;
+		self.inner_key.write(writer)?;
+
+		Ok(())
+	}
+}
+
+impl Readable for SigPixelProof {
+	fn read<R: io::Read>(reader: &mut R) -> Result<Self, DecodeError> {
+		let pixel: Pixel = Readable::read(reader)?;
+		let inner_key: PublicKey = Readable::read(reader)?;
+
+		Ok(SigPixelProof {
+			pixel,
+			inner_key,
+		})
+	}
+}
+
+impl Writeable for EmptyPixelProof {
+	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), io::Error> {
+		self.inner_key.write(writer)?;
+
+		Ok(())
+	}
+}
+
+impl Readable for EmptyPixelProof {
+	fn read<R: io::Read>(reader: &mut R) -> Result<Self, DecodeError> {
+		let inner_key: PublicKey = Readable::read(reader)?;
+
+		Ok(EmptyPixelProof {
+			inner_key,
+		})
+	}
+}
+
+impl Writeable for MultisigPixelProof {
+	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), io::Error> {
+		self.pixel.write(writer)?;
+		self.inner_keys.write(writer)?;
+		self.m.write(writer)?;
+
+		Ok(())
+	}
+}
+
+impl Readable for MultisigPixelProof {
+	fn read<R: io::Read>(reader: &mut R) -> Result<Self, DecodeError> {
+		let pixel: Pixel = Readable::read(reader)?;
+		let inner_keys: Vec<PublicKey> = Readable::read(reader)?;
+		let m: u8 = Readable::read(reader)?;
+
+		Ok(MultisigPixelProof {
+			pixel,
+			inner_keys,
+			m
+		})
+	}
+}
+
+impl Writeable for LightningCommitmentProof {
+	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), io::Error> {
+		self.pixel.write(writer)?;
+		self.revocation_pubkey.write(writer)?;
+		self.to_self_delay.write(writer)?;
+		self.local_delayed_pubkey.write(writer)?;
+
+		Ok(())
+	}
+}
+
+impl Readable for LightningCommitmentProof {
+	fn read<R: io::Read>(reader: &mut R) -> Result<Self, DecodeError> {
+		let pixel: Pixel = Readable::read(reader)?;
+		let revocation_pubkey: PublicKey = Readable::read(reader)?;
+		let to_self_delay: u16 = Readable::read(reader)?;
+		let local_delayed_pubkey: PublicKey = Readable::read(reader)?;
+
+		Ok(LightningCommitmentProof {
+			pixel,
+			revocation_pubkey,
+			to_self_delay,
+			local_delayed_pubkey,
+		})
+	}
+}
+
+impl Writeable for LightningHtlcProof {
+	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), io::Error> {
+		self.pixel.write(writer)?;
+		self.data.write(writer)?;
+
+		Ok(())
+	}
+}
+
+impl Readable for LightningHtlcProof {
+	fn read<R: Read>(reader: &mut R) -> Result<Self, DecodeError> {
+		let pixel: Pixel = Readable::read(reader)?;
+		let data: LightningHtlcData = Readable::read(reader)?;
+
+		Ok(LightningHtlcProof {
+			pixel,
+			data,
+		})
+	}
+}
+
+impl Readable for LightningHtlcData {
+	fn read<R: Read>(reader: &mut R) -> Result<Self, DecodeError> {
+		let payment_hash: hash160::Hash = Readable::read(reader)?;
+		let revocation_key_hash: hash160::Hash = Readable::read(reader)?;
+		let local_htlc_key = Readable::read(reader)?;
+		let remote_htlc_key = Readable::read(reader)?;
+		let kind = Readable::read(reader)?;
+
+		Ok(LightningHtlcData {
+			payment_hash,
+			revocation_key_hash,
+			local_htlc_key,
+			remote_htlc_key,
+			kind,
+		})
+	}
+}
+
+impl Writeable for LightningHtlcData {
+	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), io::Error> {
+		self.payment_hash.write(writer)?;
+		self.revocation_key_hash.write(writer)?;
+		self.local_htlc_key.write(writer)?;
+		self.remote_htlc_key.write(writer)?;
+		self.kind.write(writer)?;
+
+		Ok(())
+	}
+}
+
+impl Readable for HtlcScriptKind {
+	fn read<R: Read>(reader: &mut R) -> Result<Self, DecodeError> {
+		let kind: u8 = Readable::read(reader)?;
+
+		let htlc_script_kind = match kind {
+			0 => HtlcScriptKind::Offered,
+			1 => HtlcScriptKind::Received {
+				cltv_expiry: Readable::read(reader)?,
+			},
+			_ => return Err(DecodeError::InvalidValue)
+		};
+
+		Ok(htlc_script_kind)
+	}
+}
+
+impl Writeable for HtlcScriptKind {
+	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), io::Error> {
+		match self {
+			HtlcScriptKind::Offered => 0u8.write(writer)?,
+			HtlcScriptKind::Received { cltv_expiry } => {
+				1u8.write(writer)?;
+				cltv_expiry.write(writer)?;
+			},
+		}
+
+		Ok(())
+	}
+}
+
+impl Readable for hash160::Hash {
+	fn read<R: Read>(reader: &mut R) -> Result<Self, DecodeError> {
+		let hash: Vec<u8> = Readable::read(reader)?;
+
+		Ok(hash160::Hash::from_slice(&hash).map_err(|_| DecodeError::InvalidValue)?)
+	}
+}
+
+impl Writeable for hash160::Hash {
+	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), io::Error> {
+		Ok(self.to_vec().write(writer)?)
+	}
+}
+
+impl Writeable for PixelProof {
+	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), io::Error> {
+		match self {
+			PixelProof::Sig(sig) => {
+				0u8.write(writer)?;
+				sig.write(writer)
+			},
+			PixelProof::Multisig(sig) => {
+				1u8.write(writer)?;
+				sig.write(writer)
+			},
+			PixelProof::Lightning(commitment_proof) => {
+				2u8.write(writer)?;
+				commitment_proof.write(writer)
+			},
+			PixelProof::LightningHtlc(htlc_proof) => {
+				3u8.write(writer)?;
+				htlc_proof.write(writer)
+			},
+			PixelProof::EmptyPixel(proof) => {
+				4u8.write(writer)?;
+				proof.write(writer)
+			},
+		}
+	}
+}
+
+impl Readable for PixelProof {
+	fn read<R: io::Read>(reader: &mut R) -> Result<Self, DecodeError> {
+		let proof_type: u8 = Readable::read(reader)?;
+
+		match proof_type {
+			0 => {
+				let sig: SigPixelProof = Readable::read(reader)?;
+				Ok(PixelProof::Sig(sig))
+			},
+			1 => {
+				let sig: MultisigPixelProof = Readable::read(reader)?;
+				Ok(PixelProof::Multisig(sig))
+			},
+			2 => {
+				let commitment_proof: LightningCommitmentProof = Readable::read(reader)?;
+				Ok(PixelProof::Lightning(commitment_proof))
+			},
+			3 => {
+				let htlc_proof: LightningHtlcProof = Readable::read(reader)?;
+				Ok(PixelProof::LightningHtlc(htlc_proof))
+			},
+			4 => {
+				let empty_pixel_proof: EmptyPixelProof = Readable::read(reader)?;
+				Ok(PixelProof::EmptyPixel(empty_pixel_proof))
+			}
+			_ => Err(DecodeError::InvalidValue)
+		}
+	}
+}
+
+impl Writeable for YuvTxType {
+	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), io::Error> {
+		match self {
+			YuvTxType::Issue { output_proofs, announcement } => {
+				0u8.write(writer)?;
+				output_proofs.write(writer)?;
+				announcement.write(writer)?;
+			}
+			YuvTxType::Transfer { output_proofs, input_proofs } => {
+				1u8.write(writer)?;
+				output_proofs.write(writer)?;
+				input_proofs.write(writer)?;
+			}
+			_ => return Err(io::Error::new(io::ErrorKind::InvalidInput, "Invalid YuvTxType")),
+		}
+
+		Ok(())
+	}
+}
+
+impl Readable for YuvTxType {
+	fn read<R: io::Read>(reader: &mut R) -> Result<Self, DecodeError> {
+		let tx_type_byte: u8 = Readable::read(reader)?;
+
+		match tx_type_byte {
+			// Issue
+			0 => {
+				let output_proofs: Option<BTreeMap<u32, PixelProof>> = Readable::read(reader)?;
+				let announcement: IssueAnnouncement = Readable::read(reader)?;
+
+				Ok(YuvTxType::Issue{
+					output_proofs,
+					announcement
+				})
+			}
+
+			// Transfer
+			1 => {
+				let output_proofs: BTreeMap<u32, PixelProof> = Readable::read(reader)?;
+				let input_proofs: BTreeMap<u32, PixelProof> = Readable::read(reader)?;
+
+				Ok(YuvTxType::Transfer {
+					output_proofs,
+					input_proofs,
+				})
+			}
+
+			// Unknown
+			_ => Err(DecodeError::InvalidValue)
+		}
+	}
+}
+
+impl Writeable for IssueAnnouncement {
+	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), io::Error> {
+		self.chroma.write(writer)?;
+		self.amount.write(writer)?;
+
+		Ok(())
+	}
+}
+
+impl Readable for IssueAnnouncement {
+	fn read<R: Read>(reader: &mut R) -> Result<Self, DecodeError> {
+		let chroma: Chroma = Readable::read(reader)?;
+		let amount: u128 = Readable::read(reader)?;
+
+		Ok(IssueAnnouncement {
+			chroma,
+			amount,
+		})
+	}
+}
+
+impl Writeable for YuvPayment {
+	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), io::Error> {
+		self.holder_pixel.write(writer)?;
+		self.counterparty_pixel.write(writer)?;
+		self.funding_pixel.write(writer)?;
+		self.is_funding_yuv_transaction_confirmed.write(writer)?;
+		self.funding_pixel_proof.write(writer)?;
+		self.holder_shutdown_inner_key.write(writer)?;
+		self.counterparty_shutdown_inner_key.write(writer)?;
+
+		Ok(())
+	}
+}
+
+impl Readable for YuvPayment {
+	fn read<R: Read>(reader: &mut R) -> Result<Self, DecodeError> {
+		let holder_pixel: Pixel = Readable::read(reader)?;
+		let counterparty_pixel: Pixel = Readable::read(reader)?;
+		let funding_pixel: Pixel = Readable::read(reader)?;
+		let is_funding_yuv_transaction_confirmed: bool = Readable::read(reader)?;
+		let funding_pixel_proof: Option<YuvTxType> = Readable::read(reader)?;
+		let holder_inner_key: Option<PublicKey> = Readable::read(reader)?;
+		let counterparty_inner_key: Option<PublicKey> = Readable::read(reader)?;
+
+		Ok(YuvPayment {
+			holder_pixel,
+			counterparty_pixel,
+			funding_pixel,
+			is_funding_yuv_transaction_confirmed,
+			funding_pixel_proof,
+			holder_shutdown_inner_key: holder_inner_key,
+			counterparty_shutdown_inner_key: counterparty_inner_key,
+		})
+	}
+}
+
+impl Writeable for YuvTransaction {
+	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), io::Error> {
+		self.bitcoin_tx.write(writer)?;
+		self.tx_type.write(writer)?;
+
+		Ok(())
+	}
+}
+
+impl Readable for YuvTransaction {
+	fn read<R: Read>(reader: &mut R) -> Result<Self, DecodeError> {
+		let bitcoin_tx: Transaction = Readable::read(reader)?;
+		let tx_type: YuvTxType = Readable::read(reader)?;
+
+		Ok(YuvTransaction {
+			bitcoin_tx,
+			tx_type,
+		})
+	}
+}
+
+impl Writeable for UpdateBalance {
+	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), io::Error> {
+		self.channel_id.write(writer)?;
+		self.new_balance_msat.write(writer)?;
+		self.new_yuv_pixel_luma.write(writer)?;
+
+		Ok(())
+	}
+}
+
+impl Readable for UpdateBalance {
+	fn read<R: Read>(reader: &mut R) -> Result<Self, DecodeError> {
+		let channel_id: ChannelId = Readable::read(reader)?;
+		let new_balance_msat: u64 = Readable::read(reader)?;
+		let new_yuv_pixel_luma: Option<Luma> = Readable::read(reader)?;
+
+		Ok(UpdateBalance {
+			channel_id,
+			new_balance_msat,
+			new_yuv_pixel_luma,
+		})
+	}
+}
+
+impl Writeable for UpdateBalanceRequest {
+	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), io::Error> {
+		match self {
+			UpdateBalanceRequest::Inbound(msg)=> {
+				0u8.write(writer)?;
+				msg.write(writer)?;
+			},
+			UpdateBalanceRequest::Outbound(msg)=> {
+				1u8.write(writer)?;
+				msg.write(writer)?;
+			},
+		}
+
+		Ok(())
+	}
+}
+
+impl Readable for UpdateBalanceRequest {
+	fn read<R: Read>(reader: &mut R) -> Result<Self, DecodeError> {
+		let request_type: u8 = Readable::read(reader)?;
+
+		match request_type {
+			0 => {
+				let msg: UpdateBalance = Readable::read(reader)?;
+				Ok(UpdateBalanceRequest::Inbound(msg))
+			},
+			1 => {
+				let msg: UpdateBalance = Readable::read(reader)?;
+				Ok(UpdateBalanceRequest::Outbound(msg))
+			},
+			_ => Err(DecodeError::InvalidValue)
+		}
+	}
+}
+
+impl Writeable for UpdateBalanceInfo {
+	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), io::Error> {
+		self.inbound_request.write(writer)?;
+		self.outbound_request.write(writer)?;
+		self.is_update_in_progress.write(writer)?;
+
+		Ok(())
+	}
+}
+
+impl Readable for UpdateBalanceInfo {
+	fn read<R: Read>(reader: &mut R) -> Result<Self, DecodeError> {
+		let inbound_request: Option<UpdateBalanceRequest> = Readable::read(reader)?;
+		let outbound_request: Option<UpdateBalanceRequest> = Readable::read(reader)?;
+		let is_update_in_progress: bool = Readable::read(reader)?;
+
+		Ok(UpdateBalanceInfo {
+			inbound_request,
+			outbound_request,
+			is_update_in_progress,
+		})
 	}
 }
 

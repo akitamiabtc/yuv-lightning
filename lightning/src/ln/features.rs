@@ -64,6 +64,8 @@
 //!     and HTLC transactions are pre-signed with zero fee (see
 //!     [BOLT-3](https://github.com/lightning/bolts/blob/master/03-transactions.md) for more
 //!     information).
+//! - `YuvPayments` - requires/supports that a node can receive YUV payments (see
+//!    // TODO: update link when it will appear ).
 //!
 //! LDK knows about the following features, but does not support them:
 //! - `AnchorsNonzeroFeeHtlcTx` - the initial version of anchor outputs, which was later found to be
@@ -150,6 +152,8 @@ mod sealed {
 		ChannelType | SCIDPrivacy,
 		// Byte 6
 		ZeroConf,
+		// Byte 7
+		YuvPayments,
 	]);
 	define_context!(NodeContext, [
 		// Byte 0
@@ -167,7 +171,24 @@ mod sealed {
 		// Byte 6
 		ZeroConf | Keysend,
 	]);
-	define_context!(ChannelContext, []);
+	define_context!(ChannelContext, [
+		// Byte 0
+		,
+		// Byte 1,
+		,
+		// Byte 2
+		,
+		// Byte 3
+		,
+		// Byte 4
+		,
+		// Byte 5
+		,
+		// Byte 6
+		,
+		// Byte 7
+		YuvPayments,
+	]);
 	define_context!(Bolt11InvoiceContext, [
 		// Byte 0
 		,
@@ -415,6 +436,10 @@ mod sealed {
 	define_feature!(55, Keysend, [NodeContext],
 		"Feature flags for keysend payments.", set_keysend_optional, set_keysend_required,
 		supports_keysend, requires_keysend);
+	define_feature!(57, YuvPayments, [InitContext, ChannelContext],
+		"Feature flags for YUV payments.", set_yuv_payments_optional, set_yuv_payments_required,
+		supports_yuv_payments, requires_yuv_payments);
+
 	// Note: update the module-level docs when a new feature bit is added!
 
 	#[cfg(test)]
@@ -1092,13 +1117,13 @@ mod tests {
 	#[test]
 	fn convert_to_context_with_unknown_flags() {
 		// Ensure the `from` context has fewer known feature bytes than the `to` context.
-		assert!(<sealed::ChannelContext as sealed::Context>::KNOWN_FEATURE_MASK.len() <
-			<sealed::Bolt11InvoiceContext as sealed::Context>::KNOWN_FEATURE_MASK.len());
-		let mut channel_features = ChannelFeatures::empty();
-		channel_features.set_unknown_feature_optional();
-		assert!(channel_features.supports_unknown_bits());
-		let invoice_features: Bolt11InvoiceFeatures = channel_features.to_context_internal();
-		assert!(!invoice_features.supports_unknown_bits());
+		assert!(<sealed::Bolt11InvoiceContext as sealed::Context>::KNOWN_FEATURE_MASK.len() <
+			<sealed::ChannelContext as sealed::Context>::KNOWN_FEATURE_MASK.len());
+		let mut invoice_features = Bolt11InvoiceFeatures::empty();
+		invoice_features.set_unknown_feature_optional();
+		assert!(invoice_features.supports_unknown_bits());
+		let channel_features: ChannelFeatures = invoice_features.to_context_internal();
+		assert!(!channel_features.supports_unknown_bits());
 	}
 
 	#[test]

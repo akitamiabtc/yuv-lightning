@@ -148,6 +148,12 @@ pub struct ChannelHandshakeConfig {
 	///                as 1000 sats instead, which is a safe implementation-specific lower bound.
 	/// Maximum value: 1,000,000, any values larger than 1 Million will be treated as 1 Million (or 100%)
 	///                instead, although channel negotiations will fail in that case.
+	///
+	/// WARN: if YUVPayments feature is used, it is important to have enough channel reserve to
+	/// cover the cost of the future commitment fee. Otherwise, if the output is considered dust
+	/// and won't be included in a transaction you won't be able to generate valid YUV proofs as
+	/// the input YUV value (aka. funding YUV pixel's amount) won't be the same as the sum of
+	/// output values.
 	pub their_channel_reserve_proportional_millionths: u32,
 	/// If set, we attempt to negotiate the `anchors_zero_fee_htlc_tx`option for all future
 	/// channels. This feature requires having a reserve of onchain funds readily available to bump
@@ -764,11 +770,18 @@ pub struct UserConfig {
 	///
 	/// [`ChannelManager`]: crate::ln::channelmanager::ChannelManager
 	pub accept_mpp_keysend: bool,
+	/// If this is set to true, we will accept payments that accords to the YUV Protocol.
+	///
+	/// When set to true, `YuvPayments` (see: [`features`](crate::ln::features)) feature will be
+	/// enabled, otherwise LDK will fail any payments that accords to the YUV Protocol.
+	///
+	/// Default value: false.
+	pub support_yuv_payments: bool,
 }
 
 impl Default for UserConfig {
 	fn default() -> Self {
-		UserConfig {
+		Self {
 			channel_handshake_config: ChannelHandshakeConfig::default(),
 			channel_handshake_limits: ChannelHandshakeLimits::default(),
 			channel_config: ChannelConfig::default(),
@@ -777,6 +790,7 @@ impl Default for UserConfig {
 			manually_accept_inbound_channels: false,
 			accept_intercept_htlcs: false,
 			accept_mpp_keysend: false,
+			support_yuv_payments: false,
 		}
 	}
 }

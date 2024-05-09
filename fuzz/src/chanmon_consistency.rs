@@ -34,7 +34,7 @@ use lightning::chain;
 use lightning::chain::{BestBlock, ChannelMonitorUpdateStatus, chainmonitor, channelmonitor, Confirm, Watch};
 use lightning::chain::channelmonitor::{ChannelMonitor, MonitorEvent};
 use lightning::chain::transaction::OutPoint;
-use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
+use lightning::chain::chaininterface::{BroadcasterInterface, YuvBroadcaster, ConfirmationTarget, FeeEstimator};
 use lightning::sign::{KeyMaterial, InMemorySigner, Recipient, EntropySource, NodeSigner, SignerProvider};
 use lightning::events;
 use lightning::events::MessageSendEventsProvider;
@@ -61,6 +61,8 @@ use bitcoin::secp256k1::ecdh::SharedSecret;
 use bitcoin::secp256k1::ecdsa::{RecoverableSignature, Signature};
 use bitcoin::secp256k1::schnorr;
 
+use yuv_types::YuvTransaction;
+
 use std::mem;
 use std::cmp::{self, Ordering};
 use hashbrown::{HashSet, hash_map, HashMap};
@@ -68,6 +70,7 @@ use std::sync::{Arc,Mutex};
 use std::sync::atomic;
 use std::io::Cursor;
 use bitcoin::bech32::u5;
+use yuv_pixels::Pixel;
 
 const MAX_FEE: u32 = 10_000;
 struct FuzzEstimator {
@@ -106,6 +109,13 @@ impl BroadcasterInterface for TestBroadcaster {
 	fn broadcast_transactions(&self, _txs: &[&Transaction]) { }
 }
 
+pub struct TestYuvBroadcaster {}
+impl YuvBroadcaster for TestYuvBroadcaster {
+	fn broadcast_transactions_proofs(&self, _yuv_tx: YuvTransaction) {}
+
+	fn emulate_yuv_transaction(&self, _yuv_tx: YuvTransaction) -> Option<String> {Some(String::new())}
+}
+
 pub struct VecWriter(pub Vec<u8>);
 impl Writer for VecWriter {
 	fn write_all(&mut self, buf: &[u8]) -> Result<(), ::std::io::Error> {
@@ -118,7 +128,7 @@ struct TestChainMonitor {
 	pub logger: Arc<dyn Logger>,
 	pub keys: Arc<KeyProvider>,
 	pub persister: Arc<TestPersister>,
-	pub chain_monitor: Arc<chainmonitor::ChainMonitor<TestChannelSigner, Arc<dyn chain::Filter>, Arc<TestBroadcaster>, Arc<FuzzEstimator>, Arc<dyn Logger>, Arc<TestPersister>>>,
+	pub chain_monitor: Arc<chainmonitor::ChainMonitor<TestChannelSigner, Arc<dyn chain::Filter>, Arc<TestBroadcaster>, Arc<TestYuvBroadcaster>, Arc<FuzzEstimator>, Arc<dyn Logger>, Arc<TestPersister>>>,
 	// If we reload a node with an old copy of ChannelMonitors, the ChannelManager deserialization
 	// logic will automatically force-close our channels for us (as we don't have an up-to-date
 	// monitor implying we are not able to punish misbehaving counterparties). Because this test
@@ -129,7 +139,7 @@ struct TestChainMonitor {
 impl TestChainMonitor {
 	pub fn new(broadcaster: Arc<TestBroadcaster>, logger: Arc<dyn Logger>, feeest: Arc<FuzzEstimator>, persister: Arc<TestPersister>, keys: Arc<KeyProvider>) -> Self {
 		Self {
-			chain_monitor: Arc::new(chainmonitor::ChainMonitor::new(None, broadcaster, logger.clone(), feeest, Arc::clone(&persister))),
+			chain_monitor: Arc::new(chainmonitor::ChainMonitor::new(None, broadcaster, None, logger.clone(), feeest, Arc::clone(&persister))),
 			logger,
 			keys,
 			persister,
@@ -155,7 +165,7 @@ impl chain::Watch<TestChannelSigner> for TestChainMonitor {
 		};
 		let deserialized_monitor = <(BlockHash, channelmonitor::ChannelMonitor<TestChannelSigner>)>::
 			read(&mut Cursor::new(&map_entry.get().1), (&*self.keys, &*self.keys)).unwrap().1;
-		deserialized_monitor.update_monitor(update, &&TestBroadcaster{}, &&FuzzEstimator { ret_val: atomic::AtomicU32::new(253) }, &self.logger).unwrap();
+		deserialized_monitor.update_monitor(update, &&TestBroadcaster{}, &Some(&TestYuvBroadcaster{}), &&FuzzEstimator { ret_val: atomic::AtomicU32::new(253) }, &self.logger).unwrap();
 		let mut ser = VecWriter(Vec::new());
 		deserialized_monitor.write(&mut ser).unwrap();
 		map_entry.insert((update.update_id, ser.0));
@@ -282,6 +292,10 @@ impl SignerProvider for KeyProvider {
 		let pubkey_hash = WPubkeyHash::hash(&PublicKey::from_secret_key(&secp_ctx, &secret_key).serialize());
 		Ok(ShutdownScript::new_p2wpkh(&pubkey_hash))
 	}
+
+	fn get_shutdown_pixel_scriptpubkey(&self, _yuv_pixel: &Pixel) -> Result<(ShutdownScript, PublicKey), ()> {
+		todo!()
+	}
 }
 
 impl KeyProvider {
@@ -336,7 +350,7 @@ fn check_payment_err(send_err: PaymentSendFailure, sendable_bounds_violated: boo
 	}
 }
 
-type ChanMan<'a> = ChannelManager<Arc<TestChainMonitor>, Arc<TestBroadcaster>, Arc<KeyProvider>, Arc<KeyProvider>, Arc<KeyProvider>, Arc<FuzzEstimator>, &'a FuzzRouter, Arc<dyn Logger>>;
+type ChanMan<'a> = ChannelManager<Arc<TestChainMonitor>, Arc<TestBroadcaster>, Arc<TestYuvBroadcaster>, Arc<KeyProvider>, Arc<KeyProvider>, Arc<KeyProvider>, Arc<FuzzEstimator>, &'a FuzzRouter, Arc<dyn Logger>>;
 
 #[inline]
 fn get_payment_secret_hash(dest: &ChanMan, payment_id: &mut u8) -> Option<(PaymentSecret, PaymentHash)> {
@@ -434,6 +448,7 @@ fn send_hop_payment(source: &ChanMan, middle: &ChanMan, middle_chan_id: u64, des
 pub fn do_test<Out: Output>(data: &[u8], underlying_out: Out) {
 	let out = SearchingOutput::new(underlying_out);
 	let broadcast = Arc::new(TestBroadcaster{});
+	let yuv_broadcast = Arc::new(TestYuvBroadcaster{});
 	let router = FuzzRouter {};
 
 	macro_rules! make_node {
@@ -455,7 +470,7 @@ pub fn do_test<Out: Output>(data: &[u8], underlying_out: Out) {
 				network,
 				best_block: BestBlock::from_network(network),
 			};
-			(ChannelManager::new($fee_estimator.clone(), monitor.clone(), broadcast.clone(), &router, Arc::clone(&logger), keys_manager.clone(), keys_manager.clone(), keys_manager.clone(), config, params, best_block_timestamp),
+			(ChannelManager::new($fee_estimator.clone(), monitor.clone(), broadcast.clone(), None, &router, Arc::clone(&logger), keys_manager.clone(), keys_manager.clone(), keys_manager.clone(), config, params, best_block_timestamp),
 			monitor, keys_manager)
 		} }
 	}
@@ -491,6 +506,7 @@ pub fn do_test<Out: Output>(data: &[u8], underlying_out: Out) {
 				fee_estimator: $fee_estimator.clone(),
 				chain_monitor: chain_monitor.clone(),
 				tx_broadcaster: broadcast.clone(),
+				yuv_tx_broadcaster: Some(yuv_broadcast.clone()),
 				router: &router,
 				logger,
 				default_config: config,
@@ -516,7 +532,7 @@ pub fn do_test<Out: Output>(data: &[u8], underlying_out: Out) {
 				features: $source.init_features(), networks: None, remote_network_address: None
 			}, false).unwrap();
 
-			$source.create_channel($dest.get_our_node_id(), 100_000, 42, 0, None).unwrap();
+			$source.create_channel($dest.get_our_node_id(), 100_000, 42, 0, None, None).unwrap();
 			let open_channel = {
 				let events = $source.get_and_clear_pending_msg_events();
 				assert_eq!(events.len(), 1);
@@ -544,7 +560,7 @@ pub fn do_test<Out: Output>(data: &[u8], underlying_out: Out) {
 						value: *channel_value_satoshis, script_pubkey: output_script.clone(),
 					}]};
 					funding_output = OutPoint { txid: tx.txid(), index: 0 };
-					$source.funding_transaction_generated(&temporary_channel_id, &$dest.get_our_node_id(), tx.clone()).unwrap();
+					$source.funding_transaction_generated(&temporary_channel_id, &$dest.get_our_node_id(), tx.clone(), None).unwrap();
 					channel_txn.push(tx);
 				} else { panic!("Wrong event type"); }
 			}

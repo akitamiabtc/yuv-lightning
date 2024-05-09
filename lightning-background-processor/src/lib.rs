@@ -23,7 +23,7 @@ extern crate alloc;
 extern crate lightning_rapid_gossip_sync;
 
 use lightning::chain;
-use lightning::chain::chaininterface::{BroadcasterInterface, FeeEstimator};
+use lightning::chain::chaininterface::{BroadcasterInterface, FeeEstimator, YuvBroadcaster};
 use lightning::chain::chainmonitor::{ChainMonitor, Persist};
 use lightning::sign::{EntropySource, NodeSigner, SignerProvider};
 use lightning::events::{Event, PathFailure};
@@ -522,16 +522,17 @@ use core::task;
 /// #     fn disconnect_socket(&mut self) {}
 /// # }
 /// # type MyBroadcaster = dyn lightning::chain::chaininterface::BroadcasterInterface + Send + Sync;
+/// # type MyYuvBroadcaster = dyn lightning::chain::chaininterface::YuvBroadcaster + Send + Sync;
 /// # type MyFeeEstimator = dyn lightning::chain::chaininterface::FeeEstimator + Send + Sync;
 /// # type MyNodeSigner = dyn lightning::sign::NodeSigner + Send + Sync;
 /// # type MyUtxoLookup = dyn lightning::routing::utxo::UtxoLookup + Send + Sync;
 /// # type MyFilter = dyn lightning::chain::Filter + Send + Sync;
 /// # type MyLogger = dyn lightning::util::logger::Logger + Send + Sync;
-/// # type MyChainMonitor = lightning::chain::chainmonitor::ChainMonitor<lightning::sign::InMemorySigner, Arc<MyFilter>, Arc<MyBroadcaster>, Arc<MyFeeEstimator>, Arc<MyLogger>, Arc<MyStore>>;
-/// # type MyPeerManager = lightning::ln::peer_handler::SimpleArcPeerManager<MySocketDescriptor, MyChainMonitor, MyBroadcaster, MyFeeEstimator, Arc<MyUtxoLookup>, MyLogger>;
+/// # type MyChainMonitor = lightning::chain::chainmonitor::ChainMonitor<lightning::sign::InMemorySigner, Arc<MyFilter>, Arc<MyBroadcaster>, Arc<MyYuvBroadcaster>, Arc<MyFeeEstimator>, Arc<MyLogger>, Arc<MyStore>>;
+/// # type MyPeerManager = lightning::ln::peer_handler::SimpleArcPeerManager<MySocketDescriptor, MyChainMonitor, MyBroadcaster, MyYuvBroadcaster, MyFeeEstimator, Arc<MyUtxoLookup>, MyLogger>;
 /// # type MyNetworkGraph = lightning::routing::gossip::NetworkGraph<Arc<MyLogger>>;
 /// # type MyGossipSync = lightning::routing::gossip::P2PGossipSync<Arc<MyNetworkGraph>, Arc<MyUtxoLookup>, Arc<MyLogger>>;
-/// # type MyChannelManager = lightning::ln::channelmanager::SimpleArcChannelManager<MyChainMonitor, MyBroadcaster, MyFeeEstimator, MyLogger>;
+/// # type MyChannelManager = lightning::ln::channelmanager::SimpleArcChannelManager<MyChainMonitor, MyBroadcaster, MyYuvBroadcaster, MyFeeEstimator, MyLogger>;
 /// # type MyScorer = RwLock<lightning::routing::scoring::ProbabilisticScorer<Arc<MyNetworkGraph>, Arc<MyLogger>>>;
 ///
 /// # async fn setup_background_processing(my_persister: Arc<MyStore>, my_event_handler: Arc<MyEventHandler>, my_chain_monitor: Arc<MyChainMonitor>, my_channel_manager: Arc<MyChannelManager>, my_gossip_sync: Arc<MyGossipSync>, my_logger: Arc<MyLogger>, my_scorer: Arc<MyScorer>, my_peer_manager: Arc<MyPeerManager>) {
@@ -588,6 +589,7 @@ pub async fn process_events_async<
 	CF: 'static + Deref + Send + Sync,
 	CW: 'static + Deref + Send + Sync,
 	T: 'static + Deref + Send + Sync,
+	YT: 'static + Deref + Send + Sync,
 	ES: 'static + Deref + Send + Sync,
 	NS: 'static + Deref + Send + Sync,
 	SP: 'static + Deref + Send + Sync,
@@ -599,8 +601,8 @@ pub async fn process_events_async<
 	EventHandlerFuture: core::future::Future<Output = ()>,
 	EventHandler: Fn(Event) -> EventHandlerFuture,
 	PS: 'static + Deref + Send,
-	M: 'static + Deref<Target = ChainMonitor<<SP::Target as SignerProvider>::Signer, CF, T, F, L, P>> + Send + Sync,
-	CM: 'static + Deref<Target = ChannelManager<CW, T, ES, NS, SP, F, R, L>> + Send + Sync,
+	M: 'static + Deref<Target = ChainMonitor<<SP::Target as SignerProvider>::Signer, CF, T, YT, F, L, P>> + Send + Sync,
+	CM: 'static + Deref<Target = ChannelManager<CW, T, YT, ES, NS, SP, F, R, L>> + Send + Sync,
 	PGS: 'static + Deref<Target = P2PGossipSync<G, UL, L>> + Send + Sync,
 	RGS: 'static + Deref<Target = RapidGossipSync<G, L>> + Send,
 	APM: APeerManager + Send + Sync,
@@ -619,6 +621,7 @@ where
 	CF::Target: 'static + chain::Filter,
 	CW::Target: 'static + chain::Watch<<SP::Target as SignerProvider>::Signer>,
 	T::Target: 'static + BroadcasterInterface,
+	YT::Target: 'static + YuvBroadcaster,
 	ES::Target: 'static + EntropySource,
 	NS::Target: 'static + NodeSigner,
 	SP::Target: 'static + SignerProvider,
@@ -626,7 +629,7 @@ where
 	R::Target: 'static + Router,
 	L::Target: 'static + Logger,
 	P::Target: 'static + Persist<<SP::Target as SignerProvider>::Signer>,
-	PS::Target: 'static + Persister<'a, CW, T, ES, NS, SP, F, R, L, SC>,
+	PS::Target: 'static + Persister<'a, CW, T, YT, ES, NS, SP, F, R, L, SC>,
 {
 	let mut should_break = false;
 	let async_event_handler = |event| {
@@ -728,6 +731,7 @@ impl BackgroundProcessor {
 		CF: 'static + Deref + Send + Sync,
 		CW: 'static + Deref + Send + Sync,
 		T: 'static + Deref + Send + Sync,
+		YT: 'static + Deref + Send + Sync,
 		ES: 'static + Deref + Send + Sync,
 		NS: 'static + Deref + Send + Sync,
 		SP: 'static + Deref + Send + Sync,
@@ -738,8 +742,8 @@ impl BackgroundProcessor {
 		P: 'static + Deref + Send + Sync,
 		EH: 'static + EventHandler + Send,
 		PS: 'static + Deref + Send,
-		M: 'static + Deref<Target = ChainMonitor<<SP::Target as SignerProvider>::Signer, CF, T, F, L, P>> + Send + Sync,
-		CM: 'static + Deref<Target = ChannelManager<CW, T, ES, NS, SP, F, R, L>> + Send + Sync,
+		M: 'static + Deref<Target = ChainMonitor<<SP::Target as SignerProvider>::Signer, CF, T, YT, F, L, P>> + Send + Sync,
+		CM: 'static + Deref<Target = ChannelManager<CW, T, YT, ES, NS, SP, F, R, L>> + Send + Sync,
 		PGS: 'static + Deref<Target = P2PGossipSync<G, UL, L>> + Send + Sync,
 		RGS: 'static + Deref<Target = RapidGossipSync<G, L>> + Send,
 		APM: APeerManager + Send + Sync,
@@ -755,6 +759,7 @@ impl BackgroundProcessor {
 		CF::Target: 'static + chain::Filter,
 		CW::Target: 'static + chain::Watch<<SP::Target as SignerProvider>::Signer>,
 		T::Target: 'static + BroadcasterInterface,
+		YT::Target: 'static + YuvBroadcaster,
 		ES::Target: 'static + EntropySource,
 		NS::Target: 'static + NodeSigner,
 		SP::Target: 'static + SignerProvider,
@@ -762,7 +767,7 @@ impl BackgroundProcessor {
 		R::Target: 'static + Router,
 		L::Target: 'static + Logger,
 		P::Target: 'static + Persist<<SP::Target as SignerProvider>::Signer>,
-		PS::Target: 'static + Persister<'a, CW, T, ES, NS, SP, F, R, L, SC>,
+		PS::Target: 'static + Persister<'a, CW, T, YT, ES, NS, SP, F, R, L, SC>,
 	{
 		let stop_thread = Arc::new(AtomicBool::new(false));
 		let stop_thread_clone = stop_thread.clone();
@@ -898,6 +903,7 @@ mod tests {
 		channelmanager::ChannelManager<
 			Arc<ChainMonitor>,
 			Arc<test_utils::TestBroadcaster>,
+			Arc<test_utils::TestYuvBroadcaster>,
 			Arc<KeysManager>,
 			Arc<KeysManager>,
 			Arc<KeysManager>,
@@ -911,7 +917,7 @@ mod tests {
 			>,
 			Arc<test_utils::TestLogger>>;
 
-	type ChainMonitor = chainmonitor::ChainMonitor<InMemorySigner, Arc<test_utils::TestChainSource>, Arc<test_utils::TestBroadcaster>, Arc<test_utils::TestFeeEstimator>, Arc<test_utils::TestLogger>, Arc<FilesystemStore>>;
+	type ChainMonitor = chainmonitor::ChainMonitor<InMemorySigner, Arc<test_utils::TestChainSource>, Arc<test_utils::TestBroadcaster>, Arc<test_utils::TestYuvBroadcaster>, Arc<test_utils::TestFeeEstimator>, Arc<test_utils::TestLogger>, Arc<FilesystemStore>>;
 
 	type PGS = Arc<P2PGossipSync<Arc<NetworkGraph<Arc<test_utils::TestLogger>>>, Arc<test_utils::TestChainSource>, Arc<test_utils::TestLogger>>>;
 	type RGS = Arc<RapidGossipSync<Arc<NetworkGraph<Arc<test_utils::TestLogger>>>, Arc<test_utils::TestLogger>>>;
@@ -1175,6 +1181,7 @@ mod tests {
 		let mut nodes = Vec::new();
 		for i in 0..num_nodes {
 			let tx_broadcaster = Arc::new(test_utils::TestBroadcaster::new(network));
+			let yuv_tx_broadcaster = Some(Arc::new(test_utils::TestYuvBroadcaster::new()));
 			let fee_estimator = Arc::new(test_utils::TestFeeEstimator { sat_per_kw: Mutex::new(253) });
 			let logger = Arc::new(test_utils::TestLogger::with_id(format!("node {}", i)));
 			let genesis_block = genesis_block(network);
@@ -1186,10 +1193,10 @@ mod tests {
 			let kv_store = Arc::new(FilesystemStore::new(format!("{}_persister_{}", &persist_dir, i).into()));
 			let now = Duration::from_secs(genesis_block.header.time as u64);
 			let keys_manager = Arc::new(KeysManager::new(&seed, now.as_secs(), now.subsec_nanos()));
-			let chain_monitor = Arc::new(chainmonitor::ChainMonitor::new(Some(chain_source.clone()), tx_broadcaster.clone(), logger.clone(), fee_estimator.clone(), kv_store.clone()));
+			let chain_monitor = Arc::new(chainmonitor::ChainMonitor::new(Some(chain_source.clone()), tx_broadcaster.clone(), yuv_tx_broadcaster.clone(), logger.clone(), fee_estimator.clone(), kv_store.clone()));
 			let best_block = BestBlock::from_network(network);
 			let params = ChainParameters { network, best_block };
-			let manager = Arc::new(ChannelManager::new(fee_estimator.clone(), chain_monitor.clone(), tx_broadcaster.clone(), router.clone(), logger.clone(), keys_manager.clone(), keys_manager.clone(), keys_manager.clone(), UserConfig::default(), params, genesis_block.header.time));
+			let manager = Arc::new(ChannelManager::new(fee_estimator.clone(), chain_monitor.clone(), tx_broadcaster.clone(), yuv_tx_broadcaster.clone(), router.clone(), logger.clone(), keys_manager.clone(), keys_manager.clone(), keys_manager.clone(), UserConfig::default(), params, genesis_block.header.time));
 			let p2p_gossip_sync = Arc::new(P2PGossipSync::new(network_graph.clone(), Some(chain_source.clone()), logger.clone()));
 			let rapid_gossip_sync = Arc::new(RapidGossipSync::new(network_graph.clone(), logger.clone()));
 			let msg_handler = MessageHandler {
@@ -1222,7 +1229,7 @@ mod tests {
 			let events = $node_a.node.get_and_clear_pending_events();
 			assert_eq!(events.len(), 1);
 			let (temporary_channel_id, tx) = handle_funding_generation_ready!(events[0], $channel_value);
-			$node_a.node.funding_transaction_generated(&temporary_channel_id, &$node_b.node.get_our_node_id(), tx.clone()).unwrap();
+			$node_a.node.funding_transaction_generated(&temporary_channel_id, &$node_b.node.get_our_node_id(), tx.clone(), None).unwrap();
 			$node_b.node.handle_funding_created(&$node_a.node.get_our_node_id(), &get_event_msg!($node_a, MessageSendEvent::SendFundingCreated, $node_b.node.get_our_node_id()));
 			get_event!($node_b, Event::ChannelPending);
 			$node_a.node.handle_funding_signed(&$node_b.node.get_our_node_id(), &get_event_msg!($node_b, MessageSendEvent::SendFundingSigned, $node_a.node.get_our_node_id()));
@@ -1233,7 +1240,7 @@ mod tests {
 
 	macro_rules! begin_open_channel {
 		($node_a: expr, $node_b: expr, $channel_value: expr) => {{
-			$node_a.node.create_channel($node_b.node.get_our_node_id(), $channel_value, 100, 42, None).unwrap();
+			$node_a.node.create_channel($node_b.node.get_our_node_id(), $channel_value, 100, 42, None, None).unwrap();
 			$node_b.node.handle_open_channel(&$node_a.node.get_our_node_id(), &get_event_msg!($node_a, MessageSendEvent::SendOpenChannel, $node_b.node.get_our_node_id()));
 			$node_a.node.handle_accept_channel(&$node_b.node.get_our_node_id(), &get_event_msg!($node_b, MessageSendEvent::SendAcceptChannel, $node_a.node.get_our_node_id()));
 		}}
@@ -1487,7 +1494,7 @@ mod tests {
 		let (temporary_channel_id, funding_tx) = funding_generation_recv
 			.recv_timeout(Duration::from_secs(EVENT_DEADLINE))
 			.expect("FundingGenerationReady not handled within deadline");
-		nodes[0].node.funding_transaction_generated(&temporary_channel_id, &nodes[1].node.get_our_node_id(), funding_tx.clone()).unwrap();
+		nodes[0].node.funding_transaction_generated(&temporary_channel_id, &nodes[1].node.get_our_node_id(), funding_tx.clone(), None).unwrap();
 		nodes[1].node.handle_funding_created(&nodes[0].node.get_our_node_id(), &get_event_msg!(nodes[0], MessageSendEvent::SendFundingCreated, nodes[1].node.get_our_node_id()));
 		get_event!(nodes[1], Event::ChannelPending);
 		nodes[0].node.handle_funding_signed(&nodes[1].node.get_our_node_id(), &get_event_msg!(nodes[1], MessageSendEvent::SendFundingSigned, nodes[0].node.get_our_node_id()));
@@ -1687,7 +1694,7 @@ mod tests {
 				fee_msat: 0,
 				cltv_expiry_delta: MIN_CLTV_EXPIRY_DELTA as u32,
 				maybe_announced_channel: true,
-			}], blinded_tail: None };
+			}], blinded_tail: None, chroma: None };
 
 			$nodes[0].scorer.lock().unwrap().expect(TestResult::PaymentFailure { path: path.clone(), short_channel_id: scored_scid });
 			$nodes[0].node.push_pending_event(Event::PaymentPathFailed {

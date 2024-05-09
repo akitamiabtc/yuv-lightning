@@ -29,7 +29,7 @@ use bitcoin::hash_types::{Txid, BlockHash, WPubkeyHash};
 
 use lightning::chain;
 use lightning::chain::{BestBlock, ChannelMonitorUpdateStatus, Confirm, Listen};
-use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
+use lightning::chain::chaininterface::{YuvBroadcaster, BroadcasterInterface, ConfirmationTarget, FeeEstimator};
 use lightning::chain::chainmonitor;
 use lightning::chain::transaction::OutPoint;
 use lightning::sign::{InMemorySigner, Recipient, KeyMaterial, EntropySource, NodeSigner, SignerProvider};
@@ -66,6 +66,8 @@ use std::cmp;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64,AtomicUsize,Ordering};
 use bitcoin::bech32::u5;
+use yuv_pixels::Pixel;
+use yuv_types::YuvTransaction;
 
 #[inline]
 pub fn slice_to_be16(v: &[u8]) -> u16 {
@@ -153,6 +155,21 @@ impl BroadcasterInterface for TestBroadcaster {
 	}
 }
 
+struct TestYuvBroadcaster {
+	pub txn_broadcasted: Mutex<Vec<YuvTransaction>>,
+	pub txn_emulated: Mutex<Vec<YuvTransaction>>,
+}
+impl YuvBroadcaster for TestYuvBroadcaster {
+	fn broadcast_transactions_proofs(&self, yuv_tx: YuvTransaction) {
+		self.txn_broadcasted.lock().unwrap().push(yuv_tx);
+	}
+
+	fn emulate_yuv_transaction(&self, yuv_tx: YuvTransaction) -> Option<String> {
+		self.txn_emulated.lock().unwrap().push(yuv_tx);
+		None
+	}
+}
+
 #[derive(Clone)]
 struct Peer<'a> {
 	id: u8,
@@ -180,13 +197,13 @@ impl<'a> std::hash::Hash for Peer<'a> {
 }
 
 type ChannelMan<'a> = ChannelManager<
-	Arc<chainmonitor::ChainMonitor<TestChannelSigner, Arc<dyn chain::Filter>, Arc<TestBroadcaster>, Arc<FuzzEstimator>, Arc<dyn Logger>, Arc<TestPersister>>>,
-	Arc<TestBroadcaster>, Arc<KeyProvider>, Arc<KeyProvider>, Arc<KeyProvider>, Arc<FuzzEstimator>, &'a FuzzRouter, Arc<dyn Logger>>;
+	Arc<chainmonitor::ChainMonitor<TestChannelSigner, Arc<dyn chain::Filter>, Arc<TestBroadcaster>, Arc<TestYuvBroadcaster>, Arc<FuzzEstimator>, Arc<dyn Logger>, Arc<TestPersister>>>,
+	Arc<TestBroadcaster>, Arc<TestYuvBroadcaster>, Arc<KeyProvider>, Arc<KeyProvider>, Arc<KeyProvider>, Arc<FuzzEstimator>, &'a FuzzRouter, Arc<dyn Logger>>;
 type PeerMan<'a> = PeerManager<Peer<'a>, Arc<ChannelMan<'a>>, Arc<P2PGossipSync<Arc<NetworkGraph<Arc<dyn Logger>>>, Arc<dyn UtxoLookup>, Arc<dyn Logger>>>, IgnoringMessageHandler, Arc<dyn Logger>, IgnoringMessageHandler, Arc<KeyProvider>>;
 
 struct MoneyLossDetector<'a> {
 	manager: Arc<ChannelMan<'a>>,
-	monitor: Arc<chainmonitor::ChainMonitor<TestChannelSigner, Arc<dyn chain::Filter>, Arc<TestBroadcaster>, Arc<FuzzEstimator>, Arc<dyn Logger>, Arc<TestPersister>>>,
+	monitor: Arc<chainmonitor::ChainMonitor<TestChannelSigner, Arc<dyn chain::Filter>, Arc<TestBroadcaster>, Arc<TestYuvBroadcaster>, Arc<FuzzEstimator>, Arc<dyn Logger>, Arc<TestPersister>>>,
 	handler: PeerMan<'a>,
 
 	peers: &'a RefCell<[bool; 256]>,
@@ -200,7 +217,7 @@ struct MoneyLossDetector<'a> {
 impl<'a> MoneyLossDetector<'a> {
 	pub fn new(peers: &'a RefCell<[bool; 256]>,
 	           manager: Arc<ChannelMan<'a>>,
-	           monitor: Arc<chainmonitor::ChainMonitor<TestChannelSigner, Arc<dyn chain::Filter>, Arc<TestBroadcaster>, Arc<FuzzEstimator>, Arc<dyn Logger>, Arc<TestPersister>>>,
+	           monitor: Arc<chainmonitor::ChainMonitor<TestChannelSigner, Arc<dyn chain::Filter>, Arc<TestBroadcaster>, Arc<TestYuvBroadcaster>, Arc<FuzzEstimator>, Arc<dyn Logger>, Arc<TestPersister>>>,
 	           handler: PeerMan<'a>) -> Self {
 		MoneyLossDetector {
 			manager,
@@ -404,6 +421,10 @@ impl SignerProvider for KeyProvider {
 		let pubkey_hash = WPubkeyHash::hash(&PublicKey::from_secret_key(&secp_ctx, &secret_key).serialize());
 		Ok(ShutdownScript::new_p2wpkh(&pubkey_hash))
 	}
+
+	fn get_shutdown_pixel_scriptpubkey(&self, _yuv_pixel: &Pixel) -> Result<(ShutdownScript, PublicKey), ()> {
+		todo!()
+	}
 }
 
 #[inline]
@@ -443,7 +464,11 @@ pub fn do_test(data: &[u8], logger: &Arc<dyn Logger>) {
 	let inbound_payment_key = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 42];
 
 	let broadcast = Arc::new(TestBroadcaster{ txn_broadcasted: Mutex::new(Vec::new()) });
-	let monitor = Arc::new(chainmonitor::ChainMonitor::new(None, broadcast.clone(), Arc::clone(&logger), fee_est.clone(),
+	let yuv_broadcast = Arc::new(TestYuvBroadcaster{
+		txn_broadcasted: Mutex::new(Vec::new()),
+		txn_emulated: Mutex::new(Vec::new())
+	});
+	let monitor = Arc::new(chainmonitor::ChainMonitor::new(None, broadcast.clone(), Some(yuv_broadcast.clone()),Arc::clone(&logger), fee_est.clone(),
 		Arc::new(TestPersister { update_ret: Mutex::new(ChannelMonitorUpdateStatus::Completed) })));
 
 	let keys_manager = Arc::new(KeyProvider {
@@ -462,7 +487,7 @@ pub fn do_test(data: &[u8], logger: &Arc<dyn Logger>) {
 		network,
 		best_block: BestBlock::from_network(network),
 	};
-	let channelmanager = Arc::new(ChannelManager::new(fee_est.clone(), monitor.clone(), broadcast.clone(), &router, Arc::clone(&logger), keys_manager.clone(), keys_manager.clone(), keys_manager.clone(), config, params, best_block_timestamp));
+	let channelmanager = Arc::new(ChannelManager::new(fee_est.clone(), monitor.clone(), broadcast.clone(), Some(yuv_broadcast.clone()), &router, Arc::clone(&logger), keys_manager.clone(), keys_manager.clone(), keys_manager.clone(), config, params, best_block_timestamp));
 	// Adding new calls to `EntropySource::get_secure_random_bytes` during startup can change all the
 	// keys subsequently generated in this test. Rather than regenerating all the messages manually,
 	// it's easier to just increment the counter here so the keys don't change.
@@ -571,7 +596,7 @@ pub fn do_test(data: &[u8], logger: &Arc<dyn Logger>) {
 				let their_key = get_pubkey!();
 				let chan_value = slice_to_be24(get_slice!(3)) as u64;
 				let push_msat_value = slice_to_be24(get_slice!(3)) as u64;
-				if channelmanager.create_channel(their_key, chan_value, push_msat_value, 0, None).is_err() { return; }
+				if channelmanager.create_channel(their_key, chan_value, push_msat_value, 0, None, None).is_err() { return; }
 			},
 			6 => {
 				let mut channels = channelmanager.list_channels();
@@ -637,7 +662,7 @@ pub fn do_test(data: &[u8], logger: &Arc<dyn Logger>) {
 							continue 'outer_loop;
 						}
 					};
-					if let Err(e) = channelmanager.funding_transaction_generated(&funding_generation.0, &funding_generation.1, tx.clone()) {
+					if let Err(e) = channelmanager.funding_transaction_generated(&funding_generation.0, &funding_generation.1, tx.clone(), None) {
 						// It's possible the channel has been closed in the mean time, but any other
 						// failure may be a bug.
 						if let APIError::ChannelUnavailable { .. } = e { } else { panic!(); }

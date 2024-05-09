@@ -24,6 +24,7 @@ use crate::util::errors::APIError;
 use crate::util::ser::{Writeable, ReadableArgs};
 use crate::util::config::UserConfig;
 use crate::util::string::UntrustedString;
+use crate::chain::chaininterface::YuvBroadcaster;
 
 use bitcoin::hash_types::BlockHash;
 
@@ -247,13 +248,13 @@ fn test_manager_serialize_deserialize_events() {
 	let push_msat = 10001;
 	let node_a = nodes.remove(0);
 	let node_b = nodes.remove(0);
-	node_a.node.create_channel(node_b.node.get_our_node_id(), channel_value, push_msat, 42, None).unwrap();
+	node_a.node.create_channel(node_b.node.get_our_node_id(), channel_value, push_msat, 42, None, None).unwrap();
 	node_b.node.handle_open_channel(&node_a.node.get_our_node_id(), &get_event_msg!(node_a, MessageSendEvent::SendOpenChannel, node_b.node.get_our_node_id()));
 	node_a.node.handle_accept_channel(&node_b.node.get_our_node_id(), &get_event_msg!(node_b, MessageSendEvent::SendAcceptChannel, node_a.node.get_our_node_id()));
 
 	let (temporary_channel_id, tx, funding_output) = create_funding_transaction(&node_a, &node_b.node.get_our_node_id(), channel_value, 42);
 
-	node_a.node.funding_transaction_generated(&temporary_channel_id, &node_b.node.get_our_node_id(), tx.clone()).unwrap();
+	node_a.node.funding_transaction_generated(&temporary_channel_id, &node_b.node.get_our_node_id(), tx.clone(), None).unwrap();
 	check_added_monitors!(node_a, 0);
 
 	node_b.node.handle_funding_created(&node_a.node.get_our_node_id(), &get_event_msg!(node_a, MessageSendEvent::SendFundingCreated, node_b.node.get_our_node_id()));
@@ -392,7 +393,8 @@ fn test_manager_serialize_deserialize_inconsistent_monitor() {
 	fee_estimator = test_utils::TestFeeEstimator { sat_per_kw: Mutex::new(253) };
 	persister = test_utils::TestPersister::new();
 	let keys_manager = &chanmon_cfgs[0].keys_manager;
-	new_chain_monitor = test_utils::TestChainMonitor::new(Some(nodes[0].chain_source), nodes[0].tx_broadcaster, &logger, &fee_estimator, &persister, keys_manager);
+	let yuv_tx_broadcaster = nodes[0].yuv_tx_broadcaster.map(|v| v as &YuvBroadcaster);
+	new_chain_monitor = test_utils::TestChainMonitor::new(Some(nodes[0].chain_source), nodes[0].tx_broadcaster, yuv_tx_broadcaster, &logger, &fee_estimator, &persister, keys_manager);
 	nodes[0].chain_monitor = &new_chain_monitor;
 
 
@@ -414,7 +416,7 @@ fn test_manager_serialize_deserialize_inconsistent_monitor() {
 
 	let mut nodes_0_read = &nodes_0_serialized[..];
 	if let Err(msgs::DecodeError::InvalidValue) =
-		<(BlockHash, ChannelManager<&test_utils::TestChainMonitor, &test_utils::TestBroadcaster, &test_utils::TestKeysInterface, &test_utils::TestKeysInterface, &test_utils::TestKeysInterface, &test_utils::TestFeeEstimator, &test_utils::TestRouter, &test_utils::TestLogger>)>::read(&mut nodes_0_read, ChannelManagerReadArgs {
+		<(BlockHash, ChannelManager<&test_utils::TestChainMonitor, &test_utils::TestBroadcaster, &test_utils::TestYuvBroadcaster, &test_utils::TestKeysInterface, &test_utils::TestKeysInterface, &test_utils::TestKeysInterface, &test_utils::TestFeeEstimator, &test_utils::TestRouter, &test_utils::TestLogger>)>::read(&mut nodes_0_read, ChannelManagerReadArgs {
 		default_config: UserConfig::default(),
 		entropy_source: keys_manager,
 		node_signer: keys_manager,
@@ -422,7 +424,8 @@ fn test_manager_serialize_deserialize_inconsistent_monitor() {
 		fee_estimator: &fee_estimator,
 		router: &nodes[0].router,
 		chain_monitor: nodes[0].chain_monitor,
-		tx_broadcaster: nodes[0].tx_broadcaster.clone(),
+		tx_broadcaster: nodes[0].tx_broadcaster,
+		yuv_tx_broadcaster: nodes[0].yuv_tx_broadcaster,
 		logger: &logger,
 		channel_monitors: node_0_stale_monitors.iter_mut().map(|monitor| { (monitor.get_funding_txo().0, monitor) }).collect(),
 	}) { } else {
@@ -431,7 +434,7 @@ fn test_manager_serialize_deserialize_inconsistent_monitor() {
 
 	let mut nodes_0_read = &nodes_0_serialized[..];
 	let (_, nodes_0_deserialized_tmp) =
-		<(BlockHash, ChannelManager<&test_utils::TestChainMonitor, &test_utils::TestBroadcaster, &test_utils::TestKeysInterface, &test_utils::TestKeysInterface, &test_utils::TestKeysInterface, &test_utils::TestFeeEstimator, &test_utils::TestRouter, &test_utils::TestLogger>)>::read(&mut nodes_0_read, ChannelManagerReadArgs {
+		<(BlockHash, ChannelManager<&test_utils::TestChainMonitor, &test_utils::TestBroadcaster, &test_utils::TestYuvBroadcaster, &test_utils::TestKeysInterface, &test_utils::TestKeysInterface, &test_utils::TestKeysInterface, &test_utils::TestFeeEstimator, &test_utils::TestRouter, &test_utils::TestLogger>)>::read(&mut nodes_0_read, ChannelManagerReadArgs {
 		default_config: UserConfig::default(),
 		entropy_source: keys_manager,
 		node_signer: keys_manager,
@@ -439,7 +442,8 @@ fn test_manager_serialize_deserialize_inconsistent_monitor() {
 		fee_estimator: &fee_estimator,
 		router: nodes[0].router,
 		chain_monitor: nodes[0].chain_monitor,
-		tx_broadcaster: nodes[0].tx_broadcaster.clone(),
+		tx_broadcaster: nodes[0].tx_broadcaster,
+		yuv_tx_broadcaster: nodes[0].yuv_tx_broadcaster,
 		logger: &logger,
 		channel_monitors: node_0_monitors.iter_mut().map(|monitor| { (monitor.get_funding_txo().0, monitor) }).collect(),
 	}).unwrap();
@@ -942,7 +946,7 @@ fn do_forwarded_payment_no_manager_persistence(use_cs_commitment: bool, claim_ht
 
 	if claim_htlc {
 		get_monitor!(nodes[2], chan_id_2).provide_payment_preimage(&payment_hash, &payment_preimage,
-			&nodes[2].tx_broadcaster, &LowerBoundedFeeEstimator(nodes[2].fee_estimator), &nodes[2].logger);
+			&nodes[2].tx_broadcaster, nodes[2].yuv_tx_broadcaster.as_deref(), &LowerBoundedFeeEstimator(nodes[2].fee_estimator), &nodes[2].logger);
 	}
 	assert!(nodes[2].tx_broadcaster.txn_broadcasted.lock().unwrap().is_empty());
 

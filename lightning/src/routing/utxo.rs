@@ -15,9 +15,10 @@
 
 use bitcoin::{BlockHash, TxOut};
 use bitcoin::hashes::hex::ToHex;
+use yuv_pixels::Pixel;
 
 use crate::events::MessageSendEvent;
-use crate::ln::chan_utils::make_funding_redeemscript_from_slices;
+use crate::ln::chan_utils::make_funding_redeemscript_from_node_ids;
 use crate::ln::msgs::{self, LightningError, ErrorAction};
 use crate::routing::gossip::{NetworkGraph, NodeId, P2PGossipSync};
 use crate::util::logger::{Level, Logger};
@@ -37,6 +38,47 @@ pub enum UtxoLookupError {
 
 	/// The requested transaction doesn't exist or hasn't confirmed.
 	UnknownTx,
+
+	/// Errors that occured during the Pixel Lookup
+	Yuv(UtxoLookupYuvError),
+}
+
+/// An error when accessing the chain via [`UtxoLookup`] with YUV.
+#[derive(Clone, Debug)]
+ pub enum UtxoLookupYuvError {
+	/// This transaction is known, but the there is no pixel attached to it.
+	NoPixelAttached,
+
+	/// Timeout for waiting for the pixel to be attached to the YUV graph.
+	AttachTimeout,
+ }
+
+impl From<UtxoLookupYuvError> for UtxoLookupError {
+	fn from(err: UtxoLookupYuvError) -> Self {
+		Self::Yuv(err)
+	}
+}
+
+/// A future resolution of a [`UtxoLookup::get_utxo`] query resolving async.
+#[derive(Clone)]
+pub struct UtxoEntry {
+	/// The transaction output of a funding transaction.
+	pub txout: TxOut,
+
+	/// Optional Pixel attached to the UTXO if UTXO with YUV is requested.
+	pub pixel: Option<Pixel>,
+}
+
+impl UtxoEntry {
+	/// Create a new [`Self`] with the given `txout`.
+	pub fn new(txout: TxOut) -> Self {
+		Self { txout, pixel: None }
+	}
+
+	/// Create a new [`Self`] with the given `txout` and `pixel`.
+	pub fn with_pixel(txout: TxOut, pixel: Pixel) -> Self {
+		Self { txout, pixel: Some(pixel) }
+	}
 }
 
 /// The result of a [`UtxoLookup::get_utxo`] call. A call may resolve either synchronously,
@@ -46,7 +88,7 @@ pub enum UtxoLookupError {
 pub enum UtxoResult {
 	/// A result which was resolved synchronously. It either includes a [`TxOut`] for the output
 	/// requested or a [`UtxoLookupError`].
-	Sync(Result<TxOut, UtxoLookupError>),
+	Sync(Result<UtxoEntry, UtxoLookupError>),
 	/// A result which will be resolved asynchronously. It includes a [`UtxoFuture`], a `clone` of
 	/// which you must keep locally and call [`UtxoFuture::resolve`] on once the lookup completes.
 	///
@@ -65,6 +107,9 @@ pub trait UtxoLookup {
 	///
 	/// [`short_channel_id`]: https://github.com/lightning/bolts/blob/master/07-routing-gossip.md#definition-of-short_channel_id
 	fn get_utxo(&self, genesis_hash: &BlockHash, short_channel_id: u64) -> UtxoResult;
+
+	/// The same as [`UtxoLookup::get_utxo`], but also returns the Pixel attached to the UTXO in [`UtxoEntry`].
+	fn get_utxo_with_yuv(&self, genesis_hash: &BlockHash, short_channel_id: u64) -> UtxoResult;
 }
 
 enum ChannelAnnouncement {
@@ -107,7 +152,7 @@ impl ChannelUpdate {
 }
 
 struct UtxoMessages {
-	complete: Option<Result<TxOut, UtxoLookupError>>,
+	complete: Option<Result<UtxoEntry, UtxoLookupError>>,
 	channel_announce: Option<ChannelAnnouncement>,
 	latest_node_announce_a: Option<NodeAnnouncement>,
 	latest_node_announce_b: Option<NodeAnnouncement>,
@@ -125,9 +170,14 @@ pub struct UtxoFuture {
 
 /// A trivial implementation of [`UtxoLookup`] which is used to call back into the network graph
 /// once we have a concrete resolution of a request.
-pub(crate) struct UtxoResolver(Result<TxOut, UtxoLookupError>);
+pub(crate) struct UtxoResolver(Result<UtxoEntry, UtxoLookupError>);
 impl UtxoLookup for UtxoResolver {
 	fn get_utxo(&self, _genesis_hash: &BlockHash, _short_channel_id: u64) -> UtxoResult {
+		UtxoResult::Sync(self.0.clone())
+	}
+
+	// FIXME:
+	fn get_utxo_with_yuv(&self, _genesis_hash: &BlockHash, _short_channel_id: u64) -> UtxoResult {
 		UtxoResult::Sync(self.0.clone())
 	}
 }
@@ -162,6 +212,16 @@ impl UtxoFuture {
 		self.do_resolve(graph, result);
 	}
 
+	/// The same as [`UtxoFuture::resolve_without_forwarding`], but also returns
+	/// the Pixel attached to the UTXO in [`UtxoEntry`].
+	pub fn resolve_without_forwraning_and_yuv<L: Deref>(
+		&self, graph: &NetworkGraph<L>, result: Result<UtxoEntry, UtxoLookupError>
+	) where
+		L::Target: Logger
+	{
+		self.do_resolve_internal(graph, result);
+	}
+
 	/// Resolves this future against the given `graph` and with the given `result`.
 	///
 	/// The given `gossip` is used to broadcast any validated messages onwards to all peers which
@@ -176,7 +236,14 @@ impl UtxoFuture {
 	pub fn resolve<L: Deref, G: Deref<Target=NetworkGraph<L>>, U: Deref, GS: Deref<Target = P2PGossipSync<G, U, L>>>(&self,
 		graph: &NetworkGraph<L>, gossip: GS, result: Result<TxOut, UtxoLookupError>
 	) where L::Target: Logger, U::Target: UtxoLookup {
-		let mut res = self.do_resolve(graph, result);
+		self.resolve_internal(graph, gossip, result.map(UtxoEntry::new))
+	}
+
+	/// The same as [`UtxoFuture::resolve`], but also returns the Pixel attached to the UTXO in [`UtxoEntry`].
+	pub fn resolve_internal<L: Deref, G: Deref<Target=NetworkGraph<L>>, U: Deref, GS: Deref<Target = P2PGossipSync<G, U, L>>>(&self,
+		graph: &NetworkGraph<L>, gossip: GS, result: Result<UtxoEntry, UtxoLookupError>
+	) where L::Target: Logger, U::Target: UtxoLookup {
+		let mut res = self.do_resolve_internal(graph, result);
 		for msg_opt in res.iter_mut() {
 			if let Some(msg) = msg_opt.take() {
 				gossip.forward_gossip_msg(msg);
@@ -185,6 +252,11 @@ impl UtxoFuture {
 	}
 
 	fn do_resolve<L: Deref>(&self, graph: &NetworkGraph<L>, result: Result<TxOut, UtxoLookupError>)
+	-> [Option<MessageSendEvent>; 5] where L::Target: Logger {
+		self.do_resolve_internal(graph, result.map(UtxoEntry::new))
+	}
+
+	fn do_resolve_internal<L: Deref>(&self, graph: &NetworkGraph<L>, result: Result<UtxoEntry, UtxoLookupError>)
 	-> [Option<MessageSendEvent>; 5] where L::Target: Logger {
 		let (announcement, node_a, node_b, update_a, update_b) = {
 			let mut pending_checks = graph.pending_checks.internal.lock().unwrap();
@@ -272,6 +344,7 @@ impl UtxoFuture {
 	}
 }
 
+#[derive(Debug)]
 struct PendingChecksContext {
 	channels: HashMap<u64, Weak<Mutex<UtxoMessages>>>,
 	nodes: HashMap<NodeId, Vec<Weak<Mutex<UtxoMessages>>>>,
@@ -298,7 +371,24 @@ impl PendingChecksContext {
 	}
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(super) struct CheckAnnouncementResult {
+	pub value_sat: Option<u64>,
+	pub pixel: Option<Pixel>,
+}
+
+impl CheckAnnouncementResult {
+	pub fn new(value_sat: Option<u64>, pixel: Option<Pixel>) -> Self {
+		Self { value_sat, pixel }
+	}
+
+	pub fn none() -> Self {
+		Self { value_sat: None, pixel: None, }
+	}
+}
+
 /// A set of messages which are pending UTXO lookups for processing.
+#[derive(Debug)]
 pub(super) struct PendingChecks {
 	internal: Mutex<PendingChecksContext>,
 }
@@ -454,12 +544,20 @@ impl PendingChecks {
 	pub(super) fn check_channel_announcement<U: Deref>(&self,
 		utxo_lookup: &Option<U>, msg: &msgs::UnsignedChannelAnnouncement,
 		full_msg: Option<&msgs::ChannelAnnouncement>
-	) -> Result<Option<u64>, msgs::LightningError> where U::Target: UtxoLookup {
+	) -> Result<CheckAnnouncementResult, msgs::LightningError> where U::Target: UtxoLookup {
 		let handle_result = |res| {
 			match res {
-				Ok(TxOut { value, script_pubkey }) => {
-					let expected_script =
-						make_funding_redeemscript_from_slices(msg.bitcoin_key_1.as_slice(), msg.bitcoin_key_2.as_slice()).to_v0_p2wsh();
+				Ok(UtxoEntry { txout: TxOut { value, script_pubkey }, pixel } ) => {
+					let expected_script = make_funding_redeemscript_from_node_ids(
+						&msg.bitcoin_key_1, &msg.bitcoin_key_2, pixel.as_ref(),
+					).map_err(|err| {
+						LightningError {
+							err: format!("Error creating redeem script: {}", err),
+							action: ErrorAction::IgnoreError,
+						}
+					})?.to_v0_p2wsh();
+
+
 					if script_pubkey != expected_script {
 						return Err(LightningError{
 							err: format!("Channel announcement key ({}) didn't match on-chain script ({})",
@@ -467,7 +565,10 @@ impl PendingChecks {
 							action: ErrorAction::IgnoreError
 						});
 					}
-					Ok(Some(value))
+
+					// TODO: add pixel checks
+
+					Ok(CheckAnnouncementResult::new(Some(value), pixel))
 				},
 				Err(UtxoLookupError::UnknownChain) => {
 					Err(LightningError {
@@ -482,6 +583,18 @@ impl PendingChecks {
 						action: ErrorAction::IgnoreError
 					})
 				},
+				Err(UtxoLookupError::Yuv(UtxoLookupYuvError::AttachTimeout)) => {
+					Err(LightningError {
+						err: "Channel announced with Pixel that is attaching too long".to_owned(),
+						action: ErrorAction::IgnoreError
+					})
+				},
+				Err(UtxoLookupError::Yuv(UtxoLookupYuvError::NoPixelAttached)) => {
+					Err(LightningError {
+						err: "Channel announced without Pixel, but it should be".to_owned(),
+						action: ErrorAction::IgnoreError
+					})
+				},
 			}
 		};
 
@@ -491,17 +604,22 @@ impl PendingChecks {
 		match utxo_lookup {
 			&None => {
 				// Tentatively accept, potentially exposing us to DoS attacks
-				Ok(None)
+				Ok(CheckAnnouncementResult::none())
 			},
 			&Some(ref utxo_lookup) => {
-				match utxo_lookup.get_utxo(&msg.chain_hash, msg.short_channel_id) {
+				let utxo = if msg.features.supports_yuv_payments() {
+					utxo_lookup.get_utxo_with_yuv(&msg.chain_hash, msg.short_channel_id)
+				} else {
+					utxo_lookup.get_utxo(&msg.chain_hash, msg.short_channel_id)
+				};
+
+				match utxo {
 					UtxoResult::Sync(res) => handle_result(res),
 					UtxoResult::Async(future) => {
 						let mut pending_checks = self.internal.lock().unwrap();
 						let mut async_messages = future.state.lock().unwrap();
+
 						if let Some(res) = async_messages.complete.take() {
-							// In the unlikely event the future resolved before we managed to get it,
-							// handle the result in-line.
 							handle_result(res)
 						} else {
 							Self::check_replace_previous_entry(msg, full_msg,

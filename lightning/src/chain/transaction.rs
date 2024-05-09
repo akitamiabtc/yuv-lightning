@@ -58,6 +58,11 @@ pub struct OutPoint {
 }
 
 impl OutPoint {
+	/// Constructs a new OutPoint from a txid and an index.
+	pub fn new(txid: Txid, index: u16) -> Self {
+		Self { txid, index }
+	}
+
 	/// Convert an `OutPoint` to a lightning channel id.
 	pub fn to_channel_id(&self) -> ChannelId {
 		ChannelId::v1_from_funding_txid(&self.txid.as_inner(), self.index)

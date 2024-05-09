@@ -239,6 +239,9 @@ impl ChannelMessageHandler for ErroringMessageHandler {
 	fn handle_update_fail_malformed_htlc(&self, their_node_id: &PublicKey, msg: &msgs::UpdateFailMalformedHTLC) {
 		ErroringMessageHandler::push_error(self, their_node_id, msg.channel_id);
 	}
+	fn handle_update_balance(&self, _their_node_id: &PublicKey, msg: &msgs::UpdateBalance) {
+		ErroringMessageHandler::push_error(self, _their_node_id, msg.channel_id);
+	}
 	fn handle_commitment_signed(&self, their_node_id: &PublicKey, msg: &msgs::CommitmentSigned) {
 		ErroringMessageHandler::push_error(self, their_node_id, msg.channel_id);
 	}
@@ -276,6 +279,8 @@ impl ChannelMessageHandler for ErroringMessageHandler {
 		features.set_channel_type_optional();
 		features.set_scid_privacy_optional();
 		features.set_zero_conf_optional();
+		features.set_yuv_payments_optional();
+
 		features
 	}
 
@@ -608,9 +613,9 @@ impl Peer {
 /// issues such as overly long function definitions.
 ///
 /// This is not exported to bindings users as `Arc`s don't make sense in bindings.
-pub type SimpleArcPeerManager<SD, M, T, F, C, L> = PeerManager<
+pub type SimpleArcPeerManager<SD, M, T, YT, F, C, L> = PeerManager<
 	SD,
-	Arc<SimpleArcChannelManager<M, T, F, L>>,
+	Arc<SimpleArcChannelManager<M, T, YT, F, L>>,
 	Arc<P2PGossipSync<Arc<NetworkGraph<Arc<L>>>, C, Arc<L>>>,
 	Arc<SimpleArcOnionMessenger<L>>,
 	Arc<L>,
@@ -627,10 +632,10 @@ pub type SimpleArcPeerManager<SD, M, T, F, C, L> = PeerManager<
 ///
 /// This is not exported to bindings users as general type aliases don't make sense in bindings.
 pub type SimpleRefPeerManager<
-	'a, 'b, 'c, 'd, 'e, 'f, 'logger, 'h, 'i, 'j, 'graph, SD, M, T, F, C, L
+	'a, 'b, 'c, 'd, 'e, 'f, 'logger, 'h, 'i, 'j, 'graph, SD, M, T, YT, F, C, L
 > = PeerManager<
 	SD,
-	&'j SimpleRefChannelManager<'a, 'b, 'c, 'd, 'e, 'graph, 'logger, 'i, M, T, F, L>,
+	&'j SimpleRefChannelManager<'a, 'b, 'c, 'd, 'e, 'graph, 'logger, 'i, M, T, YT, F, L>,
 	&'f P2PGossipSync<&'graph NetworkGraph<&'logger L>, C, &'logger L>,
 	&'h SimpleRefOnionMessenger<'logger, 'i, 'j, L>,
 	&'logger L,
@@ -1686,6 +1691,9 @@ impl<Descriptor: SocketDescriptor, CM: Deref, RM: Deref, OM: Deref, L: Deref, CM
 			wire::Message::UpdateFailMalformedHTLC(msg) => {
 				self.message_handler.chan_handler.handle_update_fail_malformed_htlc(&their_node_id, &msg);
 			},
+			wire::Message::UpdateBalance(msg) => {
+				self.message_handler.chan_handler.handle_update_balance(&their_node_id, &msg);
+			},
 
 			wire::Message::CommitmentSigned(msg) => {
 				self.message_handler.chan_handler.handle_commitment_signed(&their_node_id, &msg);
@@ -2167,8 +2175,14 @@ impl<Descriptor: SocketDescriptor, CM: Deref, RM: Deref, OM: Deref, L: Deref, CM
 								msg.number_of_blocks,
 								msg.sync_complete);
 							self.enqueue_message(&mut *get_peer_for_forwarding!(node_id), msg);
-						}
+						},
 						MessageSendEvent::SendGossipTimestampFilter { ref node_id, ref msg } => {
+							self.enqueue_message(&mut *get_peer_for_forwarding!(node_id), msg);
+						},
+						MessageSendEvent::SendUpdateBalance { ref node_id, ref msg } => {
+							log_trace!(self.logger, "Handling SendUpdateBalance event in peer_handler for node {} for channel {}",
+									log_pubkey!(node_id),
+									&msg.channel_id);
 							self.enqueue_message(&mut *get_peer_for_forwarding!(node_id), msg);
 						}
 					}
@@ -2400,7 +2414,6 @@ impl<Descriptor: SocketDescriptor, CM: Deref, RM: Deref, OM: Deref, L: Deref, CM
 	// broadcast_node_announcement panics) of the maximum-length addresses would fit in a 64KB
 	// message...
 	const HALF_MESSAGE_IS_ADDRS: u32 = ::core::u16::MAX as u32 / (SocketAddress::MAX_LEN as u32 + 1) / 2;
-	#[deny(const_err)]
 	#[allow(dead_code)]
 	// ...by failing to compile if the number of addresses that would be half of a message is
 	// smaller than 100:
@@ -2725,6 +2738,7 @@ mod tests {
 								msg: msgs::Shutdown {
 									channel_id: ChannelId::new_zero(),
 									scriptpubkey: bitcoin::Script::new(),
+									yuv_inner_key: None,
 								},
 							});
 						cfgs[1].chan_handler.pending_events.lock().unwrap()
@@ -2733,6 +2747,7 @@ mod tests {
 								msg: msgs::Shutdown {
 									channel_id: ChannelId::new_zero(),
 									scriptpubkey: bitcoin::Script::new(),
+									yuv_inner_key: None,
 								},
 							});
 
@@ -2860,7 +2875,11 @@ mod tests {
 
 		let their_id = peers[1].node_signer.get_node_id(Recipient::Node).unwrap();
 
-		let msg = msgs::Shutdown { channel_id: ChannelId::from_bytes([42; 32]), scriptpubkey: bitcoin::Script::new() };
+		let msg = msgs::Shutdown {
+			channel_id: ChannelId::from_bytes([42; 32]),
+			scriptpubkey: bitcoin::Script::new(),
+			yuv_inner_key: None,
+		};
 		a_chan_handler.pending_events.lock().unwrap().push(events::MessageSendEvent::SendShutdown {
 			node_id: their_id, msg: msg.clone()
 		});

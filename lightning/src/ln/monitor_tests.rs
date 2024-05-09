@@ -23,6 +23,7 @@ use crate::util::crypto::sign;
 use crate::util::ser::Writeable;
 use crate::util::scid_utils::block_from_scid;
 use crate::util::test_utils;
+use crate::chain::chaininterface::YuvBroadcaster;
 
 use bitcoin::blockdata::transaction::EcdsaSighashType;
 use bitcoin::blockdata::script::Builder;
@@ -1718,7 +1719,7 @@ fn do_test_revoked_counterparty_aggregated_claims(anchors: bool) {
 	// Cheat by giving A's ChannelMonitor the preimage to the to-be-claimed HTLC so that we have an
 	// HTLC-claim transaction on the to-be-revoked state.
 	get_monitor!(nodes[0], chan_id).provide_payment_preimage(&claimed_payment_hash, &claimed_payment_preimage,
-		&node_cfgs[0].tx_broadcaster, &LowerBoundedFeeEstimator::new(node_cfgs[0].fee_estimator), &nodes[0].logger);
+		&node_cfgs[0].tx_broadcaster, node_cfgs[0].yuv_tx_broadcaster.as_deref(),&LowerBoundedFeeEstimator::new(node_cfgs[0].fee_estimator), &nodes[0].logger);
 
 	// Now get the latest commitment transaction from A and then update the fee to revoke it
 	let as_revoked_txn = get_local_commitment_txn!(nodes[0], chan_id);
@@ -2219,11 +2220,11 @@ fn test_yield_anchors_events() {
 
 	get_monitor!(nodes[0], chan_id).provide_payment_preimage(
 		&payment_hash_2, &payment_preimage_2, &node_cfgs[0].tx_broadcaster,
-		&LowerBoundedFeeEstimator::new(node_cfgs[0].fee_estimator), &nodes[0].logger
+		node_cfgs[0].yuv_tx_broadcaster.as_deref(), &LowerBoundedFeeEstimator::new(node_cfgs[0].fee_estimator), &nodes[0].logger
 	);
 	get_monitor!(nodes[1], chan_id).provide_payment_preimage(
 		&payment_hash_1, &payment_preimage_1, &node_cfgs[1].tx_broadcaster,
-		&LowerBoundedFeeEstimator::new(node_cfgs[1].fee_estimator), &nodes[1].logger
+		node_cfgs[1].yuv_tx_broadcaster.as_deref(), &LowerBoundedFeeEstimator::new(node_cfgs[1].fee_estimator), &nodes[1].logger
 	);
 
 	let mut holder_events = nodes[0].chain_monitor.chain_monitor.get_and_clear_pending_events();
@@ -2388,7 +2389,7 @@ fn test_anchors_aggregated_revoked_htlc_tx() {
 		for payment in [payment_a, payment_b, payment_c, payment_d].iter() {
 			monitor.provide_payment_preimage(
 				&payment.1, &payment.0, &node_cfgs[1].tx_broadcaster,
-				&LowerBoundedFeeEstimator::new(node_cfgs[1].fee_estimator), &nodes[1].logger
+				node_cfgs[1].yuv_tx_broadcaster.as_deref(), &LowerBoundedFeeEstimator::new(node_cfgs[1].fee_estimator), &nodes[1].logger
 			);
 		}
 	}

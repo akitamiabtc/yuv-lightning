@@ -181,6 +181,7 @@ impl<NG: Deref<Target=NetworkGraph<L>>, L: Deref> RapidGossipSync<NG, L> where L
 				fee_base_msat: default_fee_base_msat,
 				fee_proportional_millionths: default_fee_proportional_millionths,
 				excess_data: Vec::new(),
+				htlc_maximum_yuv: None,
 			};
 
 			let mut skip_update_for_unknown_channel = false;

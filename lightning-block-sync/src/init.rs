@@ -45,7 +45,7 @@ BlockSourceResult<ValidatedBlockHeader> where B::Target: BlockSource {
 /// use lightning::chain::chainmonitor;
 /// use lightning::chain::chainmonitor::ChainMonitor;
 /// use lightning::chain::channelmonitor::ChannelMonitor;
-/// use lightning::chain::chaininterface::BroadcasterInterface;
+/// use lightning::chain::chaininterface::{BroadcasterInterface, YuvBroadcaster};
 /// use lightning::chain::chaininterface::FeeEstimator;
 /// use lightning::sign;
 /// use lightning::sign::{EntropySource, NodeSigner, SignerProvider};
@@ -65,6 +65,7 @@ BlockSourceResult<ValidatedBlockHeader> where B::Target: BlockSource {
 /// 	NS: NodeSigner,
 /// 	SP: SignerProvider,
 /// 	T: BroadcasterInterface,
+///     YT: YuvBroadcaster,
 /// 	F: FeeEstimator,
 /// 	R: Router,
 /// 	L: Logger,
@@ -72,12 +73,13 @@ BlockSourceResult<ValidatedBlockHeader> where B::Target: BlockSource {
 /// 	P: chainmonitor::Persist<SP::Signer>,
 /// >(
 /// 	block_source: &B,
-/// 	chain_monitor: &ChainMonitor<SP::Signer, &C, &T, &F, &L, &P>,
+/// 	chain_monitor: &ChainMonitor<SP::Signer, &C, &T, &YT, &F, &L, &P>,
 /// 	config: UserConfig,
 /// 	entropy_source: &ES,
 /// 	node_signer: &NS,
 /// 	signer_provider: &SP,
 /// 	tx_broadcaster: &T,
+///     yuv_tx_broadcaster: &YT,
 /// 	fee_estimator: &F,
 /// 	router: &R,
 /// 	logger: &L,
@@ -98,18 +100,19 @@ BlockSourceResult<ValidatedBlockHeader> where B::Target: BlockSource {
 /// 			fee_estimator,
 /// 			chain_monitor,
 /// 			tx_broadcaster,
+///  			Some(yuv_tx_broadcaster),
 /// 			router,
 /// 			logger,
 /// 			config,
 /// 			vec![&mut monitor],
 /// 		);
-/// 		<(BlockHash, ChannelManager<&ChainMonitor<SP::Signer, &C, &T, &F, &L, &P>, &T, &ES, &NS, &SP, &F, &R, &L>)>::read(
+/// 		<(BlockHash, ChannelManager<&ChainMonitor<SP::Signer, &C, &T, &YT, &F, &L, &P>, &T, &YT, &ES, &NS, &SP, &F, &R, &L>)>::read(
 /// 			&mut Cursor::new(&serialized_manager), read_args).unwrap()
 /// 	};
 ///
 /// 	// Synchronize any channel monitors and the channel manager to be on the best block.
 /// 	let mut cache = UnboundedCache::new();
-/// 	let mut monitor_listener = (monitor, &*tx_broadcaster, &*fee_estimator, &*logger);
+/// 	let mut monitor_listener = (monitor, &*tx_broadcaster, Some(&*yuv_tx_broadcaster), &*fee_estimator, &*logger);
 /// 	let listeners = vec![
 /// 		(monitor_block_hash, &monitor_listener as &dyn chain::Listen),
 /// 		(manager_block_hash, &manager as &dyn chain::Listen),

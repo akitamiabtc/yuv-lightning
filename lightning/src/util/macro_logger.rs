@@ -142,6 +142,15 @@ impl<'a> core::fmt::Display for DebugSpendable<'a> {
 			&SpendableOutputDescriptor::StaticPaymentOutput(ref descriptor) => {
 				write!(f, "StaticPaymentOutput {}:{} marked for spending", descriptor.outpoint.txid, descriptor.outpoint.index)?;
 			}
+			&SpendableOutputDescriptor::YuvStaticOutput(ref descriptor) => {
+				write!(f, "YuvStaticOutput {}:{} marked for spending", descriptor.outpoint.txid, descriptor.outpoint.index)?;
+			}
+			&SpendableOutputDescriptor::DelayedYuvPaymentOutput(ref descriptor) => {
+				write!(f, "DelayedYuvPaymentOutput {}:{} marked for spending", descriptor.inner.outpoint.txid, descriptor.inner.outpoint.index)?;
+			}
+			&SpendableOutputDescriptor::StaticYuvPaymentOutput(ref descriptor) => {
+				write!(f, "StaticYuvPaymentOutput {}:{} marked for spending", descriptor.inner.outpoint.txid, descriptor.inner.outpoint.index)?;
+			}
 		}
 		Ok(())
 	}

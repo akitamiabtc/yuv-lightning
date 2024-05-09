@@ -18,6 +18,7 @@ use crate::ln::msgs::{ChannelMessageHandler, Init};
 use crate::util::test_utils;
 use crate::util::ser::Writeable;
 use crate::util::string::UntrustedString;
+use crate::chain::chaininterface::YuvBroadcaster;
 
 use bitcoin::blockdata::script::Builder;
 use bitcoin::blockdata::opcodes;
@@ -668,7 +669,7 @@ fn test_htlc_preimage_claim_holder_commitment_after_counterparty_commitment_reor
 	// Provide the preimage now, such that we only claim from the holder commitment (since it's
 	// currently confirmed) and not the counterparty's.
 	get_monitor!(nodes[1], chan_id).provide_payment_preimage(
-		&payment_hash, &payment_preimage, &nodes[1].tx_broadcaster,
+		&payment_hash, &payment_preimage, &nodes[1].tx_broadcaster, nodes[1].yuv_tx_broadcaster.as_deref(),
 		&LowerBoundedFeeEstimator(nodes[1].fee_estimator), &nodes[1].logger
 	);
 
@@ -742,7 +743,7 @@ fn test_htlc_preimage_claim_prev_counterparty_commitment_after_current_counterpa
 	// Provide the preimage now, such that we only claim from the previous commitment (since it's
 	// currently confirmed) and not the latest.
 	get_monitor!(nodes[1], chan_id).provide_payment_preimage(
-		&payment_hash, &payment_preimage, &nodes[1].tx_broadcaster,
+		&payment_hash, &payment_preimage, &nodes[1].tx_broadcaster, nodes[1].yuv_tx_broadcaster.as_deref(),
 		&LowerBoundedFeeEstimator(nodes[1].fee_estimator), &nodes[1].logger
 	);
 

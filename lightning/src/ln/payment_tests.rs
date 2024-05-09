@@ -30,6 +30,7 @@ use crate::util::test_utils;
 use crate::util::errors::APIError;
 use crate::util::ser::Writeable;
 use crate::util::string::UntrustedString;
+use crate::chain::chaininterface::YuvBroadcaster;
 
 use bitcoin::network::constants::Network;
 
@@ -376,7 +377,7 @@ fn do_test_keysend_payments(public_node: bool, with_retry: bool) {
 	let route_params = RouteParameters::from_payment_params_and_value(
 		PaymentParameters::for_keysend(payee_pubkey, 40, false), 10000);
 
-	let network_graph = nodes[0].network_graph.clone();
+	let network_graph = nodes[0].network_graph;
 	let channels = nodes[0].node.list_usable_channels();
 	let first_hops = channels.iter().collect::<Vec<_>>();
 	let first_hops = if public_node { None } else { Some(first_hops.as_slice()) };
@@ -428,7 +429,7 @@ fn test_mpp_keysend() {
 	create_announced_chan_between_nodes(&nodes, 0, 2);
 	create_announced_chan_between_nodes(&nodes, 1, 3);
 	create_announced_chan_between_nodes(&nodes, 2, 3);
-	let network_graph = nodes[0].network_graph.clone();
+	let network_graph = nodes[0].network_graph;
 
 	let payer_pubkey = nodes[0].node.get_our_node_id();
 	let payee_pubkey = nodes[3].node.get_our_node_id();
@@ -1864,6 +1865,7 @@ fn do_test_intercepted_payment(test: InterceptTest) {
 				cltv_expiry_delta: MIN_CLTV_EXPIRY_DELTA,
 				htlc_minimum_msat: None,
 				htlc_maximum_msat: None,
+				htlc_maximum_yuv: None,
 			}])
 		]).unwrap()
 		.with_bolt11_features(nodes[2].node.invoice_features()).unwrap();
@@ -1929,7 +1931,7 @@ fn do_test_intercepted_payment(test: InterceptTest) {
 		expect_payment_failed_conditions(&nodes[0], payment_hash, false, fail_conditions);
 	} else if test == InterceptTest::Forward {
 		// Check that we'll fail as expected when sending to a channel that isn't in `ChannelReady` yet.
-		let temp_chan_id = nodes[1].node.create_channel(nodes[2].node.get_our_node_id(), 100_000, 0, 42, None).unwrap();
+		let temp_chan_id = nodes[1].node.create_channel(nodes[2].node.get_our_node_id(), 100_000, 0, 42, None, None).unwrap();
 		let unusable_chan_err = nodes[1].node.forward_intercepted_htlc(intercept_id, &temp_chan_id, nodes[2].node.get_our_node_id(), expected_outbound_amount_msat).unwrap_err();
 		assert_eq!(unusable_chan_err , APIError::ChannelUnavailable {
 			err: format!("Channel with id {} for the passed counterparty node_id {} is still opening.",
@@ -2046,6 +2048,7 @@ fn do_accept_underpaying_htlcs_config(num_mpp_parts: usize) {
 			cltv_expiry_delta: MIN_CLTV_EXPIRY_DELTA,
 			htlc_minimum_msat: None,
 			htlc_maximum_msat: Some(amt_msat / num_mpp_parts as u64 + 5),
+			htlc_maximum_yuv: None,
 		}]));
 	}
 	let payment_params = PaymentParameters::from_node_id(nodes[2].node.get_our_node_id(), TEST_FINAL_CLTV)
@@ -2411,7 +2414,8 @@ fn auto_retry_partial_failure() {
 				fee_msat: amt_msat / 2,
 				cltv_expiry_delta: 100,
 				maybe_announced_channel: true,
-			}], blinded_tail: None },
+				// yuv_fee: None,
+			}], blinded_tail: None, chroma: None, },
 			Path { hops: vec![RouteHop {
 				pubkey: nodes[1].node.get_our_node_id(),
 				node_features: nodes[1].node.node_features(),
@@ -2420,7 +2424,8 @@ fn auto_retry_partial_failure() {
 				fee_msat: amt_msat / 2,
 				cltv_expiry_delta: 100,
 				maybe_announced_channel: true,
-			}], blinded_tail: None },
+				// yuv_fee: None,
+			}], blinded_tail: None, chroma: None, },
 		],
 		route_params: Some(route_params.clone()),
 	};
@@ -2442,7 +2447,8 @@ fn auto_retry_partial_failure() {
 				fee_msat: amt_msat / 4,
 				cltv_expiry_delta: 100,
 				maybe_announced_channel: true,
-			}], blinded_tail: None },
+				// yuv_fee: None,
+			}], blinded_tail: None, chroma: None, },
 			Path { hops: vec![RouteHop {
 				pubkey: nodes[1].node.get_our_node_id(),
 				node_features: nodes[1].node.node_features(),
@@ -2451,7 +2457,8 @@ fn auto_retry_partial_failure() {
 				fee_msat: amt_msat / 4,
 				cltv_expiry_delta: 100,
 				maybe_announced_channel: true,
-			}], blinded_tail: None },
+				// yuv_fee: None,
+			}], blinded_tail: None, chroma: None, },
 		],
 		route_params: Some(retry_1_params.clone()),
 	};
@@ -2473,7 +2480,8 @@ fn auto_retry_partial_failure() {
 				fee_msat: amt_msat / 4,
 				cltv_expiry_delta: 100,
 				maybe_announced_channel: true,
-			}], blinded_tail: None },
+				// yuv_fee: None,
+			}], blinded_tail: None, chroma: None, },
 		],
 		route_params: Some(retry_2_params.clone()),
 	};
@@ -2618,7 +2626,8 @@ fn auto_retry_zero_attempts_send_error() {
 				fee_msat: amt_msat,
 				cltv_expiry_delta: 100,
 				maybe_announced_channel: true,
-			}], blinded_tail: None },
+				// yuv_fee: None,
+			}], blinded_tail: None, chroma: None, },
 		],
 		route_params: Some(route_params.clone()),
 	};
@@ -2716,7 +2725,8 @@ fn retry_multi_path_single_failed_payment() {
 				fee_msat: 10_000,
 				cltv_expiry_delta: 100,
 				maybe_announced_channel: true,
-			}], blinded_tail: None },
+				// yuv_fee: None,
+			}], blinded_tail: None, chroma: None, },
 			Path { hops: vec![RouteHop {
 				pubkey: nodes[1].node.get_our_node_id(),
 				node_features: nodes[1].node.node_features(),
@@ -2725,7 +2735,8 @@ fn retry_multi_path_single_failed_payment() {
 				fee_msat: 100_000_001, // Our default max-HTLC-value is 10% of the channel value, which this is one more than
 				cltv_expiry_delta: 100,
 				maybe_announced_channel: true,
-			}], blinded_tail: None },
+				// yuv_fee: None,
+			}], blinded_tail: None, chroma: None, },
 		],
 		route_params: Some(route_params.clone()),
 	};
@@ -2744,11 +2755,11 @@ fn retry_multi_path_single_failed_payment() {
 	{
 		let scorer = chanmon_cfgs[0].scorer.read().unwrap();
 		// The initial send attempt, 2 paths
-		scorer.expect_usage(chans[0].short_channel_id.unwrap(), ChannelUsage { amount_msat: 10_000, inflight_htlc_msat: 0, effective_capacity: EffectiveCapacity::Unknown });
-		scorer.expect_usage(chans[1].short_channel_id.unwrap(), ChannelUsage { amount_msat: 100_000_001, inflight_htlc_msat: 0, effective_capacity: EffectiveCapacity::Unknown });
+		scorer.expect_usage(chans[0].short_channel_id.unwrap(), ChannelUsage { amount_msat: 10_000, inflight_htlc_msat: 0, effective_capacity: EffectiveCapacity::Unknown, yuv_amount: None, inflight_yuv: None });
+		scorer.expect_usage(chans[1].short_channel_id.unwrap(), ChannelUsage { amount_msat: 100_000_001, inflight_htlc_msat: 0, effective_capacity: EffectiveCapacity::Unknown, yuv_amount: None, inflight_yuv: None });
 		// The retry, 2 paths. Ensure that the in-flight HTLC amount is factored in.
-		scorer.expect_usage(chans[0].short_channel_id.unwrap(), ChannelUsage { amount_msat: 50_000_001, inflight_htlc_msat: 10_000, effective_capacity: EffectiveCapacity::Unknown });
-		scorer.expect_usage(chans[1].short_channel_id.unwrap(), ChannelUsage { amount_msat: 50_000_000, inflight_htlc_msat: 0, effective_capacity: EffectiveCapacity::Unknown });
+		scorer.expect_usage(chans[0].short_channel_id.unwrap(), ChannelUsage { amount_msat: 50_000_001, inflight_htlc_msat: 10_000, effective_capacity: EffectiveCapacity::Unknown, yuv_amount: None, inflight_yuv: None });
+		scorer.expect_usage(chans[1].short_channel_id.unwrap(), ChannelUsage { amount_msat: 50_000_000, inflight_htlc_msat: 0, effective_capacity: EffectiveCapacity::Unknown, yuv_amount: None, inflight_yuv: None });
 	}
 
 	nodes[0].node.send_payment(payment_hash, RecipientOnionFields::secret_only(payment_secret),
@@ -2807,7 +2818,8 @@ fn immediate_retry_on_failure() {
 				fee_msat: 100_000_001, // Our default max-HTLC-value is 10% of the channel value, which this is one more than
 				cltv_expiry_delta: 100,
 				maybe_announced_channel: true,
-			}], blinded_tail: None },
+				// yuv_fee: None,
+			}], blinded_tail: None, chroma: None, },
 		],
 		route_params: Some(RouteParameters::from_payment_params_and_value(
 			PaymentParameters::from_node_id(nodes[1].node.get_our_node_id(), TEST_FINAL_CLTV),
@@ -2895,6 +2907,7 @@ fn no_extra_retries_on_back_to_back_fail() {
 				fee_msat: 0, // nodes[1] will fail the payment as we don't pay its fee
 				cltv_expiry_delta: 100,
 				maybe_announced_channel: true,
+				// yuv_fee: None,
 			}, RouteHop {
 				pubkey: nodes[2].node.get_our_node_id(),
 				node_features: nodes[2].node.node_features(),
@@ -2903,7 +2916,8 @@ fn no_extra_retries_on_back_to_back_fail() {
 				fee_msat: 100_000_000,
 				cltv_expiry_delta: 100,
 				maybe_announced_channel: true,
-			}], blinded_tail: None },
+				// yuv_fee: None,
+			}], blinded_tail: None, chroma: None, },
 			Path { hops: vec![RouteHop {
 				pubkey: nodes[1].node.get_our_node_id(),
 				node_features: nodes[1].node.node_features(),
@@ -2912,6 +2926,7 @@ fn no_extra_retries_on_back_to_back_fail() {
 				fee_msat: 0, // nodes[1] will fail the payment as we don't pay its fee
 				cltv_expiry_delta: 100,
 				maybe_announced_channel: true,
+				// yuv_fee: None,
 			}, RouteHop {
 				pubkey: nodes[2].node.get_our_node_id(),
 				node_features: nodes[2].node.node_features(),
@@ -2920,7 +2935,8 @@ fn no_extra_retries_on_back_to_back_fail() {
 				fee_msat: 100_000_000,
 				cltv_expiry_delta: 100,
 				maybe_announced_channel: true,
-			}], blinded_tail: None }
+				// yuv_fee: None,
+			}], blinded_tail: None, chroma: None, }
 		],
 		route_params: Some(route_params.clone()),
 	};
@@ -3099,6 +3115,7 @@ fn test_simple_partial_retry() {
 				fee_msat: 0, // nodes[1] will fail the payment as we don't pay its fee
 				cltv_expiry_delta: 100,
 				maybe_announced_channel: true,
+				// yuv_fee: None,
 			}, RouteHop {
 				pubkey: nodes[2].node.get_our_node_id(),
 				node_features: nodes[2].node.node_features(),
@@ -3107,7 +3124,8 @@ fn test_simple_partial_retry() {
 				fee_msat: 100_000_000,
 				cltv_expiry_delta: 100,
 				maybe_announced_channel: true,
-			}], blinded_tail: None },
+				// yuv_fee: None,
+			}], blinded_tail: None, chroma: None, },
 			Path { hops: vec![RouteHop {
 				pubkey: nodes[1].node.get_our_node_id(),
 				node_features: nodes[1].node.node_features(),
@@ -3116,6 +3134,7 @@ fn test_simple_partial_retry() {
 				fee_msat: 100_000,
 				cltv_expiry_delta: 100,
 				maybe_announced_channel: true,
+				// yuv_fee: None,
 			}, RouteHop {
 				pubkey: nodes[2].node.get_our_node_id(),
 				node_features: nodes[2].node.node_features(),
@@ -3124,7 +3143,8 @@ fn test_simple_partial_retry() {
 				fee_msat: 100_000_000,
 				cltv_expiry_delta: 100,
 				maybe_announced_channel: true,
-			}], blinded_tail: None }
+				// yuv_fee: None,
+			}], blinded_tail: None, chroma: None, }
 		],
 		route_params: Some(route_params.clone()),
 	};
@@ -3258,6 +3278,7 @@ fn test_threaded_payment_retries() {
 		.with_bolt11_features(invoice_features).unwrap();
 	let mut route_params = RouteParameters {
 		payment_params, final_value_msat: amt_msat, max_total_routing_fee_msat: Some(500_000),
+		yuv_pixel: None,
 	};
 
 	let mut route = Route {
@@ -3270,6 +3291,7 @@ fn test_threaded_payment_retries() {
 				fee_msat: 0,
 				cltv_expiry_delta: 100,
 				maybe_announced_channel: true,
+				// yuv_fee: None,
 			}, RouteHop {
 				pubkey: nodes[3].node.get_our_node_id(),
 				node_features: nodes[2].node.node_features(),
@@ -3278,7 +3300,8 @@ fn test_threaded_payment_retries() {
 				fee_msat: amt_msat / 1000,
 				cltv_expiry_delta: 100,
 				maybe_announced_channel: true,
-			}], blinded_tail: None },
+				// yuv_fee: None,
+			}], blinded_tail: None, chroma: None, },
 			Path { hops: vec![RouteHop {
 				pubkey: nodes[2].node.get_our_node_id(),
 				node_features: nodes[2].node.node_features(),
@@ -3287,6 +3310,7 @@ fn test_threaded_payment_retries() {
 				fee_msat: 100_000,
 				cltv_expiry_delta: 100,
 				maybe_announced_channel: true,
+				// yuv_fee: None,
 			}, RouteHop {
 				pubkey: nodes[3].node.get_our_node_id(),
 				node_features: nodes[3].node.node_features(),
@@ -3295,7 +3319,8 @@ fn test_threaded_payment_retries() {
 				fee_msat: amt_msat - amt_msat / 1000,
 				cltv_expiry_delta: 100,
 				maybe_announced_channel: true,
-			}], blinded_tail: None }
+				// yuv_fee: None,
+			}], blinded_tail: None, chroma: None, }
 		],
 		route_params: Some(route_params.clone()),
 	};

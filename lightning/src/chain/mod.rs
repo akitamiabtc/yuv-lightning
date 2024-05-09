@@ -15,6 +15,7 @@ use bitcoin::blockdata::script::Script;
 use bitcoin::hash_types::{BlockHash, Txid};
 use bitcoin::network::constants::Network;
 use bitcoin::secp256k1::PublicKey;
+use yuv_types::YuvTransaction;
 
 use crate::chain::channelmonitor::{ChannelMonitor, ChannelMonitorUpdate, MonitorEvent};
 use crate::sign::WriteableEcdsaChannelSigner;
@@ -332,6 +333,16 @@ pub trait Filter {
 	/// handled, e.g., by re-scanning the block in question whenever new outputs have been
 	/// registered mid-processing.
 	fn register_output(&self, output: WatchedOutput);
+}
+
+/// The `YuvConfirm` trait is used to notify LDK when relevant YUV transactions have been confirmed
+/// on YUV Network.
+pub trait YuvConfirm {
+	/// Notify LDK when relevant YUV transactions have been confirmed on YUV Network.
+	fn yuv_transactions_confirmed(&self, txs: Vec<YuvTransaction>);
+
+	/// Returns a list of YUV tx ids that are waiting for confirmation.
+	fn get_pending_yuv_txs(&self) -> Vec<Txid>;
 }
 
 /// A transaction output watched by a [`ChannelMonitor`] for spends on-chain.

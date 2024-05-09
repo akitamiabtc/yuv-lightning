@@ -12,6 +12,7 @@
 use bitcoin::hashes::Hash;
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::secp256k1::{self, Secp256k1, SecretKey};
+use yuv_pixels::Pixel;
 
 use crate::sign::{EntropySource, NodeSigner, Recipient};
 use crate::events::{self, PaymentFailureReason};
@@ -44,6 +45,13 @@ pub(crate) const IDEMPOTENCY_TIMEOUT_TICKS: u8 = 7;
 ///
 /// [`ChannelManager::timer_tick_occurred`]: crate::ln::channelmanager::ChannelManager::timer_tick_occurred
 const INVOICE_REQUEST_TIMEOUT_TICKS: u8 = 3;
+
+pub(crate) struct YuvPendingRetryablePayment {
+	/// Asset type of the payment.
+	pub(crate) pending_yuv_pixel: Pixel,
+	/// The total payment amount across all paths in YUV or msats.
+	pub(crate) total_amount: u128,
+}
 
 /// Stores the session_priv for each part of a payment that is still pending. For versions 0.0.102
 /// and later, also stores information for retrying the payment.
@@ -81,6 +89,8 @@ pub(crate) enum PendingOutboundPayment {
 		/// Our best known block height at the time this payment was initiated.
 		starting_block_height: u32,
 		remaining_max_total_routing_fee_msat: Option<u64>,
+		/// YUV data for the payment. Some if the payment has YUV coinds attached to it.
+		yuv_data: Option<YuvPendingRetryablePayment>,
 	},
 	/// When a pending payment is fulfilled, we continue tracking it until all pending HTLCs have
 	/// been resolved. This ensures we don't look up pending payments in ChannelMonitors on restart
@@ -248,7 +258,7 @@ impl PendingOutboundPayment {
 		if insert_res {
 			if let PendingOutboundPayment::Retryable {
 				ref mut pending_amt_msat, ref mut pending_fee_msat,
-				ref mut remaining_max_total_routing_fee_msat, .. 
+				ref mut remaining_max_total_routing_fee_msat, ..
 			} = self {
 					*pending_amt_msat += path.final_value_msat();
 					let path_fee_msat = path.fee_msat();
@@ -645,6 +655,7 @@ pub(super) struct SendAlongPathArgs<'a> {
 	pub payment_hash: &'a PaymentHash,
 	pub recipient_onion: RecipientOnionFields,
 	pub total_value: u64,
+	pub yuv_value: Option<u128>,
 	pub cur_height: u32,
 	pub payment_id: PaymentId,
 	pub keysend_preimage: &'a Option<PaymentPreimage>,
@@ -788,6 +799,7 @@ impl OutboundPayments {
 			payment_params: PaymentParameters::from_bolt12_invoice(&invoice),
 			final_value_msat: invoice.amount_msats(),
 			max_total_routing_fee_msat,
+			yuv_pixel: None,
 		};
 
 		self.find_route_and_send_payment(
@@ -820,13 +832,19 @@ impl OutboundPayments {
 			let mut retry_id_route_params = None;
 			for (pmt_id, pmt) in outbounds.iter_mut() {
 				if pmt.is_auto_retryable_now() {
-					if let PendingOutboundPayment::Retryable { pending_amt_msat, total_msat, payment_params: Some(params), payment_hash, remaining_max_total_routing_fee_msat, .. } = pmt {
+					if let PendingOutboundPayment::Retryable { pending_amt_msat, total_msat, payment_params: Some(params), payment_hash, remaining_max_total_routing_fee_msat,
+															   yuv_data, .. } = pmt {
 						if pending_amt_msat < total_msat {
 							retry_id_route_params = Some((*payment_hash, *pmt_id, RouteParameters {
 								final_value_msat: *total_msat - *pending_amt_msat,
 								payment_params: params.clone(),
 								max_total_routing_fee_msat: *remaining_max_total_routing_fee_msat,
+								yuv_pixel: yuv_data.as_ref().map(|d| {
+									let pixel = d.pending_yuv_pixel;
+									Pixel::new(d.total_amount - pixel.luma.amount, pixel.chroma)
+								}),
 							}));
+
 							break
 						}
 					} else { debug_assert!(false); }
@@ -895,9 +913,9 @@ impl OutboundPayments {
 			&node_signer.get_node_id(Recipient::Node).unwrap(), &route_params,
 			Some(&first_hops.iter().collect::<Vec<_>>()), inflight_htlcs(),
 			payment_hash, payment_id,
-		).map_err(|_| {
-			log_error!(logger, "Failed to find route for payment with id {} and hash {}",
-				payment_id, payment_hash);
+		).map_err(|err| {
+			log_error!(logger, "Failed to find route for payment with id {} and hash {}: {:?}",
+				payment_id, payment_hash, err);
 			RetryableSendFailure::RouteNotFound
 		})?;
 
@@ -1252,6 +1270,16 @@ impl OutboundPayments {
 			onion_session_privs.push(entropy_source.get_secure_random_bytes());
 		}
 
+		// FIXME: This is a workaround:
+		let yuv_data = route.route_params.as_ref().and_then(|p| {
+			p.yuv_pixel.as_ref().map(|yuv_pixel| {
+				YuvPendingRetryablePayment {
+					pending_yuv_pixel: *yuv_pixel,
+					total_amount: route.get_final_amount_yuv().unwrap_or(0),
+				}
+			})
+		});
+
 		let mut payment = PendingOutboundPayment::Retryable {
 			retry_strategy,
 			attempts: PaymentAttempts::new(),
@@ -1266,8 +1294,8 @@ impl OutboundPayments {
 			custom_tlvs: recipient_onion.custom_tlvs,
 			starting_block_height: best_block_height,
 			total_msat: route.get_total_amount(),
-			remaining_max_total_routing_fee_msat:
-				route.route_params.as_ref().and_then(|p| p.max_total_routing_fee_msat),
+			remaining_max_total_routing_fee_msat: route.route_params.as_ref().and_then(|p| p.max_total_routing_fee_msat),
+			yuv_data,
 		};
 
 		for (path, session_priv_bytes) in route.paths.iter().zip(onion_session_privs.iter()) {
@@ -1344,9 +1372,15 @@ impl OutboundPayments {
 		let mut results = Vec::new();
 		debug_assert_eq!(route.paths.len(), onion_session_privs.len());
 		for (path, session_priv_bytes) in route.paths.iter().zip(onion_session_privs.into_iter()) {
+			// if RouteParameters are set, try to get the yuv value from it
+			let yuv_value = route.route_params.as_ref()
+				.and_then(|p| p.yuv_pixel.as_ref())
+				.map(|pixel| pixel.luma.amount);
+
 			let mut path_res = send_payment_along_path(SendAlongPathArgs {
 				path: &path, payment_hash: &payment_hash, recipient_onion: recipient_onion.clone(),
-				total_value, cur_height, payment_id, keysend_preimage: &keysend_preimage, session_priv_bytes
+				total_value, cur_height, payment_id, keysend_preimage: &keysend_preimage, session_priv_bytes,
+				yuv_value,
 			});
 			match path_res {
 				Ok(_) => {},
@@ -1773,6 +1807,7 @@ impl_writeable_tlv_based_enum_upgradable!(PendingOutboundPayment,
 		(9, custom_tlvs, optional_vec),
 		(10, starting_block_height, required),
 		(11, remaining_max_total_routing_fee_msat, option),
+		(12, yuv_data, option),
 		(not_written, retry_strategy, (static_value, None)),
 		(not_written, attempts, (static_value, PaymentAttempts::new())),
 	},
@@ -1792,6 +1827,11 @@ impl_writeable_tlv_based_enum_upgradable!(PendingOutboundPayment,
 		(4, max_total_routing_fee_msat, option),
 	},
 );
+
+impl_writeable_tlv_based!(YuvPendingRetryablePayment, {
+	(0, pending_yuv_pixel, required),
+	(1, total_amount, required),
+});
 
 #[cfg(test)]
 mod tests {
@@ -1952,7 +1992,8 @@ mod tests {
 				fee_msat: 0,
 				cltv_expiry_delta: 0,
 				maybe_announced_channel: true,
-			}], blinded_tail: None }],
+				// yuv_fee: None,
+			}], blinded_tail: None, chroma: None, }],
 			route_params: Some(route_params.clone()),
 		};
 		router.expect_find_route(route_params.clone(), Ok(route.clone()));
@@ -2258,6 +2299,7 @@ mod tests {
 			payment_params: PaymentParameters::from_bolt12_invoice(&invoice),
 			final_value_msat: invoice.amount_msats(),
 			max_total_routing_fee_msat: Some(1234),
+			yuv_pixel: None,
 		};
 		router.expect_find_route(
 			route_params.clone(),
@@ -2276,6 +2318,7 @@ mod tests {
 							}
 						],
 						blinded_tail: None,
+						chroma: None,
 					}
 				],
 				route_params: Some(route_params),

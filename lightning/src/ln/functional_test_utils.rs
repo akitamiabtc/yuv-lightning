@@ -10,17 +10,17 @@
 //! A bunch of useful utilities for building networks of nodes and exchanging messages between
 //! nodes for functional tests.
 
-use crate::chain::{BestBlock, ChannelMonitorUpdateStatus, Confirm, Listen, Watch, chainmonitor::Persist};
+use crate::chain::{BestBlock, ChannelMonitorUpdateStatus, Confirm, Listen, Watch, chainmonitor::Persist, YuvConfirm};
 use crate::sign::EntropySource;
 use crate::chain::channelmonitor::ChannelMonitor;
 use crate::chain::transaction::OutPoint;
 use crate::events::{ClaimedHTLC, ClosureReason, Event, HTLCDestination, MessageSendEvent, MessageSendEventsProvider, PathFailure, PaymentPurpose, PaymentFailureReason};
 use crate::events::bump_transaction::{BumpTransactionEvent, BumpTransactionEventHandler, Wallet, WalletSource};
 use crate::ln::{ChannelId, PaymentPreimage, PaymentHash, PaymentSecret};
-use crate::ln::channelmanager::{AChannelManager, ChainParameters, ChannelManager, ChannelManagerReadArgs, RAACommitmentOrder, PaymentSendFailure, RecipientOnionFields, PaymentId, MIN_CLTV_EXPIRY_DELTA};
+use crate::ln::channelmanager::{AChannelManager, ChainParameters, ChannelManager, ChannelManagerReadArgs, RAACommitmentOrder, PaymentSendFailure, RecipientOnionFields, PaymentId, MIN_CLTV_EXPIRY_DELTA, UpdateBalance};
 use crate::routing::gossip::{P2PGossipSync, NetworkGraph, NetworkUpdate};
 use crate::routing::router::{self, PaymentParameters, Route, RouteParameters};
-use crate::ln::features::InitFeatures;
+use crate::ln::features::{Bolt11InvoiceFeatures, InitFeatures};
 use crate::ln::msgs;
 use crate::ln::msgs::{ChannelMessageHandler,RoutingMessageHandler};
 use crate::util::test_channel_signer::TestChannelSigner;
@@ -37,16 +37,22 @@ use bitcoin::hash_types::BlockHash;
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash as _;
 use bitcoin::network::constants::Network;
-use bitcoin::secp256k1::{PublicKey, SecretKey};
+use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
 
 use crate::io;
 use crate::prelude::*;
 use core::cell::RefCell;
 use alloc::rc::Rc;
+use alloc::collections::BTreeMap;
 use crate::sync::{Arc, Mutex, LockTestExt, RwLock};
 use core::mem;
 use core::iter::repeat;
-use bitcoin::{PackedLockTime, TxIn, TxMerkleNode};
+use bitcoin::{PackedLockTime, secp256k1, TxIn, TxMerkleNode};
+use yuv_pixels::{Chroma, Luma, MultisigPixelProof, Pixel, PixelProof};
+use yuv_types::{YuvTransaction, YuvTxType};
+use crate::chain::chaininterface::YuvBroadcaster;
+use crate::ln::chan_utils::make_funding_redeemscript_from_node_ids;
+use crate::ln::channel::{UpdateBalanceRequest, YuvPayment};
 
 pub const CHAN_CONFIRM_DEPTH: u32 = 10;
 
@@ -365,6 +371,7 @@ pub fn disconnect_all_blocks<'a, 'b, 'c, 'd>(node: &'a Node<'b, 'c, 'd>) {
 
 pub struct TestChanMonCfg {
 	pub tx_broadcaster: test_utils::TestBroadcaster,
+	pub yuv_tx_broadcaster: Option<test_utils::TestYuvBroadcaster>,
 	pub fee_estimator: test_utils::TestFeeEstimator,
 	pub chain_source: test_utils::TestChainSource,
 	pub persister: test_utils::TestPersister,
@@ -376,6 +383,7 @@ pub struct TestChanMonCfg {
 pub struct NodeCfg<'a> {
 	pub chain_source: &'a test_utils::TestChainSource,
 	pub tx_broadcaster: &'a test_utils::TestBroadcaster,
+	pub yuv_tx_broadcaster: Option<&'a test_utils::TestYuvBroadcaster>,
 	pub fee_estimator: &'a test_utils::TestFeeEstimator,
 	pub router: test_utils::TestRouter<'a>,
 	pub chain_monitor: test_utils::TestChainMonitor<'a>,
@@ -389,6 +397,7 @@ pub struct NodeCfg<'a> {
 type TestChannelManager<'node_cfg, 'chan_mon_cfg> = ChannelManager<
 	&'node_cfg TestChainMonitor<'chan_mon_cfg>,
 	&'chan_mon_cfg test_utils::TestBroadcaster,
+	&'chan_mon_cfg test_utils::TestYuvBroadcaster,
 	&'node_cfg test_utils::TestKeysInterface,
 	&'node_cfg test_utils::TestKeysInterface,
 	&'node_cfg test_utils::TestKeysInterface,
@@ -400,6 +409,7 @@ type TestChannelManager<'node_cfg, 'chan_mon_cfg> = ChannelManager<
 pub struct Node<'chan_man, 'node_cfg: 'chan_man, 'chan_mon_cfg: 'node_cfg> {
 	pub chain_source: &'chan_mon_cfg test_utils::TestChainSource,
 	pub tx_broadcaster: &'chan_mon_cfg test_utils::TestBroadcaster,
+	pub yuv_tx_broadcaster: Option<&'chan_mon_cfg test_utils::TestYuvBroadcaster>,
 	pub fee_estimator: &'chan_mon_cfg test_utils::TestFeeEstimator,
 	pub router: &'node_cfg test_utils::TestRouter<'chan_mon_cfg>,
 	pub chain_monitor: &'node_cfg test_utils::TestChainMonitor<'chan_mon_cfg>,
@@ -457,6 +467,7 @@ pub trait NodeHolder {
 	fn node(&self) -> &ChannelManager<
 		<Self::CM as AChannelManager>::M,
 		<Self::CM as AChannelManager>::T,
+		<Self::CM as AChannelManager>::YT,
 		<Self::CM as AChannelManager>::ES,
 		<Self::CM as AChannelManager>::NS,
 		<Self::CM as AChannelManager>::SP,
@@ -470,6 +481,7 @@ impl<H: NodeHolder> NodeHolder for &H {
 	fn node(&self) -> &ChannelManager<
 		<Self::CM as AChannelManager>::M,
 		<Self::CM as AChannelManager>::T,
+		<Self::CM as AChannelManager>::YT,
 		<Self::CM as AChannelManager>::ES,
 		<Self::CM as AChannelManager>::NS,
 		<Self::CM as AChannelManager>::SP,
@@ -553,6 +565,17 @@ impl<'a, 'b, 'c> Drop for Node<'a, 'b, 'c> {
 				blocks: Arc::new(Mutex::new(self.tx_broadcaster.blocks.lock().unwrap().clone())),
 			};
 
+			let mut yuv_tx_broadcaster_opt = None;
+			if let Some(yuv_tx_broadcaster) = self.yuv_tx_broadcaster {
+				let test_yuv_tx_broadcaster = test_utils::TestYuvBroadcaster {
+					txn_broadcasted: Mutex::new(
+						yuv_tx_broadcaster.txn_broadcasted.lock().unwrap().clone(),
+					)
+				};
+
+				yuv_tx_broadcaster_opt = Some(test_yuv_tx_broadcaster);
+			};
+
 			// Before using all the new monitors to check the watch outpoints, use the full set of
 			// them to ensure we can write and reload our ChannelManager.
 			{
@@ -564,7 +587,7 @@ impl<'a, 'b, 'c> Drop for Node<'a, 'b, 'c> {
 				let scorer = RwLock::new(test_utils::TestScorer::new());
 				let mut w = test_utils::TestVecWriter(Vec::new());
 				self.node.write(&mut w).unwrap();
-				<(BlockHash, ChannelManager<&test_utils::TestChainMonitor, &test_utils::TestBroadcaster, &test_utils::TestKeysInterface, &test_utils::TestKeysInterface, &test_utils::TestKeysInterface, &test_utils::TestFeeEstimator, &test_utils::TestRouter, &test_utils::TestLogger>)>::read(&mut io::Cursor::new(w.0), ChannelManagerReadArgs {
+				<(BlockHash, ChannelManager<&test_utils::TestChainMonitor, &test_utils::TestBroadcaster, &test_utils::TestYuvBroadcaster, &test_utils::TestKeysInterface, &test_utils::TestKeysInterface, &test_utils::TestKeysInterface, &test_utils::TestFeeEstimator, &test_utils::TestRouter, &test_utils::TestLogger>)>::read(&mut io::Cursor::new(w.0), ChannelManagerReadArgs {
 					default_config: *self.node.get_current_default_configuration(),
 					entropy_source: self.keys_manager,
 					node_signer: self.keys_manager,
@@ -573,14 +596,15 @@ impl<'a, 'b, 'c> Drop for Node<'a, 'b, 'c> {
 					router: &test_utils::TestRouter::new(Arc::new(network_graph), &scorer),
 					chain_monitor: self.chain_monitor,
 					tx_broadcaster: &broadcaster,
-					logger: &self.logger,
+					yuv_tx_broadcaster: yuv_tx_broadcaster_opt.as_ref(),
+					logger: self.logger,
 					channel_monitors,
 				}).unwrap();
 			}
 
 			let persister = test_utils::TestPersister::new();
 			let chain_source = test_utils::TestChainSource::new(Network::Testnet);
-			let chain_monitor = test_utils::TestChainMonitor::new(Some(&chain_source), &broadcaster, &self.logger, &feeest, &persister, &self.keys_manager);
+			let chain_monitor = test_utils::TestChainMonitor::new(Some(&chain_source), &broadcaster, yuv_tx_broadcaster_opt.as_ref().map(|v| v as &dyn YuvBroadcaster), &self.logger, &feeest, &persister, &self.keys_manager);
 			for deserialized_monitor in deserialized_monitors.drain(..) {
 				if chain_monitor.watch_channel(deserialized_monitor.get_funding_txo().0, deserialized_monitor) != Ok(ChannelMonitorUpdateStatus::Completed) {
 					panic!();
@@ -685,6 +709,33 @@ macro_rules! get_event {
 			}
 		}
 	}
+}
+
+#[macro_export]
+macro_rules! assert_panic {
+    ($stmt:stmt$(,)?) => {
+        ::std::panic::catch_unwind(|| -> () { $stmt })
+            .expect_err("assert_panic! argument did not panic")
+    };
+
+	($stmt:stmt, $ty:ty, contains $expr:expr$(,)?) => {{
+        let panic = $crate::assert_panic!($stmt);
+        let expr = $expr;
+        let panic = panic.downcast_ref::<$ty>().unwrap_or_else(|| {
+            panic!(
+                "Expected a {} panic containing {:?} but found one with {:?}",
+                stringify!($ty),
+                expr,
+                panic.type_id()
+            )
+        });
+        assert!(
+            panic.contains(expr),
+            "Expected a panic containing {:?} but found {:?}",
+            expr,
+            panic
+        );
+    }};
 }
 
 /// Gets an UpdateHTLCs MessageSendEvent
@@ -812,6 +863,9 @@ pub fn remove_first_msg_event_to_node(msg_node_id: &PublicKey, msg_events: &mut 
 			node_id == msg_node_id
 		},
 		MessageSendEvent::SendTxAbort { node_id, .. } => {
+			node_id == msg_node_id
+		},
+		MessageSendEvent::SendUpdateBalance { node_id, .. } => {
 			node_id == msg_node_id
 		},
 	}});
@@ -973,6 +1027,7 @@ pub fn _reload_node<'a, 'b, 'c>(node: &'a Node<'a, 'b, 'c>, default_config: User
 			router: node.router,
 			chain_monitor: node.chain_monitor,
 			tx_broadcaster: node.tx_broadcaster,
+			yuv_tx_broadcaster: node.yuv_tx_broadcaster.into(),
 			logger: node.logger,
 			channel_monitors,
 		}).unwrap()
@@ -992,9 +1047,10 @@ pub fn _reload_node<'a, 'b, 'c>(node: &'a Node<'a, 'b, 'c>, default_config: User
 macro_rules! reload_node {
 	($node: expr, $new_config: expr, $chanman_encoded: expr, $monitors_encoded: expr, $persister: ident, $new_chain_monitor: ident, $new_channelmanager: ident) => {
 		let chanman_encoded = $chanman_encoded;
+		let yuv_broadcaster = $node.yuv_tx_broadcaster.map(|v| v as &YuvBroadcaster);
 
 		$persister = test_utils::TestPersister::new();
-		$new_chain_monitor = test_utils::TestChainMonitor::new(Some($node.chain_source), $node.tx_broadcaster.clone(), $node.logger, $node.fee_estimator, &$persister, &$node.keys_manager);
+		$new_chain_monitor = test_utils::TestChainMonitor::new(Some($node.chain_source), $node.tx_broadcaster.clone(), yuv_broadcaster, $node.logger, $node.fee_estimator, &$persister, &$node.keys_manager);
 		$node.chain_monitor = &$new_chain_monitor;
 
 		$new_channelmanager = _reload_node(&$node, $new_config, &chanman_encoded, $monitors_encoded);
@@ -1027,7 +1083,14 @@ fn internal_create_funding_transaction<'a, 'b, 'c>(node: &Node<'a, 'b, 'c>,
 	let events = node.node.get_and_clear_pending_events();
 	assert_eq!(events.len(), 1);
 	match events[0] {
-		Event::FundingGenerationReady { ref temporary_channel_id, ref counterparty_node_id, ref channel_value_satoshis, ref output_script, user_channel_id } => {
+		Event::FundingGenerationReady {
+			ref temporary_channel_id,
+			ref counterparty_node_id,
+			ref channel_value_satoshis,
+			ref output_script,
+			user_channel_id,
+			..
+		} => {
 			assert_eq!(counterparty_node_id, expected_counterparty_node_id);
 			assert_eq!(*channel_value_satoshis, expected_chan_value);
 			assert_eq!(user_channel_id, expected_user_chan_id);
@@ -1055,7 +1118,7 @@ pub fn sign_funding_transaction<'a, 'b, 'c>(node_a: &Node<'a, 'b, 'c>, node_b: &
 	let (temporary_channel_id, tx, funding_output) = create_funding_transaction(node_a, &node_b.node.get_our_node_id(), channel_value, 42);
 	assert_eq!(temporary_channel_id, expected_temporary_channel_id);
 
-	assert!(node_a.node.funding_transaction_generated(&temporary_channel_id, &node_b.node.get_our_node_id(), tx.clone()).is_ok());
+	assert!(node_a.node.funding_transaction_generated(&temporary_channel_id, &node_b.node.get_our_node_id(), tx.clone(), None).is_ok());
 	check_added_monitors!(node_a, 0);
 
 	let funding_created_msg = get_event_msg!(node_a, MessageSendEvent::SendFundingCreated, node_b.node.get_our_node_id());
@@ -1086,7 +1149,7 @@ pub fn sign_funding_transaction<'a, 'b, 'c>(node_a: &Node<'a, 'b, 'c>, node_b: &
 	node_a.tx_broadcaster.txn_broadcasted.lock().unwrap().clear();
 
 	// Ensure that funding_transaction_generated is idempotent.
-	assert!(node_a.node.funding_transaction_generated(&temporary_channel_id, &node_b.node.get_our_node_id(), tx.clone()).is_err());
+	assert!(node_a.node.funding_transaction_generated(&temporary_channel_id, &node_b.node.get_our_node_id(), tx.clone(), None).is_err());
 	assert!(node_a.node.get_and_clear_pending_msg_events().is_empty());
 	check_added_monitors!(node_a, 0);
 
@@ -1098,7 +1161,7 @@ pub fn open_zero_conf_channel<'a, 'b, 'c, 'd>(initiator: &'a Node<'b, 'c, 'd>, r
 	let initiator_channels = initiator.node.list_usable_channels().len();
 	let receiver_channels = receiver.node.list_usable_channels().len();
 
-	initiator.node.create_channel(receiver.node.get_our_node_id(), 100_000, 10_001, 42, initiator_config).unwrap();
+	initiator.node.create_channel(receiver.node.get_our_node_id(), 100_000, 10_001, 42, None, initiator_config).unwrap();
 	let open_channel = get_event_msg!(initiator, MessageSendEvent::SendOpenChannel, receiver.node.get_our_node_id());
 
 	receiver.node.handle_open_channel(&initiator.node.get_our_node_id(), &open_channel);
@@ -1116,7 +1179,7 @@ pub fn open_zero_conf_channel<'a, 'b, 'c, 'd>(initiator: &'a Node<'b, 'c, 'd>, r
 	initiator.node.handle_accept_channel(&receiver.node.get_our_node_id(), &accept_channel);
 
 	let (temporary_channel_id, tx, _) = create_funding_transaction(&initiator, &receiver.node.get_our_node_id(), 100_000, 42);
-	initiator.node.funding_transaction_generated(&temporary_channel_id, &receiver.node.get_our_node_id(), tx.clone()).unwrap();
+	initiator.node.funding_transaction_generated(&temporary_channel_id, &receiver.node.get_our_node_id(), tx.clone(), None).unwrap();
 	let funding_created = get_event_msg!(initiator, MessageSendEvent::SendFundingCreated, receiver.node.get_our_node_id());
 
 	receiver.node.handle_funding_created(&initiator.node.get_our_node_id(), &funding_created);
@@ -1164,7 +1227,7 @@ pub fn open_zero_conf_channel<'a, 'b, 'c, 'd>(initiator: &'a Node<'b, 'c, 'd>, r
 }
 
 pub fn create_chan_between_nodes_with_value_init<'a, 'b, 'c>(node_a: &Node<'a, 'b, 'c>, node_b: &Node<'a, 'b, 'c>, channel_value: u64, push_msat: u64) -> Transaction {
-	let create_chan_id = node_a.node.create_channel(node_b.node.get_our_node_id(), channel_value, push_msat, 42, None).unwrap();
+	let create_chan_id = node_a.node.create_channel(node_b.node.get_our_node_id(), channel_value, push_msat, 42, None, None).unwrap();
 	let open_channel_msg = get_event_msg!(node_a, MessageSendEvent::SendOpenChannel, node_b.node.get_our_node_id());
 	assert_eq!(open_channel_msg.temporary_channel_id, create_chan_id);
 	assert_eq!(node_a.node.list_channels().iter().find(|channel| channel.channel_id == create_chan_id).unwrap().user_channel_id, 42);
@@ -1281,14 +1344,14 @@ pub fn create_announced_chan_between_nodes_with_value<'a, 'b, 'c: 'd, 'd>(nodes:
 pub fn create_unannounced_chan_between_nodes_with_value<'a, 'b, 'c, 'd>(nodes: &'a Vec<Node<'b, 'c, 'd>>, a: usize, b: usize, channel_value: u64, push_msat: u64) -> (msgs::ChannelReady, Transaction) {
 	let mut no_announce_cfg = test_default_channel_config();
 	no_announce_cfg.channel_handshake_config.announced_channel = false;
-	nodes[a].node.create_channel(nodes[b].node.get_our_node_id(), channel_value, push_msat, 42, Some(no_announce_cfg)).unwrap();
+	nodes[a].node.create_channel(nodes[b].node.get_our_node_id(), channel_value, push_msat, 42, None, Some(no_announce_cfg)).unwrap();
 	let open_channel = get_event_msg!(nodes[a], MessageSendEvent::SendOpenChannel, nodes[b].node.get_our_node_id());
 	nodes[b].node.handle_open_channel(&nodes[a].node.get_our_node_id(), &open_channel);
 	let accept_channel = get_event_msg!(nodes[b], MessageSendEvent::SendAcceptChannel, nodes[a].node.get_our_node_id());
 	nodes[a].node.handle_accept_channel(&nodes[b].node.get_our_node_id(), &accept_channel);
 
 	let (temporary_channel_id, tx, _) = create_funding_transaction(&nodes[a], &nodes[b].node.get_our_node_id(), channel_value, 42);
-	nodes[a].node.funding_transaction_generated(&temporary_channel_id, &nodes[b].node.get_our_node_id(), tx.clone()).unwrap();
+	nodes[a].node.funding_transaction_generated(&temporary_channel_id, &nodes[b].node.get_our_node_id(), tx.clone(), None).unwrap();
 	nodes[b].node.handle_funding_created(&nodes[a].node.get_our_node_id(), &get_event_msg!(nodes[a], MessageSendEvent::SendFundingCreated, nodes[b].node.get_our_node_id()));
 	check_added_monitors!(nodes[b], 1);
 
@@ -1343,7 +1406,46 @@ pub fn create_unannounced_chan_between_nodes_with_value<'a, 'b, 'c, 'd>(nodes: &
 }
 
 pub fn update_nodes_with_chan_announce<'a, 'b, 'c, 'd>(nodes: &'a Vec<Node<'b, 'c, 'd>>, a: usize, b: usize, ann: &msgs::ChannelAnnouncement, upd_1: &msgs::ChannelUpdate, upd_2: &msgs::ChannelUpdate) {
+	update_nodes_with_chan_announce_internal(nodes, a, b, ann, upd_1, upd_2, None, 0);
+}
+
+pub fn update_nodes_with_chan_announce_with_yuv<'a, 'b, 'c, 'd>(nodes: &'a Vec<Node<'b, 'c, 'd>>,
+	a: usize,
+	b: usize,
+	ann: &msgs::ChannelAnnouncement,
+	upd_1: &msgs::ChannelUpdate,
+	upd_2: &msgs::ChannelUpdate,
+	yuv_pixel: Pixel,
+	satoshis_value: u64,
+) {
+	update_nodes_with_chan_announce_internal(nodes, a, b, ann, upd_1, upd_2, Some(yuv_pixel), satoshis_value);
+}
+
+pub fn update_nodes_with_chan_announce_internal<'a, 'b, 'c, 'd>(
+	nodes: &'a Vec<Node<'b, 'c, 'd>>,
+	a: usize,
+	b: usize,
+	ann: &msgs::ChannelAnnouncement,
+	upd_1: &msgs::ChannelUpdate,
+	upd_2: &msgs::ChannelUpdate,
+	yuv_pixel: Option<Pixel>,
+	satoshis_value: u64,
+) {
 	for node in nodes {
+		if let Some(yuv_pixel) = yuv_pixel {
+			let expected_script = make_funding_redeemscript_from_node_ids(
+				&ann.contents.bitcoin_key_1,
+				&ann.contents.bitcoin_key_2,
+				Some(&yuv_pixel),
+			).unwrap().to_v0_p2wsh();
+
+			node.chain_source
+				.set_txout(expected_script, satoshis_value)
+				.set_yuv_pixel(yuv_pixel);
+
+			node.gossip_sync.add_utxo_lookup(Some(node.chain_source))
+		}
+
 		assert!(node.gossip_sync.handle_channel_announcement(ann).unwrap());
 		node.gossip_sync.handle_channel_update(upd_1).unwrap();
 		node.gossip_sync.handle_channel_update(upd_2).unwrap();
@@ -2035,7 +2137,7 @@ pub fn expect_payment_forwarded<CM: AChannelManager, H: NodeHolder<CM=CM>>(
 	match event {
 		Event::PaymentForwarded {
 			fee_earned_msat, prev_channel_id, claim_from_onchain_tx, next_channel_id,
-			outbound_amount_forwarded_msat: _
+			outbound_amount_forwarded_msat: _, ..
 		} => {
 			assert_eq!(fee_earned_msat, expected_fee);
 			if !upstream_force_closed {
@@ -2049,7 +2151,7 @@ pub fn expect_payment_forwarded<CM: AChannelManager, H: NodeHolder<CM=CM>>(
 			}
 			assert_eq!(claim_from_onchain_tx, downstream_force_closed);
 		},
-		_ => panic!("Unexpected event"),
+		_ => panic!("Unexpected event: {:?}", event),
 	}
 }
 
@@ -2505,9 +2607,27 @@ pub fn claim_payment<'a, 'b, 'c>(origin_node: &Node<'a, 'b, 'c>, expected_route:
 pub const TEST_FINAL_CLTV: u32 = 70;
 
 pub fn route_payment<'a, 'b, 'c>(origin_node: &Node<'a, 'b, 'c>, expected_route: &[&Node<'a, 'b, 'c>], recv_value: u64) -> (PaymentPreimage, PaymentHash, PaymentSecret, PaymentId) {
+	_route_payment(origin_node, expected_route, recv_value, None)
+}
+
+fn _route_payment<'a, 'b, 'c>(origin_node: &Node<'a, 'b, 'c>, expected_route: &[&Node<'a, 'b, 'c>], recv_value: u64, yuv_amount: Option<u128>) -> (PaymentPreimage, PaymentHash, PaymentSecret, PaymentId) {
+	let invoice_features = if yuv_amount.is_some() {
+		Bolt11InvoiceFeatures::empty()
+	} else {
+		expected_route.last().unwrap().node.invoice_features()
+	};
+
 	let payment_params = PaymentParameters::from_node_id(expected_route.last().unwrap().node.get_our_node_id(), TEST_FINAL_CLTV)
-		.with_bolt11_features(expected_route.last().unwrap().node.invoice_features()).unwrap();
-	let route_params = RouteParameters::from_payment_params_and_value(payment_params, recv_value);
+		.with_bolt11_features(invoice_features).unwrap();
+	let mut route_params = RouteParameters::from_payment_params_and_value(payment_params, recv_value);
+
+	if let Some(amount) = yuv_amount {
+		let secp_ctx = Secp256k1::new();
+		let pixel = new_test_pixel(Some(amount.into()), None, &secp_ctx);
+
+		route_params = route_params.with_yuv(pixel);
+	}
+
 	let route = get_route(origin_node, &route_params).unwrap();
 	assert_eq!(route.paths.len(), 1);
 	assert_eq!(route.paths[0].hops.len(), expected_route.len());
@@ -2517,6 +2637,11 @@ pub fn route_payment<'a, 'b, 'c>(origin_node: &Node<'a, 'b, 'c>, expected_route:
 
 	let res = send_along_route(origin_node, route, expected_route, recv_value);
 	(res.0, res.1, res.2, res.3)
+}
+
+
+pub fn route_payment_with_yuv<'a, 'b, 'c>(origin_node: &Node<'a, 'b, 'c>, expected_route: &[&Node<'a, 'b, 'c>], recv_value: u64, yuv_amount: u128) -> (PaymentPreimage, PaymentHash, PaymentSecret, PaymentId) {
+	_route_payment(origin_node, expected_route, recv_value, Some(yuv_amount))
 }
 
 pub fn route_over_limit<'a, 'b, 'c>(origin_node: &Node<'a, 'b, 'c>, expected_route: &[&Node<'a, 'b, 'c>], recv_value: u64)  {
@@ -2545,6 +2670,13 @@ pub fn route_over_limit<'a, 'b, 'c>(origin_node: &Node<'a, 'b, 'c>, expected_rou
 
 pub fn send_payment<'a, 'b, 'c>(origin: &Node<'a, 'b, 'c>, expected_route: &[&Node<'a, 'b, 'c>], recv_value: u64) -> (PaymentPreimage, PaymentHash, PaymentSecret, PaymentId) {
 	let res = route_payment(&origin, expected_route, recv_value);
+	claim_payment(&origin, expected_route, res.0);
+	res
+}
+
+
+pub fn send_payment_with_yuv<'a, 'b, 'c>(origin: &Node<'a, 'b, 'c>, expected_route: &[&Node<'a, 'b, 'c>], recv_value: u64, recv_yuv_amount: u128) -> (PaymentPreimage, PaymentHash, PaymentSecret, PaymentId) {
+	let res = route_payment_with_yuv(&origin, expected_route, recv_value, recv_yuv_amount);
 	claim_payment(&origin, expected_route, res.0);
 	res
 }
@@ -2672,6 +2804,7 @@ pub fn create_chanmon_cfgs(node_count: usize) -> Vec<TestChanMonCfg> {
 	let mut chan_mon_cfgs = Vec::new();
 	for i in 0..node_count {
 		let tx_broadcaster = test_utils::TestBroadcaster::new(Network::Testnet);
+		let yuv_tx_broadcaster = Some(test_utils::TestYuvBroadcaster::new());
 		let fee_estimator = test_utils::TestFeeEstimator { sat_per_kw: Mutex::new(253) };
 		let chain_source = test_utils::TestChainSource::new(Network::Testnet);
 		let logger = test_utils::TestLogger::with_id(format!("node {}", i));
@@ -2680,7 +2813,7 @@ pub fn create_chanmon_cfgs(node_count: usize) -> Vec<TestChanMonCfg> {
 		let keys_manager = test_utils::TestKeysInterface::new(&seed, Network::Testnet);
 		let scorer = RwLock::new(test_utils::TestScorer::new());
 
-		chan_mon_cfgs.push(TestChanMonCfg { tx_broadcaster, fee_estimator, chain_source, logger, persister, keys_manager, scorer });
+		chan_mon_cfgs.push(TestChanMonCfg { tx_broadcaster, yuv_tx_broadcaster, fee_estimator, chain_source, logger, persister, keys_manager, scorer });
 	}
 
 	chan_mon_cfgs
@@ -2694,13 +2827,14 @@ pub fn create_node_cfgs_with_persisters<'a>(node_count: usize, chanmon_cfgs: &'a
 	let mut nodes = Vec::new();
 
 	for i in 0..node_count {
-		let chain_monitor = test_utils::TestChainMonitor::new(Some(&chanmon_cfgs[i].chain_source), &chanmon_cfgs[i].tx_broadcaster, &chanmon_cfgs[i].logger, &chanmon_cfgs[i].fee_estimator, persisters[i], &chanmon_cfgs[i].keys_manager);
+		let chain_monitor = test_utils::TestChainMonitor::new(Some(&chanmon_cfgs[i].chain_source), &chanmon_cfgs[i].tx_broadcaster, chanmon_cfgs[i].yuv_tx_broadcaster.as_ref().map(|v| v as &dyn YuvBroadcaster), &chanmon_cfgs[i].logger, &chanmon_cfgs[i].fee_estimator, persisters[i], &chanmon_cfgs[i].keys_manager);
 		let network_graph = Arc::new(NetworkGraph::new(Network::Testnet, &chanmon_cfgs[i].logger));
 		let seed = [i as u8; 32];
 		nodes.push(NodeCfg {
 			chain_source: &chanmon_cfgs[i].chain_source,
 			logger: &chanmon_cfgs[i].logger,
 			tx_broadcaster: &chanmon_cfgs[i].tx_broadcaster,
+			yuv_tx_broadcaster: chanmon_cfgs[i].yuv_tx_broadcaster.as_ref(),
 			fee_estimator: &chanmon_cfgs[i].fee_estimator,
 			router: test_utils::TestRouter::new(network_graph.clone(), &chanmon_cfgs[i].scorer),
 			chain_monitor,
@@ -2732,7 +2866,7 @@ pub fn test_default_channel_config() -> UserConfig {
 	default_config
 }
 
-pub fn create_node_chanmgrs<'a, 'b>(node_count: usize, cfgs: &'a Vec<NodeCfg<'b>>, node_config: &[Option<UserConfig>]) -> Vec<ChannelManager<&'a TestChainMonitor<'b>, &'b test_utils::TestBroadcaster, &'a test_utils::TestKeysInterface, &'a test_utils::TestKeysInterface, &'a test_utils::TestKeysInterface, &'b test_utils::TestFeeEstimator, &'a test_utils::TestRouter<'b>, &'b test_utils::TestLogger>> {
+pub fn create_node_chanmgrs<'a, 'b>(node_count: usize, cfgs: &'a Vec<NodeCfg<'b>>, node_config: &[Option<UserConfig>]) -> Vec<ChannelManager<&'a TestChainMonitor<'b>, &'b test_utils::TestBroadcaster, &'b test_utils::TestYuvBroadcaster, &'a test_utils::TestKeysInterface, &'a test_utils::TestKeysInterface, &'a test_utils::TestKeysInterface, &'b test_utils::TestFeeEstimator, &'a test_utils::TestRouter<'b>, &'b test_utils::TestLogger>> {
 	let mut chanmgrs = Vec::new();
 	for i in 0..node_count {
 		let network = Network::Testnet;
@@ -2741,7 +2875,7 @@ pub fn create_node_chanmgrs<'a, 'b>(node_count: usize, cfgs: &'a Vec<NodeCfg<'b>
 			network,
 			best_block: BestBlock::from_network(network),
 		};
-		let node = ChannelManager::new(cfgs[i].fee_estimator, &cfgs[i].chain_monitor, cfgs[i].tx_broadcaster, &cfgs[i].router, cfgs[i].logger, cfgs[i].keys_manager,
+		let node = ChannelManager::new(cfgs[i].fee_estimator, &cfgs[i].chain_monitor, cfgs[i].tx_broadcaster, cfgs[i].yuv_tx_broadcaster, &cfgs[i].router, cfgs[i].logger, cfgs[i].keys_manager,
 			cfgs[i].keys_manager, cfgs[i].keys_manager, if node_config[i].is_some() { node_config[i].clone().unwrap() } else { test_default_channel_config() }, params, genesis_block.header.time);
 		chanmgrs.push(node);
 	}
@@ -2749,7 +2883,7 @@ pub fn create_node_chanmgrs<'a, 'b>(node_count: usize, cfgs: &'a Vec<NodeCfg<'b>
 	chanmgrs
 }
 
-pub fn create_network<'a, 'b: 'a, 'c: 'b>(node_count: usize, cfgs: &'b Vec<NodeCfg<'c>>, chan_mgrs: &'a Vec<ChannelManager<&'b TestChainMonitor<'c>, &'c test_utils::TestBroadcaster, &'b test_utils::TestKeysInterface, &'b test_utils::TestKeysInterface, &'b test_utils::TestKeysInterface, &'c test_utils::TestFeeEstimator, &'c test_utils::TestRouter, &'c test_utils::TestLogger>>) -> Vec<Node<'a, 'b, 'c>> {
+pub fn create_network<'a, 'b: 'a, 'c: 'b>(node_count: usize, cfgs: &'b Vec<NodeCfg<'c>>, chan_mgrs: &'a Vec<ChannelManager<&'b TestChainMonitor<'c>, &'c test_utils::TestBroadcaster, &'c test_utils::TestYuvBroadcaster, &'b test_utils::TestKeysInterface, &'b test_utils::TestKeysInterface, &'b test_utils::TestKeysInterface, &'c test_utils::TestFeeEstimator, &'c test_utils::TestRouter, &'c test_utils::TestLogger>>) -> Vec<Node<'a, 'b, 'c>> {
 	let mut nodes = Vec::new();
 	let chan_count = Rc::new(RefCell::new(0));
 	let payment_count = Rc::new(RefCell::new(0));
@@ -2760,6 +2894,7 @@ pub fn create_network<'a, 'b: 'a, 'c: 'b>(node_count: usize, cfgs: &'b Vec<NodeC
 		let wallet_source = Arc::new(test_utils::TestWalletSource::new(SecretKey::from_slice(&[i as u8 + 1; 32]).unwrap()));
 		nodes.push(Node{
 			chain_source: cfgs[i].chain_source, tx_broadcaster: cfgs[i].tx_broadcaster,
+			yuv_tx_broadcaster: cfgs[i].yuv_tx_broadcaster,
 			fee_estimator: cfgs[i].fee_estimator, router: &cfgs[i].router,
 			chain_monitor: &cfgs[i].chain_monitor, keys_manager: &cfgs[i].keys_manager,
 			node: &chan_mgrs[i], network_graph: cfgs[i].network_graph.as_ref(), gossip_sync,
@@ -3297,8 +3432,7 @@ pub fn create_batch_channel_funding<'a, 'b, 'c>(
 	for (other_node, channel_value_satoshis, push_msat, user_channel_id, override_config) in params {
 		// Initialize channel opening.
 		let temp_chan_id = funding_node.node.create_channel(
-			other_node.node.get_our_node_id(), *channel_value_satoshis, *push_msat, *user_channel_id,
-			*override_config,
+			other_node.node.get_our_node_id(), *channel_value_satoshis, *push_msat, *user_channel_id, None, *override_config,
 		).unwrap();
 		let open_channel_msg = get_event_msg!(funding_node, MessageSendEvent::SendOpenChannel, other_node.node.get_our_node_id());
 		other_node.node.handle_open_channel(&funding_node.node.get_our_node_id(), &open_channel_msg);
@@ -3314,7 +3448,8 @@ pub fn create_batch_channel_funding<'a, 'b, 'c>(
 				ref counterparty_node_id,
 				channel_value_satoshis: ref event_channel_value_satoshis,
 				ref output_script,
-				user_channel_id: ref event_user_channel_id
+				user_channel_id: ref event_user_channel_id,
+				..
 			} => {
 				assert_eq!(temporary_channel_id, &temp_chan_id);
 				assert_eq!(counterparty_node_id, &other_node.node.get_our_node_id());
@@ -3339,6 +3474,7 @@ pub fn create_batch_channel_funding<'a, 'b, 'c>(
 	assert!(funding_node.node.batch_funding_transaction_generated(
 		temp_chan_ids.iter().map(|(a, b)| (a, b)).collect::<Vec<_>>().as_slice(),
 		tx.clone(),
+		None
 	).is_ok());
 	check_added_monitors!(funding_node, 0);
 	let events = funding_node.node.get_and_clear_pending_msg_events();
@@ -3354,4 +3490,715 @@ pub fn create_batch_channel_funding<'a, 'b, 'c>(
 		funding_created_msgs.push(funding_created);
 	}
 	return (tx, funding_created_msgs);
+}
+
+/// Creates a new YUV pixel. If Chroma and Luma are [`None`] then a Pixel with const values will be
+/// returned. You can use it for test purposes to avoid code duplication.
+pub fn new_test_pixel(
+	luma: Option<Luma>,
+	chroma: Option<Chroma>,
+	secp_ctx: &Secp256k1<secp256k1::All>,
+) -> Pixel {
+	let chroma = chroma.unwrap_or_else(|| {
+		let chroma_pk = PublicKey::from_secret_key(
+			secp_ctx, &SecretKey::from_slice(&[42; 32]).unwrap(),
+		);
+
+		Chroma::from(chroma_pk.x_only_public_key().0)
+	});
+
+	let luma = luma.unwrap_or(Luma::from(1234));
+
+	Pixel::new(luma, chroma)
+}
+
+/// Establish channel with announce between node_a and node_b with given channel_value, push_msat
+/// and funding_pixel. Establishing includes creating channel, signing funding transaction and
+/// confirming it, so channel is ready to use. The process is divided into three steps:
+/// - [`chan initiating`] (part of the flow until AcceptChannel msg)
+/// - [`chan funding`] (part of the flow until FundinfSigned msg)
+/// - [`chan confirmation`] (part of the flow until ChannelReady msg)
+///
+/// ### Note:
+/// Both of the nodes must support YUVPayments feature.
+///
+/// [`chan initiating`]: create_chan_with_yuv_init
+/// [`chan funding`]: create_chan_with_yuv_fund
+/// [`chan confirmation`]: create_chan_with_yuv_confirm
+pub fn create_chan_with_yuv<'a, 'b, 'c: 'd, 'd>(
+	nodes: &'a Vec<Node<'b, 'c, 'd>>,
+	a: usize,
+	b: usize,
+	channel_value: u64,
+	push_msat: u64,
+	funding_pixel: Pixel,
+) -> (msgs::ChannelUpdate, msgs::ChannelUpdate, ChannelId, YuvTransaction) {
+	let temp_channel_id = create_chan_with_yuv_init(&nodes[a], &nodes[b], channel_value, push_msat, funding_pixel);
+	let yuv_funding_tx = create_chan_with_yuv_fund(&nodes[a], &nodes[b], channel_value, funding_pixel, temp_channel_id);
+	let (channel_ready, channel_id) = create_chan_with_yuv_confirm_fund(&nodes[a], &nodes[b], &yuv_funding_tx);
+
+	let (announcement, as_update, bs_update) = create_chan_between_nodes_with_value_b(&nodes[a], &nodes[b], &channel_ready);
+	update_nodes_with_chan_announce_with_yuv(nodes, a, b, &announcement, &as_update, &bs_update, funding_pixel, channel_value);
+
+	(as_update, bs_update, channel_id, yuv_funding_tx)
+}
+
+/// The init step of the [`channel establishment`].
+///
+/// ### Flow:
+/// - [`create channel`] with node_a to send OpenChannel.
+/// - [`handle the OpenChannel msg`] with node_b and respond with AcceptChannel.
+/// - [`handle the AcceptChannel msg`] with node_a to be ready for funding.
+///
+/// [`channel establishment`]: create_chan_with_yuv
+/// [`create channel`]: ChannelManager::create_channel
+/// [`handle the OpenChannel msg`]: ChannelManager::handle_open_channel
+/// [`handle the AcceptChannel msg`]: ChannelManager::handle_accept_channel
+pub fn create_chan_with_yuv_init<'a, 'b, 'c>(
+	node_a: &Node<'a, 'b, 'c>,
+	node_b: &Node<'a, 'b, 'c>,
+	channel_value: u64,
+	push_msat: u64,
+	funding_pixel: Pixel,
+) -> ChannelId {
+	let create_chan_id = node_a.node.create_channel(
+		node_b.node.get_our_node_id(),
+		channel_value,
+		push_msat,
+		42,
+		Some(funding_pixel),
+		None,
+	).unwrap();
+	let open_channel_msg = get_event_msg!(
+		node_a,
+		MessageSendEvent::SendOpenChannel,
+		node_b.node.get_our_node_id()
+	);
+	assert_eq!(open_channel_msg.temporary_channel_id, create_chan_id);
+	let user_channel_id = node_a.node.list_channels()
+		.iter()
+		.find(|channel| {
+			channel.channel_id == create_chan_id
+		}).unwrap()
+		.user_channel_id;
+	assert_eq!(user_channel_id, 42);
+	assert_eq!(open_channel_msg.yuv_pixel, Some(funding_pixel));
+
+	node_b.node.handle_open_channel(&node_a.node.get_our_node_id(), &open_channel_msg);
+	if node_b.node.get_current_default_configuration().manually_accept_inbound_channels {
+		let events = node_b.node.get_and_clear_pending_events();
+		assert_eq!(events.len(), 1);
+		match &events[0] {
+			Event::OpenChannelRequest { temporary_channel_id, counterparty_node_id, .. } =>
+				node_b.node.accept_inbound_channel(
+					temporary_channel_id,
+					counterparty_node_id,
+					42,
+				).unwrap(),
+			_ => panic!("Unexpected event"),
+		};
+	}
+	let accept_channel_msg = get_event_msg!(
+		node_b,
+		MessageSendEvent::SendAcceptChannel,
+		node_a.node.get_our_node_id()
+	);
+	assert_eq!(accept_channel_msg.temporary_channel_id, create_chan_id);
+
+	node_a.node.handle_accept_channel(&node_b.node.get_our_node_id(), &accept_channel_msg);
+	let user_channel_id = node_b.node.list_channels()
+		.iter()
+		.find(|channel| {
+			channel.channel_id == create_chan_id
+		}).unwrap()
+		.user_channel_id;
+	assert_ne!(user_channel_id, 0);
+
+	create_chan_id
+}
+
+/// The funding step of the [`channel establishment`].
+///
+/// ### Flow:
+/// - [`create the funding transaction`] to be sent by node_a.
+/// - [`handle the FundingCreated msg`] with node_b and respond with FundingSigned
+/// - [`handle the FundingSigned msg`] with node_a. From now, the both node_a and node_b are
+/// waiting for the funding transaction confirmation.
+///
+/// [`create the funding transaction`]: create_yuv_funding_transaction
+/// [`handle the FundingCreated msg`]: ChannelManager::handle_funding_created
+/// [`handle the FundingSigned msg`]: ChannelManager::handle_funding_signed
+pub fn create_chan_with_yuv_fund<'a, 'b, 'c>(
+	node_a: &Node<'a, 'b, 'c>,
+	node_b: &Node<'a, 'b, 'c>,
+	channel_value: u64,
+	funding_yuv_pixel: Pixel,
+	expected_temporary_channel_id: ChannelId,
+) -> YuvTransaction {
+	let (temporary_channel_id, yuv_tx, funding_outpoint) = create_yuv_funding_transaction(
+		node_a,
+		&node_b.node.get_our_node_id(),
+		channel_value,
+		42,
+		funding_yuv_pixel,
+		false,
+	);
+	assert_eq!(temporary_channel_id, expected_temporary_channel_id);
+
+	node_a.node.funding_transaction_generated(
+		&expected_temporary_channel_id,
+		&node_b.node.get_our_node_id(),
+		yuv_tx.bitcoin_tx.clone(),
+		Some(yuv_tx.tx_type.clone()),
+	).unwrap();
+	check_added_monitors!(node_a, 0);
+	let funding_created_msg = get_event_msg!(
+		node_a,
+		MessageSendEvent::SendFundingCreated,
+		node_b.node.get_our_node_id()
+	);
+	assert_eq!(funding_created_msg.temporary_channel_id, expected_temporary_channel_id);
+
+	node_b.node.handle_funding_created(&node_a.node.get_our_node_id(), &funding_created_msg);
+	{
+		let mut added_monitors = node_b.chain_monitor.added_monitors.lock().unwrap();
+		assert_eq!(added_monitors.len(), 1);
+		assert_eq!(added_monitors[0].0, funding_outpoint);
+		added_monitors.clear();
+	}
+	expect_channel_pending_event(&node_b, &node_a.node.get_our_node_id());
+
+	node_a.node.handle_funding_signed(
+		&node_b.node.get_our_node_id(),
+		&get_event_msg!(
+			node_b,
+			MessageSendEvent::SendFundingSigned,
+			node_a.node.get_our_node_id()
+		),
+	);
+	{
+		let mut added_monitors = node_a.chain_monitor.added_monitors.lock().unwrap();
+		assert_eq!(added_monitors.len(), 1);
+		assert_eq!(added_monitors[0].0, funding_outpoint);
+		added_monitors.clear();
+	}
+	expect_channel_pending_event(&node_a, &node_b.node.get_our_node_id());
+
+	let events_4 = node_a.node.get_and_clear_pending_events();
+	assert_eq!(events_4.len(), 0);
+
+	// Ensure that funding transcation has been broadcasted to the Bitcoin.
+	{
+		let mut txn_broadcasted = node_a.tx_broadcaster.txn_broadcasted.lock().unwrap();
+		assert_eq!(txn_broadcasted.len(), 1);
+		assert_eq!(txn_broadcasted[0], yuv_tx.bitcoin_tx);
+		txn_broadcasted.clear();
+	}
+
+	// Ensure that funding transcation has been broadcasted to the YUV.
+	{
+		let mut yuv_txn_broadcasted = node_a.yuv_tx_broadcaster.unwrap().txn_broadcasted.lock().unwrap();
+		assert_eq!(yuv_txn_broadcasted.len(), 1);
+		assert_eq!(yuv_txn_broadcasted[0], yuv_tx.clone());
+		yuv_txn_broadcasted.clear();
+	}
+
+	// Ensure that funding_transaction_generated is idempotent.
+	assert!(node_a.node.funding_transaction_generated(
+		&expected_temporary_channel_id,
+		&node_b.node.get_our_node_id(),
+		yuv_tx.bitcoin_tx.clone(),
+		Some(yuv_tx.tx_type.clone()),
+	).is_err());
+	assert!(node_a.node.get_and_clear_pending_msg_events().is_empty());
+	check_added_monitors!(node_a, 0);
+
+	yuv_tx
+}
+
+/// Created the YUV funding transaction, that also contains YUV proofs, for the node with specified
+/// parameters.
+fn create_yuv_funding_transaction<'a, 'b, 'c>(
+	node: &Node<'a, 'b, 'c>,
+	expected_counterparty_node_id: &PublicKey,
+	expected_chan_value: u64,
+	expected_user_chan_id: u128,
+	expected_yuv_pixel: Pixel,
+	is_coinbase: bool,
+) -> (ChannelId, YuvTransaction, OutPoint) {
+	let chan_id = *node.network_chan_count.borrow();
+
+	let events = node.node.get_and_clear_pending_events();
+	assert_eq!(events.len(), 1);
+
+	match events[0] {
+		Event::FundingGenerationReady {
+			ref temporary_channel_id,
+			ref counterparty_node_id,
+			ref channel_value_satoshis,
+			user_channel_id,
+			funding_yuv_pixel: Some(funding_yuv_pixel),
+			ref funding_holder_pubkey,
+			ref funding_counterparty_pubkey,
+			..
+		} => {
+			assert_eq!(counterparty_node_id, expected_counterparty_node_id);
+			assert_eq!(*channel_value_satoshis, expected_chan_value);
+			assert_eq!(user_channel_id, expected_user_chan_id);
+			assert_eq!(funding_yuv_pixel, expected_yuv_pixel);
+
+			let mut input = Vec::new();
+			if is_coinbase {
+				input.push(TxIn::default());
+			}
+
+			let multisig_proof = MultisigPixelProof::new(
+				funding_yuv_pixel,
+				vec![*funding_holder_pubkey, *funding_counterparty_pubkey],
+				2,
+			);
+			let script_pubkey = multisig_proof.to_script_pubkey();
+
+			let mut output_proofs = BTreeMap::new();
+			output_proofs.insert(0, multisig_proof.into());
+
+			let yuv_tx = YuvTransaction {
+				bitcoin_tx: Transaction {
+					version: chan_id as i32,
+					lock_time: PackedLockTime::ZERO,
+					input,
+					output: vec![TxOut {
+						value: *channel_value_satoshis,
+						script_pubkey,
+					}],
+				},
+				tx_type: YuvTxType::Transfer {
+					input_proofs: Default::default(),
+					output_proofs,
+				},
+			};
+
+			let funding_outpoint = OutPoint {
+				txid: yuv_tx.bitcoin_tx.txid(),
+				index: 0,
+			};
+
+			(*temporary_channel_id, yuv_tx, funding_outpoint)
+		},
+		_ => panic!("Unexpected event"),
+	}
+}
+
+/// The confirmation step of the [`channel establishment`].
+///
+/// ### Flow:
+/// - [`confirm the funding transaction`] at the calculated confirmation height for node_b.
+/// - [`handle the ChannelReady msg`] with node_a.
+/// - [`confirm the funding transaction`] at the calculated confirmation height for node_a.
+/// - [`handle the ChannelReady msg`] with node_b.
+///
+/// [`channel establishment`]: create_chan_with_yuv
+/// [`confirm the funding transaction`]: confirm_yuv_transaction
+/// [`handle the ChannelReady msg`]: ChannelManager::handle_channel_ready
+pub fn create_chan_with_yuv_confirm_fund<'a, 'b, 'c: 'd, 'd>(
+	node_a: &'a Node<'b, 'c, 'd>,
+	node_b: &'a Node<'b, 'c, 'd>,
+	yuv_tx: &YuvTransaction,
+) -> ((msgs::ChannelReady, msgs::AnnouncementSignatures), ChannelId) {
+	let conf_height = core::cmp::max(node_a.best_block_info().1 + 1, node_b.best_block_info().1 + 1);
+
+	confirm_yuv_transaction(node_b, yuv_tx, conf_height);
+	node_a.node.handle_channel_ready(
+		&node_b.node.get_our_node_id(),
+		&get_event_msg!(
+			node_b,
+			MessageSendEvent::SendChannelReady,
+			node_a.node.get_our_node_id()
+		),
+	);
+
+	confirm_yuv_transaction(node_a, yuv_tx, conf_height);
+	expect_channel_ready_event(node_a, &node_b.node.get_our_node_id());
+
+	create_chan_between_nodes_with_value_confirm_second(node_b, node_a)
+}
+
+/// Confirm YUV transaction of the YUV and Bitcoin networks With the `is_yuv_first` flag you can
+/// manage where to confirm the transaction first either on the YUV network first or on the Bitcoin
+/// network.
+pub fn confirm_yuv_transaction<'a, 'b, 'c, 'd>(
+	node: &'a Node<'b, 'c, 'c>,
+	yuv_tx: &YuvTransaction,
+	conf_height: u32,
+) {
+	confirm_transaction_at(node, &yuv_tx.bitcoin_tx, conf_height);
+	connect_blocks(node, CHAN_CONFIRM_DEPTH - 1);
+
+	let pending_yuv_txs = node.node.get_pending_yuv_txs();
+	assert_eq!(pending_yuv_txs.len(), 1);
+	assert_eq!(pending_yuv_txs[0], yuv_tx.bitcoin_tx.txid());
+
+	node.node.yuv_transactions_confirmed(vec![yuv_tx.clone()]);
+	node.chain_monitor.yuv_transactions_confirmed(vec![yuv_tx.clone()]);
+}
+
+/// Close the channel with YUVPayments feature with corresponding checks.
+#[cfg(test)]
+pub fn close_yuv_channel<'a, 'b, 'c>(
+	outbound_node: &Node<'a, 'b, 'c>,
+	inbound_node: &Node<'a, 'b, 'c>,
+	channel_id: &ChannelId,
+	funding_yuv_tx: YuvTransaction,
+	close_inbound_first: bool,
+) -> (msgs::ChannelUpdate, msgs::ChannelUpdate, YuvTransaction) {
+	let mut node_a = outbound_node;
+	let mut node_b = inbound_node;
+	if close_inbound_first {
+		mem::swap(&mut node_a, &mut node_b);
+	}
+
+	let mngr_a = node_a.node;
+	let mngr_b = node_b.node;
+
+	mngr_a.close_channel(channel_id, &mngr_b.get_our_node_id()).unwrap();
+	mngr_b.handle_shutdown(&mngr_a.get_our_node_id(), &get_event_msg!(node_a, MessageSendEvent::SendShutdown, mngr_b.get_our_node_id()));
+	// UpdateMonitor with update shutdown script due to YUV payments.
+	check_added_monitors!(node_b, 1);
+
+	let events_1 = mngr_b.get_and_clear_pending_msg_events();
+	assert!(events_1.len() >= 1);
+	let shutdown_b = match events_1[0] {
+		MessageSendEvent::SendShutdown { ref node_id, ref msg } => {
+			assert_eq!(node_id, &mngr_a.get_our_node_id());
+			msg.clone()
+		},
+		_ => panic!("Unexpected event"),
+	};
+
+	let closing_signed_b = if !close_inbound_first {
+		assert_eq!(events_1.len(), 1);
+		None
+	} else {
+		Some(match events_1[1] {
+			MessageSendEvent::SendClosingSigned { ref node_id, ref msg } => {
+				assert_eq!(node_id, &mngr_a.get_our_node_id());
+				msg.clone()
+			},
+			_ => panic!("Unexpected event"),
+		})
+	};
+
+	mngr_a.handle_shutdown(&mngr_b.get_our_node_id(), &shutdown_b);
+	// UpdateMonitor with update shutdown script due to YUV payments.
+	check_added_monitors!(node_a, 1);
+
+	let yuv_payment_details_a = node_a.node.get_channel_yuv_payment_details(channel_id).unwrap();
+	let yuv_payment_details_b = node_b.node.get_channel_yuv_payment_details(channel_id).unwrap();
+
+	assert_eq!(
+		yuv_payment_details_a.holder_shutdown_inner_key.unwrap(),
+	    yuv_payment_details_b.counterparty_shutdown_inner_key.unwrap(),
+	);
+	assert_eq!(
+		yuv_payment_details_b.holder_shutdown_inner_key.unwrap(),
+	    yuv_payment_details_a.counterparty_shutdown_inner_key.unwrap(),
+	);
+
+	let closing_signed_a;
+	let (tx_a, tx_b);
+	let (yuv_tx_a, yuv_tx_b);
+	let (as_update, bs_update) = if close_inbound_first {
+		assert!(mngr_a.get_and_clear_pending_msg_events().is_empty());
+		mngr_a.handle_closing_signed(&mngr_b.get_our_node_id(), &closing_signed_b.unwrap());
+		mngr_b.handle_closing_signed(&mngr_a.get_our_node_id(), &get_event_msg!(node_a, MessageSendEvent::SendClosingSigned, mngr_b.get_our_node_id()));
+
+		assert_eq!(node_b.tx_broadcaster.txn_broadcasted.lock().unwrap().len(), 1);
+		tx_b = node_b.tx_broadcaster.txn_broadcasted.lock().unwrap().remove(0);
+
+		assert_eq!(node_b.yuv_tx_broadcaster.unwrap().txn_broadcasted.lock().unwrap().len(), 1);
+		yuv_tx_b = node_b.yuv_tx_broadcaster.unwrap().txn_broadcasted.lock().unwrap().remove(0);
+
+		let (bs_update, closing_signed_b) = get_closing_signed_broadcast!(mngr_b, mngr_a.get_our_node_id());
+
+		mngr_a.handle_closing_signed(&mngr_b.get_our_node_id(), &closing_signed_b.unwrap());
+		let (as_update, none_a) = get_closing_signed_broadcast!(mngr_a, mngr_b.get_our_node_id());
+		assert!(none_a.is_none());
+		assert_eq!(node_a.tx_broadcaster.txn_broadcasted.lock().unwrap().len(), 1);
+		tx_a = node_a.tx_broadcaster.txn_broadcasted.lock().unwrap().remove(0);
+
+		assert_eq!(node_a.yuv_tx_broadcaster.unwrap().txn_broadcasted.lock().unwrap().len(), 1);
+		yuv_tx_a = node_a.yuv_tx_broadcaster.unwrap().txn_broadcasted.lock().unwrap().remove(0);
+
+		(as_update, bs_update)
+	} else {
+		closing_signed_a = get_event_msg!(node_a, MessageSendEvent::SendClosingSigned, mngr_b.get_our_node_id());
+
+		mngr_b.handle_closing_signed(&mngr_a.get_our_node_id(), &closing_signed_a);
+		mngr_a.handle_closing_signed(&mngr_b.get_our_node_id(), &get_event_msg!(node_b, MessageSendEvent::SendClosingSigned, mngr_a.get_our_node_id()));
+
+		assert_eq!(node_a.tx_broadcaster.txn_broadcasted.lock().unwrap().len(), 1);
+		tx_a = node_a.tx_broadcaster.txn_broadcasted.lock().unwrap().remove(0);
+
+		assert_eq!(node_a.yuv_tx_broadcaster.unwrap().txn_broadcasted.lock().unwrap().len(), 1);
+		yuv_tx_a = node_a.yuv_tx_broadcaster.unwrap().txn_broadcasted.lock().unwrap().remove(0);
+
+		let (as_update, closing_signed_a) = get_closing_signed_broadcast!(mngr_a, mngr_b.get_our_node_id());
+
+		mngr_b.handle_closing_signed(&mngr_a.get_our_node_id(), &closing_signed_a.unwrap());
+		let (bs_update, none_b) = get_closing_signed_broadcast!(mngr_b, mngr_a.get_our_node_id());
+		assert!(none_b.is_none());
+
+		assert_eq!(node_b.tx_broadcaster.txn_broadcasted.lock().unwrap().len(), 1);
+		tx_b = node_b.tx_broadcaster.txn_broadcasted.lock().unwrap().remove(0);
+
+		assert_eq!(node_b.yuv_tx_broadcaster.unwrap().txn_broadcasted.lock().unwrap().len(), 1);
+		yuv_tx_b = node_b.yuv_tx_broadcaster.unwrap().txn_broadcasted.lock().unwrap().remove(0);
+
+		(as_update, bs_update)
+	};
+
+	assert_eq!(tx_a, tx_b);
+	assert_eq!(yuv_tx_a, yuv_tx_b);
+	assert_eq!(yuv_tx_a.bitcoin_tx, tx_a);
+
+	check_yuv_closing_proofs(
+		&yuv_payment_details_a, &yuv_payment_details_b, &funding_yuv_tx, &yuv_tx_a,
+	);
+	check_spends!(tx_a, funding_yuv_tx.bitcoin_tx);
+
+	(as_update, bs_update, yuv_tx_a)
+}
+
+fn contains_all<T: PartialEq>(required: Vec<T>, presented: Vec<T>) -> bool {
+	required.iter().all(|e| presented.contains(e))
+}
+
+pub fn check_yuv_closing_proofs(
+	yuv_payment_a: &YuvPayment,
+	yuv_payment_b: &YuvPayment,
+	funding_yuv_tx: &YuvTransaction,
+	closing_yuv_tx: &YuvTransaction,
+) {
+	let mut expected_closing_yuv_proofs = Vec::new();
+	if yuv_payment_a.holder_pixel.luma.amount > 0 {
+		expected_closing_yuv_proofs.push(
+			PixelProof::sig(
+				yuv_payment_a.holder_pixel,
+				yuv_payment_a.holder_shutdown_inner_key.unwrap(),
+			)
+		);
+	}
+	if yuv_payment_b.holder_pixel.luma.amount > 0 {
+		expected_closing_yuv_proofs.push(
+			PixelProof::sig(
+				yuv_payment_b.holder_pixel,
+				yuv_payment_b.holder_shutdown_inner_key.unwrap(),
+			)
+		);
+	}
+
+	let actual_closing_yuv_proofs = closing_yuv_tx.tx_type
+		.output_proofs()
+		.unwrap()
+		.values()
+		.cloned()
+		.collect();
+
+	assert_eq!(funding_yuv_tx.tx_type.output_proofs(), closing_yuv_tx.tx_type.input_proofs());
+	assert!(contains_all(expected_closing_yuv_proofs, actual_closing_yuv_proofs));
+}
+
+/// Sends the update balance message from broadcaster to counterparty and handles the commitment
+/// signed, revoke and ack, etc. if the update balance is happened for the channel.
+///
+/// ### Flow:
+/// - [`call the update balance`] with broadcaster's node..
+/// - [`handle the update balance appliance`] if needed.
+/// - check if the counterparty received update balance if there wasn't update balance applied.
+///
+/// [`send the update balance`]: ChannelManager::update_balance
+/// [`handle the update balance appliance`]: update_balance_applied
+pub fn update_balance<'a, 'b, 'c>(
+	broadcaster_node: &Node<'a, 'b, 'c>,
+	counterparty_node: &Node<'a, 'b, 'c>,
+	channel_id: &ChannelId,
+	new_balance_msat: u64,
+	new_yuv_balance: Option<u128>,
+	is_revoke: bool,
+) -> bool {
+	let new_yuv_luma = new_yuv_balance.map(Luma::from);
+
+	// Send the update balance from broadcaster to counterparty
+	broadcaster_node.node.update_balance(UpdateBalance{
+		channel_id: *channel_id,
+		node_id: counterparty_node.node.get_our_node_id(),
+		new_balance_msat: Some(new_balance_msat),
+		new_yuv_luma,
+	}).unwrap();
+	let mut broadcaster_events = broadcaster_node.node.get_and_clear_pending_msg_events();
+	assert!(broadcaster_events.len() <= 2 && !broadcaster_events.is_empty());
+
+	let MessageSendEvent::SendUpdateBalance {
+		node_id: send_node_id,
+		msg: update_balance_msg,
+	} = broadcaster_events.remove(0) else {
+		panic!("Unexpected event");
+	};
+	assert_eq!(send_node_id, counterparty_node.node.get_our_node_id());
+	assert_eq!(update_balance_msg, msgs::UpdateBalance {
+		channel_id: *channel_id,
+		new_balance_msat,
+		new_yuv_pixel_luma: new_yuv_luma,
+	});
+
+	// Handle update balance message bu counterparty
+	counterparty_node.node.handle_update_balance(
+		&broadcaster_node.node.get_our_node_id(),
+		&update_balance_msg
+	);
+	let counterparty_events = counterparty_node.node.get_and_clear_pending_events();
+	assert!(counterparty_events.len() <= 2 && !counterparty_events.is_empty());
+
+	// Perform checks, that update balance details appeared in both channels.
+	let broadcaster_channels = broadcaster_node.node.list_channels();
+	let broadcaster_channel_details = broadcaster_channels
+		.iter()
+		.find(|chan| &chan.channel_id == channel_id)
+		.unwrap();
+
+	let counterparty_channels = counterparty_node.node.list_channels();
+	let counterparty_channel_details = counterparty_channels
+		.iter()
+		.find(|chan| &chan.channel_id == channel_id)
+		.unwrap();
+
+	if !broadcaster_events.is_empty() {
+		update_balance_applied(broadcaster_node, counterparty_node, broadcaster_events);
+
+		let broadcaster_pending_update_balances = broadcaster_channel_details
+			.pending_update_balance
+			.as_ref()
+			.unwrap();
+		assert_eq!(broadcaster_pending_update_balances.inbound_request, None);
+		assert_eq!(broadcaster_pending_update_balances.outbound_request, None);
+
+		let counterparty_update_balances = counterparty_channel_details
+			.pending_update_balance
+			.as_ref()
+			.unwrap();
+		assert_eq!(counterparty_update_balances.inbound_request, None);
+		assert_eq!(counterparty_update_balances.outbound_request, None);
+
+		return true
+	}
+
+	let update_balance_msg = if is_revoke { None } else { Some(update_balance_msg) };
+
+	let broadcaster_pending_update_balances = broadcaster_channel_details
+		.pending_update_balance
+		.as_ref()
+		.unwrap();
+	assert_eq!(
+		broadcaster_pending_update_balances.outbound_request,
+		update_balance_msg.map(UpdateBalanceRequest::Outbound)
+	);
+
+	let counterparty_update_balances = counterparty_channel_details
+		.pending_update_balance
+		.as_ref()
+		.unwrap();
+	assert_eq!(
+		counterparty_update_balances.inbound_request,
+		update_balance_msg.map(UpdateBalanceRequest::Inbound)
+	);
+
+	false
+}
+
+/// Handle update balance appliance. It happens if both: the counterparty and broadcaster node send
+/// the same update balance requests, which means they agreed with new balances.
+///
+/// ### Flow:
+/// - [`handle the CommitmentSigned msg`] with counterparty's node.
+/// - [`handle the CommitmentSigned msg`] with broadcaster's node.
+/// - [`handle the RevokeAndAck msg`] with broadcaster.
+/// - [`handle the RevokeAndAck msg`] with counterparty.
+///
+/// [`handle the CommitmentSigned msg`]: ChannelManager::handle_commitment_signed
+/// [`handle the RevokeAndAck msg`]: ChannelManager::handle_revoke_and_ack
+fn update_balance_applied<'a, 'b, 'c>(
+	broadcaster_node: &Node<'a, 'b, 'c>,
+	counterparty_node: &Node<'a, 'b, 'c>,
+	mut broadcaster_events: Vec<MessageSendEvent>,
+) {
+	// 1. Take the broadcaster's commitment_signed msg
+	assert_eq!(broadcaster_events.len(), 1);
+	let MessageSendEvent::UpdateHTLCs {
+		node_id: counterparty_send_node_id,
+		updates: msgs::CommitmentUpdate {
+			commitment_signed: ref broadcaster_commitment_signed,
+			..
+		},
+	} = broadcaster_events.remove(0) else {
+		panic!("Unexpected event");
+	};
+	assert_eq!(counterparty_send_node_id, counterparty_node.node.get_our_node_id());
+
+	// Send the broadcaster's commitment_signed to counterparty
+	counterparty_node.node.handle_commitment_signed(
+		&broadcaster_node.node.get_our_node_id(),
+		broadcaster_commitment_signed
+	);
+	check_added_monitors!(counterparty_node, 2);
+
+	// 2. Take the counterparty's commitment signed and handle_revoke_and_ack msgs
+	let mut counterparty_events = counterparty_node.node.get_and_clear_pending_msg_events();
+	assert_eq!(counterparty_events.len(), 2);
+
+	let MessageSendEvent::UpdateHTLCs {
+		node_id: broadcaster_send_node_id,
+		updates: msgs::CommitmentUpdate {
+			commitment_signed: ref counterparty_commitment_signed,
+			..
+		},
+	} = counterparty_events.remove(0) else {
+		panic!("Unexpected event");
+	};
+	assert_eq!(broadcaster_send_node_id, broadcaster_node.node.get_our_node_id());
+
+	// Send the counterparty's commitment_signed to broadcaster
+	broadcaster_node.node.handle_commitment_signed(
+		&counterparty_node.node.get_our_node_id(),
+		counterparty_commitment_signed
+	);
+	check_added_monitors!(broadcaster_node, 2);
+
+	let MessageSendEvent::SendRevokeAndACK {
+		node_id: broadcaster_send_node_id,
+		msg: counterparty_revoke_and_ack,
+	} = counterparty_events.remove(0) else {
+		panic!("Unexpected event");
+	};
+	assert_eq!(broadcaster_send_node_id, broadcaster_node.node.get_our_node_id());
+
+	// Send the counterparty's revoke_and_ack to broadcaster
+	broadcaster_node.node.handle_revoke_and_ack(
+		&counterparty_node.node.get_our_node_id(),
+		&counterparty_revoke_and_ack
+	);
+	check_added_monitors!(broadcaster_node, 1);
+
+	// 3. Take the broadcaster's revoke_and_ack msg
+	let broadcaster_revoke_and_ack = get_event_msg!(
+		broadcaster_node,
+		MessageSendEvent::SendRevokeAndACK,
+		counterparty_node.node.get_our_node_id()
+	);
+
+	// Send the broadcaster's revoke_and_ack to counterparty
+	counterparty_node.node.handle_revoke_and_ack(
+		&broadcaster_node.node.get_our_node_id(),
+		&broadcaster_revoke_and_ack
+	);
+	check_added_monitors!(counterparty_node, 1);
 }

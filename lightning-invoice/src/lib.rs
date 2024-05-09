@@ -50,6 +50,7 @@ use bitcoin::util::address::{Payload, WitnessVersion};
 use bitcoin_hashes::{Hash, sha256};
 use lightning::ln::features::Bolt11InvoiceFeatures;
 use lightning::util::invoice::construct_invoice_preimage;
+use yuv_pixels::Pixel;
 
 use secp256k1::PublicKey;
 use secp256k1::{Message, Secp256k1};
@@ -82,22 +83,16 @@ mod prelude {
 	#[cfg(feature = "hashbrown")]
 	extern crate hashbrown;
 
-	pub use alloc::{vec, vec::Vec, string::String, collections::VecDeque, boxed::Box};
+	pub use alloc::{vec, vec::Vec, string::String};
 	#[cfg(not(feature = "hashbrown"))]
-	pub use std::collections::{HashMap, HashSet, hash_map};
+	pub use std::collections::{HashMap, hash_map};
 	#[cfg(feature = "hashbrown")]
-	pub use self::hashbrown::{HashMap, HashSet, hash_map};
+	pub use self::hashbrown::{HashMap, hash_map};
 
 	pub use alloc::string::ToString;
 }
 
 use crate::prelude::*;
-
-/// Sync compat for std/no_std
-#[cfg(feature = "std")]
-mod sync {
-	pub use ::std::sync::{Mutex, MutexGuard};
-}
 
 /// Sync compat for std/no_std
 #[cfg(not(feature = "std"))]
@@ -125,6 +120,10 @@ pub enum Bolt11ParseError {
 	InvalidScriptHashLength,
 	InvalidRecoveryId,
 	InvalidSliceLength(String),
+	InvalidYuvAmount,
+	YuvAmountIsAbsent,
+	YuvChromaIsAbsent,
+	InvalidYuvChromaP2TR,
 
 	/// Not an error, but used internally to signal that a part of the invoice should be ignored
 	/// according to BOLT11
@@ -233,6 +232,7 @@ pub struct InvoiceBuilder<D: tb::Bool, H: tb::Bool, T: tb::Bool, C: tb::Bool, S:
 	timestamp: Option<PositiveTimestamp>,
 	tagged_fields: Vec<TaggedField>,
 	error: Option<CreationError>,
+	yuv_pixel: Option<Pixel>,
 
 	phantom_d: core::marker::PhantomData<D>,
 	phantom_h: core::marker::PhantomData<H>,
@@ -319,6 +319,42 @@ pub struct RawHrp {
 
 	/// SI prefix that gets multiplied with the `raw_amount`
 	pub si_prefix: Option<SiPrefix>,
+
+	/// The YUV pixel that has to be paid. It is supported only if the YUV Payments features is
+	/// supported.
+	pub yuv_pixel: Option<Pixel>,
+}
+
+/// Contains the separated raw hrp parts. Produced as a result of [`parse_hrp`].
+///
+/// [`parse_hrp`]: crate::de::hrp_sm::StateMachine::parse_hrp
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RawHrpParts {
+	/// Contains the raw [`currency`](Currency) part of hrp.
+	///
+	/// Possible values: "bc", "tb", "bcrt", "sb", "tbs".
+	pub currency: String,
+	/// Contains the raw amount part of hrp. Represents MSAT amount.
+	///
+	/// Example values: "10", "12345", etc.
+	pub amount_msat: String,
+	/// Contains the raw amount's [`SI prefix part`](SiPrefix) of hrp.
+	///
+	/// Possible values: "m", "u", "n", "p".
+	pub si_prefix: String,
+	/// Contains the raw YUV pixel parts of the hrp.
+	///
+	/// * The first parameter represents an amount of tokens ([`Luma`](yuv_pixels::Luma)'s amount)
+	/// in the [`YUV Pixel`](Pixel).
+	/// * The second parameter represents a [`YUV Pixel`](Pixel)'s [`Chroma`](yuv_pixels::Chroma)
+	/// that is encode in human-readable format as [`P2TR address`](Address) without the network
+	/// prefix to avoid its duplication in the invoice's hrp.
+	///
+	/// Example values: ("10", "p03egc6nv2ardypk2qpwru20sv7pfsxrn43wv7ts785rq5s8a8tmqjhunh7")
+	///
+	/// Note: It is empty if YUV payments aren't used for the invoice and prefix part
+	/// doesn't contain `y` suffix.
+	pub yuv_pixel: Option<(String, String)>,
 }
 
 /// Data of the [`RawBolt11Invoice`] that is encoded in the data part
@@ -378,7 +414,7 @@ impl SiPrefix {
 }
 
 /// Enum representing the crypto currencies (or networks) supported by this library
-#[derive(Clone, Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Copy, Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]
 pub enum Currency {
 	/// Bitcoin mainnet
 	Bitcoin,
@@ -549,6 +585,7 @@ impl InvoiceBuilder<tb::False, tb::False, tb::False, tb::False, tb::False, tb::F
 			timestamp: None,
 			tagged_fields: Vec::new(),
 			error: None,
+			yuv_pixel: None,
 
 			phantom_d: core::marker::PhantomData,
 			phantom_h: core::marker::PhantomData,
@@ -570,6 +607,7 @@ impl<D: tb::Bool, H: tb::Bool, T: tb::Bool, C: tb::Bool, S: tb::Bool, M: tb::Boo
 			timestamp: self.timestamp,
 			tagged_fields: self.tagged_fields,
 			error: self.error,
+			yuv_pixel: self.yuv_pixel,
 
 			phantom_d: core::marker::PhantomData,
 			phantom_h: core::marker::PhantomData,
@@ -619,6 +657,12 @@ impl<D: tb::Bool, H: tb::Bool, T: tb::Bool, C: tb::Bool, S: tb::Bool, M: tb::Boo
 		}
 		self
 	}
+
+	/// Sets a YUV pixel to be sent by this invoice.
+	pub fn yuv_pixel(mut self, yuv_pixel: Pixel) -> Self {
+		self.yuv_pixel = Some(yuv_pixel);
+		self
+	}
 }
 
 impl<D: tb::Bool, H: tb::Bool, C: tb::Bool, S: tb::Bool, M: tb::Bool> InvoiceBuilder<D, H, tb::True, C, S, M> {
@@ -635,6 +679,7 @@ impl<D: tb::Bool, H: tb::Bool, C: tb::Bool, S: tb::Bool, M: tb::Bool> InvoiceBui
 			currency: self.currency,
 			raw_amount: self.amount,
 			si_prefix: self.si_prefix,
+			yuv_pixel: self.yuv_pixel,
 		};
 
 		let timestamp = self.timestamp.expect("ensured to be Some(t) by type T");
@@ -1082,6 +1127,10 @@ impl RawBolt11Invoice {
 	pub fn currency(&self) -> Currency {
 		self.hrp.currency.clone()
 	}
+
+	pub fn yuv_pixel(&self) -> Option<Pixel> {
+		self.hrp.yuv_pixel
+	}
 }
 
 impl PositiveTimestamp {
@@ -1463,6 +1512,13 @@ impl Bolt11Invoice {
 	fn amount_pico_btc(&self) -> Option<u64> {
 		self.signed_invoice.amount_pico_btc()
 	}
+
+	/// Returns the YUV pixel if it is presented, otherwise returns None.
+	///
+	/// It is supported only with YUV payments feature.
+	pub fn yuv_pixel(&self) -> Option<Pixel> {
+		self.signed_invoice.yuv_pixel()
+	}
 }
 
 impl From<TaggedField> for RawTaggedField {
@@ -1750,6 +1806,7 @@ mod test {
 	use bitcoin::Script;
 	use bitcoin_hashes::hex::FromHex;
 	use bitcoin_hashes::sha256;
+	use lightning::ln::functional_test_utils::new_test_pixel;
 
 	#[test]
 	fn test_system_time_bounds_assumptions() {
@@ -1769,6 +1826,7 @@ mod test {
 				currency: Currency::Bitcoin,
 				raw_amount: None,
 				si_prefix: None,
+				yuv_pixel: None,
 			},
 			data: RawDataPart {
 				timestamp: PositiveTimestamp::from_unix_timestamp(1496314658).unwrap(),
@@ -1807,6 +1865,7 @@ mod test {
 					currency: Currency::Bitcoin,
 					raw_amount: None,
 					si_prefix: None,
+					yuv_pixel: None,
 				},
 				data: RawDataPart {
 					timestamp: PositiveTimestamp::from_unix_timestamp(1496314658).unwrap(),
@@ -1877,6 +1936,7 @@ mod test {
 				currency: Currency::Bitcoin,
 				raw_amount: None,
 				si_prefix: None,
+				yuv_pixel: None,
 			},
 			data: RawDataPart {
 				timestamp: PositiveTimestamp::from_unix_timestamp(1496314658).unwrap(),
@@ -2019,6 +2079,7 @@ mod test {
 			cltv_expiry_delta: 0,
 			htlc_minimum_msat: None,
 			htlc_maximum_msat: None,
+			htlc_maximum_yuv: None,
 		};
 		let too_long_route = RouteHint(vec![route_hop; 13]);
 		let long_route_res = builder.clone()
@@ -2066,6 +2127,7 @@ mod test {
 				cltv_expiry_delta: 145,
 				htlc_minimum_msat: None,
 				htlc_maximum_msat: None,
+				htlc_maximum_yuv: None,
 			},
 			RouteHintHop {
 				src_node_id: public_key,
@@ -2077,6 +2139,7 @@ mod test {
 				cltv_expiry_delta: 146,
 				htlc_minimum_msat: None,
 				htlc_maximum_msat: None,
+				htlc_maximum_yuv: None,
 			}
 		]);
 
@@ -2091,6 +2154,7 @@ mod test {
 				cltv_expiry_delta: 147,
 				htlc_minimum_msat: None,
 				htlc_maximum_msat: None,
+				htlc_maximum_yuv: None,
 			},
 			RouteHintHop {
 				src_node_id: public_key,
@@ -2102,8 +2166,11 @@ mod test {
 				cltv_expiry_delta: 148,
 				htlc_minimum_msat: None,
 				htlc_maximum_msat: None,
+				htlc_maximum_yuv: None,
 			}
 		]);
+
+		let yuv_pixel = new_test_pixel(None, None, &secp_ctx);
 
 		let builder = InvoiceBuilder::new(Currency::BitcoinTestnet)
 			.amount_milli_satoshis(123)
@@ -2117,7 +2184,8 @@ mod test {
 			.description_hash(sha256::Hash::from_slice(&[3;32][..]).unwrap())
 			.payment_hash(sha256::Hash::from_slice(&[21;32][..]).unwrap())
 			.payment_secret(PaymentSecret([42; 32]))
-			.basic_mpp();
+			.basic_mpp()
+			.yuv_pixel(yuv_pixel);
 
 		let invoice = builder.clone().build_signed(|hash| {
 			secp_ctx.sign_ecdsa_recoverable(hash, &private_key)
@@ -2147,6 +2215,7 @@ mod test {
 		);
 		assert_eq!(invoice.payment_hash(), &sha256::Hash::from_slice(&[21;32][..]).unwrap());
 		assert_eq!(invoice.payment_secret(), &PaymentSecret([42; 32]));
+		assert_eq!(invoice.yuv_pixel(), Some(yuv_pixel));
 
 		let mut expected_features = Bolt11InvoiceFeatures::empty();
 		expected_features.set_variable_length_onion_required();

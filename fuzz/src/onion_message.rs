@@ -20,6 +20,7 @@ use crate::utils::test_logger;
 
 use std::io::{self, Cursor};
 use std::sync::atomic::{AtomicU64, Ordering};
+use yuv_pixels::Pixel;
 
 #[inline]
 /// Actual fuzz test, method signature and name are fixed
@@ -187,6 +188,10 @@ impl SignerProvider for KeyProvider {
 	fn get_destination_script(&self) -> Result<Script, ()> { unreachable!() }
 
 	fn get_shutdown_scriptpubkey(&self) -> Result<ShutdownScript, ()> { unreachable!() }
+
+	fn get_shutdown_pixel_scriptpubkey(&self, _yuv_pixel: &Pixel) -> Result<(ShutdownScript, PublicKey), ()> {
+		todo!()
+	}
 }
 
 #[cfg(test)]

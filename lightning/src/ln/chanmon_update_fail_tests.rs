@@ -26,12 +26,10 @@ use crate::ln::msgs::{ChannelMessageHandler, RoutingMessageHandler};
 use crate::util::test_channel_signer::TestChannelSigner;
 use crate::util::errors::APIError;
 use crate::util::ser::{ReadableArgs, Writeable};
-use crate::util::test_utils::TestBroadcaster;
-
+use crate::util::test_utils::{TestBroadcaster, TestYuvBroadcaster};
+use crate::chain::chaininterface::YuvBroadcaster;
 use crate::ln::functional_test_utils::*;
-
 use crate::util::test_utils;
-
 use crate::io;
 use bitcoin::hashes::Hash;
 use crate::prelude::*;
@@ -71,6 +69,7 @@ fn test_monitor_and_persister_update_fail() {
 		// requirements of transactions broadcasted at that point.
 		blocks: Arc::new(Mutex::new(vec![(genesis_block(Network::Testnet), 200); 200])),
 	};
+	let yuv_tx_broadcaster = &TestYuvBroadcaster::new() as &YuvBroadcaster;
 	let chain_mon = {
 		let new_monitor = {
 			let monitor = nodes[0].chain_monitor.chain_monitor.get_monitor(outpoint).unwrap();
@@ -79,7 +78,7 @@ fn test_monitor_and_persister_update_fail() {
 			assert!(new_monitor == *monitor);
 			new_monitor
 		};
-		let chain_mon = test_utils::TestChainMonitor::new(Some(&chain_source), &tx_broadcaster, &logger, &chanmon_cfgs[0].fee_estimator, &persister, &node_cfgs[0].keys_manager);
+		let chain_mon = test_utils::TestChainMonitor::new(Some(&chain_source), &tx_broadcaster, Some(yuv_tx_broadcaster), &logger, &chanmon_cfgs[0].fee_estimator, &persister, &node_cfgs[0].keys_manager);
 		assert_eq!(chain_mon.watch_channel(outpoint, new_monitor), Ok(ChannelMonitorUpdateStatus::Completed));
 		chain_mon
 	};
@@ -1850,13 +1849,13 @@ fn do_during_funding_monitor_fail(confirm_a_first: bool, restore_b_before_conf: 
 	let node_chanmgrs = create_node_chanmgrs(2, &node_cfgs, &[None, None]);
 	let mut nodes = create_network(2, &node_cfgs, &node_chanmgrs);
 
-	nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 100000, 10001, 43, None).unwrap();
+	nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 100000, 10001, 43, None, None).unwrap();
 	nodes[1].node.handle_open_channel(&nodes[0].node.get_our_node_id(), &get_event_msg!(nodes[0], MessageSendEvent::SendOpenChannel, nodes[1].node.get_our_node_id()));
 	nodes[0].node.handle_accept_channel(&nodes[1].node.get_our_node_id(), &get_event_msg!(nodes[1], MessageSendEvent::SendAcceptChannel, nodes[0].node.get_our_node_id()));
 
 	let (temporary_channel_id, funding_tx, funding_output) = create_funding_transaction(&nodes[0], &nodes[1].node.get_our_node_id(), 100000, 43);
 
-	nodes[0].node.funding_transaction_generated(&temporary_channel_id, &nodes[1].node.get_our_node_id(), funding_tx.clone()).unwrap();
+	nodes[0].node.funding_transaction_generated(&temporary_channel_id, &nodes[1].node.get_our_node_id(), funding_tx.clone(), None).unwrap();
 	check_added_monitors!(nodes[0], 0);
 
 	chanmon_cfgs[1].persister.set_update_ret(ChannelMonitorUpdateStatus::InProgress);
@@ -2768,7 +2767,7 @@ fn do_test_outbound_reload_without_init_mon(use_0conf: bool) {
 
 	let mut nodes = create_network(2, &node_cfgs, &node_chanmgrs);
 
-	nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 100000, 10001, 43, None).unwrap();
+	nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 100000, 10001, 43, None, None).unwrap();
 	nodes[1].node.handle_open_channel(&nodes[0].node.get_our_node_id(), &get_event_msg!(nodes[0], MessageSendEvent::SendOpenChannel, nodes[1].node.get_our_node_id()));
 
 	let events = nodes[1].node.get_and_clear_pending_events();
@@ -2788,7 +2787,7 @@ fn do_test_outbound_reload_without_init_mon(use_0conf: bool) {
 
 	let (temporary_channel_id, funding_tx, ..) = create_funding_transaction(&nodes[0], &nodes[1].node.get_our_node_id(), 100000, 43);
 
-	nodes[0].node.funding_transaction_generated(&temporary_channel_id, &nodes[1].node.get_our_node_id(), funding_tx.clone()).unwrap();
+	nodes[0].node.funding_transaction_generated(&temporary_channel_id, &nodes[1].node.get_our_node_id(), funding_tx.clone(), None).unwrap();
 	check_added_monitors!(nodes[0], 0);
 
 	let funding_created_msg = get_event_msg!(nodes[0], MessageSendEvent::SendFundingCreated, nodes[1].node.get_our_node_id());
@@ -2859,7 +2858,7 @@ fn do_test_inbound_reload_without_init_mon(use_0conf: bool, lock_commitment: boo
 
 	let mut nodes = create_network(2, &node_cfgs, &node_chanmgrs);
 
-	nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 100000, 10001, 43, None).unwrap();
+	nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 100000, 10001, 43, None, None).unwrap();
 	nodes[1].node.handle_open_channel(&nodes[0].node.get_our_node_id(), &get_event_msg!(nodes[0], MessageSendEvent::SendOpenChannel, nodes[1].node.get_our_node_id()));
 
 	let events = nodes[1].node.get_and_clear_pending_events();
@@ -2879,7 +2878,7 @@ fn do_test_inbound_reload_without_init_mon(use_0conf: bool, lock_commitment: boo
 
 	let (temporary_channel_id, funding_tx, ..) = create_funding_transaction(&nodes[0], &nodes[1].node.get_our_node_id(), 100000, 43);
 
-	nodes[0].node.funding_transaction_generated(&temporary_channel_id, &nodes[1].node.get_our_node_id(), funding_tx.clone()).unwrap();
+	nodes[0].node.funding_transaction_generated(&temporary_channel_id, &nodes[1].node.get_our_node_id(), funding_tx.clone(), None).unwrap();
 	check_added_monitors!(nodes[0], 0);
 
 	let funding_created_msg = get_event_msg!(nodes[0], MessageSendEvent::SendFundingCreated, nodes[1].node.get_our_node_id());

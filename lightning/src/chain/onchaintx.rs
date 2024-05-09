@@ -22,7 +22,7 @@ use bitcoin::hash_types::{Txid, BlockHash};
 use bitcoin::secp256k1::{Secp256k1, ecdsa::Signature};
 use bitcoin::secp256k1;
 
-use crate::chain::chaininterface::compute_feerate_sat_per_1000_weight;
+use crate::chain::chaininterface::{compute_feerate_sat_per_1000_weight, YuvBroadcaster};
 use crate::sign::{ChannelSigner, EntropySource, SignerProvider};
 use crate::ln::msgs::DecodeError;
 use crate::ln::PaymentPreimage;
@@ -42,6 +42,8 @@ use core::cmp;
 use core::ops::Deref;
 use core::mem::replace;
 use core::mem::swap;
+use yuv_pixels::Pixel;
+use yuv_types::{YuvTransaction, YuvTxType};
 use crate::ln::features::ChannelTypeFeatures;
 
 const MAX_ALLOC_SIZE: usize = 64*1024;
@@ -201,11 +203,23 @@ pub(crate) enum ClaimEvent {
 	},
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct YuvOnchainClaim {
+	/// The commitments transaction with its YUV proofs which spends by the spend_tx. It can be
+	/// used in case YUV outputs that will be spent by spend_tx haven't been published to the YUV
+	/// network yet.
+	commitment_tx: Option<YuvTransaction>,
+	spend_tx: YuvTransaction,
+}
+
 /// Represents the different ways an output can be claimed (i.e., spent to an address under our
 /// control) onchain.
+#[derive(Clone)]
 pub(crate) enum OnchainClaim {
 	/// A finalized transaction pending confirmation spending the output to claim.
 	Tx(Transaction),
+	/// A finalized YUV transaction pending confirmation spending the output to claim.
+	YuvTx(YuvOnchainClaim),
 	/// An event yielded externally to signal additional inputs must be added to a transaction
 	/// pending confirmation spending the output to claim.
 	Event(ClaimEvent),
@@ -271,6 +285,14 @@ pub struct OnchainTxHandler<ChannelSigner: WriteableEcdsaChannelSigner> {
 	onchain_events_awaiting_threshold_conf: Vec<OnchainEventEntry>,
 
 	pub(super) secp_ctx: Secp256k1<secp256k1::All>,
+
+	/// Destination scripts for YUV outputs. This is used to track which YUV outputs we have
+	/// to claim. There may be multiple YUV destination scripts because they depend on YUV pixel,
+	/// so we need to track an array of them, despite that we have only one `destination_script`.
+	pub(super) yuv_destination_scripts: Vec<Script>,
+
+	/// YUV pixel used to fund the channel.
+	funding_yuv_pixel: Option<Pixel>,
 }
 
 impl<ChannelSigner: WriteableEcdsaChannelSigner> PartialEq for OnchainTxHandler<ChannelSigner> {
@@ -285,7 +307,9 @@ impl<ChannelSigner: WriteableEcdsaChannelSigner> PartialEq for OnchainTxHandler<
 			self.pending_claim_requests == other.pending_claim_requests &&
 			self.claimable_outpoints == other.claimable_outpoints &&
 			self.locktimed_packages == other.locktimed_packages &&
-			self.onchain_events_awaiting_threshold_conf == other.onchain_events_awaiting_threshold_conf
+			self.onchain_events_awaiting_threshold_conf == other.onchain_events_awaiting_threshold_conf &&
+			self.yuv_destination_scripts == other.yuv_destination_scripts &&
+			self.funding_yuv_pixel == other.funding_yuv_pixel
 	}
 }
 
@@ -338,7 +362,11 @@ impl<ChannelSigner: WriteableEcdsaChannelSigner> OnchainTxHandler<ChannelSigner>
 			entry.write(writer)?;
 		}
 
-		write_tlv_fields!(writer, {});
+		write_tlv_fields!(writer, {
+			(0, self.yuv_destination_scripts, optional_vec),
+			(1, self.funding_yuv_pixel, option),
+		});
+
 		Ok(())
 	}
 }
@@ -412,7 +440,12 @@ impl<'a, 'b, ES: EntropySource, SP: SignerProvider> ReadableArgs<(&'a ES, &'b SP
 			}
 		}
 
-		read_tlv_fields!(reader, {});
+		let mut yuv_destination_scripts: Option<Vec<Script>> = None;
+		let mut funding_yuv_pixel: Option<Pixel> = None;
+		read_tlv_fields!(reader, {
+			(0, yuv_destination_scripts, optional_vec),
+			(1, funding_yuv_pixel, option),
+		});
 
 		let mut secp_ctx = Secp256k1::new();
 		secp_ctx.seeded_randomize(&entropy_source.get_secure_random_bytes());
@@ -431,12 +464,21 @@ impl<'a, 'b, ES: EntropySource, SP: SignerProvider> ReadableArgs<(&'a ES, &'b SP
 			onchain_events_awaiting_threshold_conf,
 			pending_claim_events: Vec::new(),
 			secp_ctx,
+			yuv_destination_scripts: yuv_destination_scripts.unwrap_or_default(),
+			funding_yuv_pixel,
 		})
 	}
 }
 
 impl<ChannelSigner: WriteableEcdsaChannelSigner> OnchainTxHandler<ChannelSigner> {
-	pub(crate) fn new(destination_script: Script, signer: ChannelSigner, channel_parameters: ChannelTransactionParameters, holder_commitment: HolderCommitmentTransaction, secp_ctx: Secp256k1<secp256k1::All>) -> Self {
+	pub(crate) fn new(
+		destination_script: Script,
+		signer: ChannelSigner,
+		channel_parameters: ChannelTransactionParameters,
+		holder_commitment: HolderCommitmentTransaction,
+		funding_yuv_pixel: Option<Pixel>,
+		secp_ctx: Secp256k1<secp256k1::All>,
+	) -> Self {
 		OnchainTxHandler {
 			destination_script,
 			holder_commitment,
@@ -451,6 +493,8 @@ impl<ChannelSigner: WriteableEcdsaChannelSigner> OnchainTxHandler<ChannelSigner>
 			onchain_events_awaiting_threshold_conf: Vec::new(),
 			pending_claim_events: Vec::new(),
 			secp_ctx,
+			yuv_destination_scripts: Vec::new(),
+			funding_yuv_pixel,
 		}
 	}
 
@@ -473,12 +517,16 @@ impl<ChannelSigner: WriteableEcdsaChannelSigner> OnchainTxHandler<ChannelSigner>
 	/// feerate changes between blocks, and ensuring reliability if broadcasting fails. We recommend
 	/// invoking this every 30 seconds, or lower if running in an environment with spotty
 	/// connections, like on mobile.
-	pub(crate) fn rebroadcast_pending_claims<B: Deref, F: Deref, L: Deref>(
-		&mut self, current_height: u32, broadcaster: &B, fee_estimator: &LowerBoundedFeeEstimator<F>,
+	pub(crate) fn rebroadcast_pending_claims<B: Deref, YB: Deref, F: Deref, L: Deref>(
+		&mut self,
+		current_height: u32,
+		broadcaster: &B,
+		yuv_broadcaster: Option<YB>,
+		fee_estimator: &LowerBoundedFeeEstimator<F>,
 		logger: &L,
-	)
-	where
+	) where
 		B::Target: BroadcasterInterface,
+		YB::Target: YuvBroadcaster,
 		F::Target: FeeEstimator,
 		L::Target: Logger,
 	{
@@ -502,6 +550,23 @@ impl<ChannelSigner: WriteableEcdsaChannelSigner> OnchainTxHandler<ChannelSigner>
 							log_info!(logger, "{} onchain {}", log_start, log_tx!(tx));
 							broadcaster.broadcast_transactions(&[&tx]);
 						},
+						OnchainClaim::YuvTx(onchain_claim) => {
+							let log_start = if bumped_feerate { "Broadcasting RBF-bumped" } else { "Rebroadcasting" };
+							log_info!(
+								logger,
+								"{} YUV tx onchain {}; {:?}",
+								log_start,
+								log_tx!(onchain_claim.spend_tx.bitcoin_tx),
+								onchain_claim.spend_tx.tx_type
+							);
+
+							Self::handle_yuv_tx_onchain_claim(
+								&onchain_claim,
+								&*broadcaster,
+								yuv_broadcaster.as_deref(),
+								&*logger,
+							);
+						}
 						OnchainClaim::Event(event) => {
 							let log_start = if bumped_feerate { "Yielding fee-bumped" } else { "Replaying" };
 							log_info!(logger, "{} onchain event to spend inputs {:?}", log_start,
@@ -518,6 +583,47 @@ impl<ChannelSigner: WriteableEcdsaChannelSigner> OnchainTxHandler<ChannelSigner>
 					}
 				});
 		}
+	}
+
+	fn handle_yuv_tx_onchain_claim<B: Deref, YB: Deref, L: Deref>(
+		claim: &YuvOnchainClaim,
+		broadcaster: &B,
+		yuv_broadcaster: Option<YB>,
+		logger: &L,
+	) where
+		B::Target: BroadcasterInterface,
+		YB::Target: YuvBroadcaster,
+		L::Target: Logger,
+	{
+		let yuv_broadcaster = yuv_broadcaster.as_ref().unwrap();
+		if let Some(reason) = yuv_broadcaster.emulate_yuv_transaction(claim.spend_tx.clone()) {
+			// If the parents are absent a commitment transaction is not published to the YUV
+			// network (or hasn't been confirmed) yet. In this case we need to broadcast it.
+			if !is_yuv_parents_absent_err(reason.clone()) {
+				log_error!(logger, "Invalid spending YUV tx: {reason}");
+				return
+			}
+
+			let Some(commitment_tx) = claim.commitment_tx.clone() else {
+				log_error!(logger, "Commitment YUV tx is absent");
+				return
+			};
+
+			match yuv_broadcaster.emulate_yuv_transaction(commitment_tx.clone()) {
+				Some(reason) => {
+					log_error!(logger, "Invalid commitment YUV tx: {reason}");
+					return
+				},
+				None => {
+					log_info!(logger, "Broadcasting counterparty's YUV commitment transactions to the YUV network");
+					yuv_broadcaster.broadcast_transactions_proofs(commitment_tx.clone())
+				},
+			};
+		};
+
+		yuv_broadcaster.broadcast_transactions_proofs(claim.spend_tx.clone());
+
+		broadcaster.broadcast_transactions(&[&claim.spend_tx.bitcoin_tx]);
 	}
 
 	/// Lightning security model (i.e being able to redeem/timeout HTLC or penalize counterparty
@@ -602,14 +708,27 @@ impl<ChannelSigner: WriteableEcdsaChannelSigner> OnchainTxHandler<ChannelSigner>
 				predicted_weight, self.destination_script.dust_value().to_sat(),
 				force_feerate_bump, fee_estimator, logger,
 			) {
-				assert!(new_feerate != 0);
+				assert_ne!(new_feerate, 0);
 
-				let transaction = cached_request.finalize_malleable_package(
+				let (transaction, yuv_pixel_proofs) = cached_request.finalize_malleable_package(
 					cur_height, self, output_value, self.destination_script.clone(), logger
-				).unwrap();
+				);
+				let transaction = transaction.unwrap();
+
 				log_trace!(logger, "...with timer {} and feerate {}", new_timer, new_feerate);
 				assert!(predicted_weight >= transaction.weight());
-				return Some((new_timer, new_feerate, OnchainClaim::Tx(transaction)));
+
+				if let Some(yuv_pixel_proofs) = yuv_pixel_proofs {
+					return Some((new_timer, new_feerate, OnchainClaim::YuvTx(YuvOnchainClaim{
+						commitment_tx: cached_request.yuv_commitment_tx(),
+						spend_tx: YuvTransaction{
+							bitcoin_tx: transaction,
+							tx_type: yuv_pixel_proofs,
+						},
+					})));
+				}
+
+				return Some((new_timer, new_feerate, OnchainClaim::Tx(transaction)))
 			}
 		} else {
 			// Untractable packages cannot have their fees bumped through Replace-By-Fee. Some
@@ -617,12 +736,23 @@ impl<ChannelSigner: WriteableEcdsaChannelSigner> OnchainTxHandler<ChannelSigner>
 			// which require external funding.
 			let mut inputs = cached_request.inputs();
 			debug_assert_eq!(inputs.len(), 1);
-			let tx = match cached_request.finalize_untractable_package(self, logger) {
-				Some(tx) => tx,
+			let (tx, onchain_claim) = match cached_request.finalize_untractable_package(self, logger) {
+				Some((tx, Some(yuv_proofs))) => {
+					let claim = OnchainClaim::YuvTx(YuvOnchainClaim {
+						commitment_tx: None,
+						spend_tx: YuvTransaction {
+							bitcoin_tx: tx.clone(),
+							tx_type: yuv_proofs,
+						},
+					});
+
+					(tx, claim)
+				},
+				Some((tx, None)) => (tx.clone(), OnchainClaim::Tx(tx)),
 				None => return None,
 			};
 			if !cached_request.requires_external_funding() {
-				return Some((new_timer, 0, OnchainClaim::Tx(tx)));
+				return Some((new_timer, 0, onchain_claim));
 			}
 			return inputs.find_map(|input| match input {
 				// Commitment inputs with anchors support are the only untractable inputs supported
@@ -642,7 +772,7 @@ impl<ChannelSigner: WriteableEcdsaChannelSigner> OnchainTxHandler<ChannelSigner>
 							log_debug!(logger, "Pre-signed {} already has feerate {} sat/kW above required {} sat/kW",
 								log_tx!(tx), commitment_tx_feerate_sat_per_1000_weight,
 								package_target_feerate_sat_per_1000_weight);
-							return Some((new_timer, 0, OnchainClaim::Tx(tx.clone())));
+							return Some((new_timer, 0, onchain_claim.clone()));
 						}
 					}
 
@@ -667,7 +797,7 @@ impl<ChannelSigner: WriteableEcdsaChannelSigner> OnchainTxHandler<ChannelSigner>
 						// attempt to broadcast the transaction with its current fee rate and hope
 						// it confirms. This is essentially the same behavior as a commitment
 						// transaction without anchor outputs.
-						None => Some((new_timer, 0, OnchainClaim::Tx(tx.clone()))),
+						None => Some((new_timer, 0, onchain_claim.clone())),
 					}
 				},
 				_ => {
@@ -688,11 +818,18 @@ impl<ChannelSigner: WriteableEcdsaChannelSigner> OnchainTxHandler<ChannelSigner>
 	/// `conf_height` represents the height at which the request was generated. This
 	/// does not need to equal the current blockchain tip height, which should be provided via
 	/// `cur_height`, however it must never be higher than `cur_height`.
-	pub(crate) fn update_claims_view_from_requests<B: Deref, F: Deref, L: Deref>(
-		&mut self, requests: Vec<PackageTemplate>, conf_height: u32, cur_height: u32,
-		broadcaster: &B, fee_estimator: &LowerBoundedFeeEstimator<F>, logger: &L
+	pub(crate) fn update_claims_view_from_requests<B: Deref, YB: Deref, F: Deref, L: Deref>(
+		&mut self,
+		requests: Vec<PackageTemplate>,
+		conf_height: u32,
+		cur_height: u32,
+		broadcaster: &B,
+		yuv_broadcaster: Option<YB>,
+		fee_estimator: &LowerBoundedFeeEstimator<F>,
+		logger: &L
 	) where
 		B::Target: BroadcasterInterface,
+		YB::Target: YuvBroadcaster,
 		F::Target: FeeEstimator,
 		L::Target: Logger,
 	{
@@ -765,6 +902,20 @@ impl<ChannelSigner: WriteableEcdsaChannelSigner> OnchainTxHandler<ChannelSigner>
 						broadcaster.broadcast_transactions(&[&tx]);
 						ClaimId(tx.txid().into_inner())
 					},
+					OnchainClaim::YuvTx(onchain_claim) => {
+						log_info!(
+							logger,
+							"Broadcasting onchain YUV tx {}; {:?}",
+							log_tx!(onchain_claim.spend_tx.bitcoin_tx),
+							onchain_claim.spend_tx.tx_type,
+						);
+
+						Self::handle_yuv_tx_onchain_claim(
+							&onchain_claim, &*broadcaster, yuv_broadcaster.as_deref(), &*logger,
+						);
+
+						ClaimId(onchain_claim.spend_tx.bitcoin_tx.txid().into_inner())
+					},
 					OnchainClaim::Event(claim_event) => {
 						log_info!(logger, "Yielding onchain event to spend inputs {:?}", req.outpoints());
 						let claim_id = match claim_event {
@@ -809,11 +960,19 @@ impl<ChannelSigner: WriteableEcdsaChannelSigner> OnchainTxHandler<ChannelSigner>
 	/// `conf_height` represents the height at which the transactions in `txn_matched` were
 	/// confirmed. This does not need to equal the current blockchain tip height, which should be
 	/// provided via `cur_height`, however it must never be higher than `cur_height`.
-	pub(crate) fn update_claims_view_from_matched_txn<B: Deref, F: Deref, L: Deref>(
-		&mut self, txn_matched: &[&Transaction], conf_height: u32, conf_hash: BlockHash,
-		cur_height: u32, broadcaster: &B, fee_estimator: &LowerBoundedFeeEstimator<F>, logger: &L
+	pub(crate) fn update_claims_view_from_matched_txn<B: Deref, YB: Deref, F: Deref, L: Deref>(
+		&mut self,
+		txn_matched: &[&Transaction],
+		conf_height: u32,
+		conf_hash: BlockHash,
+		cur_height: u32,
+		broadcaster: &B,
+		yuv_broadcaster: Option<YB>,
+		fee_estimator: &LowerBoundedFeeEstimator<F>,
+		logger: &L,
 	) where
 		B::Target: BroadcasterInterface,
+		YB::Target: YuvBroadcaster,
 		F::Target: FeeEstimator,
 		L::Target: Logger,
 	{
@@ -958,6 +1117,18 @@ impl<ChannelSigner: WriteableEcdsaChannelSigner> OnchainTxHandler<ChannelSigner>
 						log_info!(logger, "Broadcasting RBF-bumped onchain {}", log_tx!(bump_tx));
 						broadcaster.broadcast_transactions(&[&bump_tx]);
 					},
+					OnchainClaim::YuvTx(onchain_claim) => {
+						log_info!(
+							logger,
+							"Broadcasting RBF-bumped onchain YUV tx {}; {:?}",
+							log_tx!(onchain_claim.spend_tx.bitcoin_tx),
+							onchain_claim.spend_tx.tx_type,
+						);
+
+						Self::handle_yuv_tx_onchain_claim(
+							&onchain_claim, broadcaster, yuv_broadcaster.as_deref(), logger,
+						);
+					}
 					OnchainClaim::Event(claim_event) => {
 						log_info!(logger, "Yielding RBF-bumped onchain event to spend inputs {:?}", request.outpoints());
 						#[cfg(debug_assertions)] {
@@ -977,14 +1148,16 @@ impl<ChannelSigner: WriteableEcdsaChannelSigner> OnchainTxHandler<ChannelSigner>
 		}
 	}
 
-	pub(crate) fn transaction_unconfirmed<B: Deref, F: Deref, L: Deref>(
+	pub(crate) fn transaction_unconfirmed<B: Deref, YB: Deref, F: Deref, L: Deref>(
 		&mut self,
 		txid: &Txid,
 		broadcaster: B,
+		yuv_broadcaster: Option<YB>,
 		fee_estimator: &LowerBoundedFeeEstimator<F>,
 		logger: L,
 	) where
 		B::Target: BroadcasterInterface,
+		YB::Target: YuvBroadcaster,
 		F::Target: FeeEstimator,
 		L::Target: Logger,
 	{
@@ -997,14 +1170,22 @@ impl<ChannelSigner: WriteableEcdsaChannelSigner> OnchainTxHandler<ChannelSigner>
 		}
 
 		if let Some(height) = height {
-			self.block_disconnected(height, broadcaster, fee_estimator, logger);
+			self.block_disconnected(height, broadcaster,  yuv_broadcaster, fee_estimator, logger)
 		}
 	}
 
-	pub(crate) fn block_disconnected<B: Deref, F: Deref, L: Deref>(&mut self, height: u32, broadcaster: B, fee_estimator: &LowerBoundedFeeEstimator<F>, logger: L)
-		where B::Target: BroadcasterInterface,
-		      F::Target: FeeEstimator,
-					L::Target: Logger,
+	pub(crate) fn block_disconnected<B: Deref, YB: Deref, F: Deref, L: Deref>(
+		&mut self,
+		height: u32,
+		broadcaster: B,
+		yuv_broadcaster: Option<YB>,
+		fee_estimator: &LowerBoundedFeeEstimator<F>,
+		logger: L,
+	) where
+		B::Target: BroadcasterInterface,
+		YB::Target: YuvBroadcaster,
+		F::Target: FeeEstimator,
+		L::Target: Logger,
 	{
 		let mut bump_candidates = HashMap::new();
 		let onchain_events_awaiting_threshold_conf =
@@ -1043,6 +1224,18 @@ impl<ChannelSigner: WriteableEcdsaChannelSigner> OnchainTxHandler<ChannelSigner>
 						log_info!(logger, "Broadcasting onchain {}", log_tx!(bump_tx));
 						broadcaster.broadcast_transactions(&[&bump_tx]);
 					},
+					OnchainClaim::YuvTx(onchain_claim) => {
+						log_info!(
+							logger,
+							"Broadcasting onchain YUV tx {}; {:?}",
+							log_tx!(onchain_claim.spend_tx.bitcoin_tx),
+							onchain_claim.spend_tx.tx_type,
+						);
+
+						Self::handle_yuv_tx_onchain_claim(
+							&onchain_claim, &broadcaster, yuv_broadcaster.as_deref(), &logger,
+						);
+					}
 					OnchainClaim::Event(claim_event) => {
 						log_info!(logger, "Yielding onchain event after reorg to spend inputs {:?}", request.outpoints());
 						#[cfg(debug_assertions)] {
@@ -1096,7 +1289,11 @@ impl<ChannelSigner: WriteableEcdsaChannelSigner> OnchainTxHandler<ChannelSigner>
 	// ChannelMonitor replica, so we handle that case here.
 	fn sign_latest_holder_htlcs(&mut self) {
 		if self.holder_htlc_sigs.is_none() {
-			let (_sig, sigs) = self.signer.sign_holder_commitment_and_htlcs(&self.holder_commitment, &self.secp_ctx).expect("sign holder commitment");
+			let (_sig, sigs) = self.signer.sign_holder_commitment_and_htlcs(
+				&self.holder_commitment,
+				self.funding_yuv_pixel.as_ref(),
+				&self.secp_ctx,
+			).expect("sign holder commitment");
 			self.holder_htlc_sigs = Some(Self::extract_holder_sigs(&self.holder_commitment, sigs));
 		}
 	}
@@ -1107,7 +1304,11 @@ impl<ChannelSigner: WriteableEcdsaChannelSigner> OnchainTxHandler<ChannelSigner>
 	fn sign_prev_holder_htlcs(&mut self) {
 		if self.prev_holder_htlc_sigs.is_none() {
 			if let Some(ref holder_commitment) = self.prev_holder_commitment {
-				let (_sig, sigs) = self.signer.sign_holder_commitment_and_htlcs(holder_commitment, &self.secp_ctx).expect("sign previous holder commitment");
+				let (_sig, sigs) = self.signer.sign_holder_commitment_and_htlcs(
+					holder_commitment,
+					self.funding_yuv_pixel.as_ref(),
+					&self.secp_ctx,
+				).expect("sign previous holder commitment");
 				self.prev_holder_htlc_sigs = Some(Self::extract_holder_sigs(holder_commitment, sigs));
 			}
 		}
@@ -1131,10 +1332,14 @@ impl<ChannelSigner: WriteableEcdsaChannelSigner> OnchainTxHandler<ChannelSigner>
 	// have empty holder commitment transaction if a ChannelMonitor is asked to force-close just after OutboundV1Channel::get_funding_created,
 	// before providing a initial commitment transaction. For outbound channel, init ChannelMonitor at Channel::funding_signed, there is nothing
 	// to monitor before.
-	pub(crate) fn get_fully_signed_holder_tx(&mut self, funding_redeemscript: &Script) -> Transaction {
-		let (sig, htlc_sigs) = self.signer.sign_holder_commitment_and_htlcs(&self.holder_commitment, &self.secp_ctx).expect("signing holder commitment");
+	pub(crate) fn get_fully_signed_holder_tx(&mut self, funding_redeemscript: &Script, funding_yuv_pixel: Option<&Pixel>) -> (Transaction, Option<YuvTxType>) {
+		let (sig, htlc_sigs) = self.signer.sign_holder_commitment_and_htlcs(&self.holder_commitment, funding_yuv_pixel, &self.secp_ctx).expect("signing holder commitment");
 		self.holder_htlc_sigs = Some(Self::extract_holder_sigs(&self.holder_commitment, htlc_sigs));
-		self.holder_commitment.add_holder_sig(funding_redeemscript, sig)
+
+		let signed_holder_tx = self.holder_commitment.add_holder_sig(funding_redeemscript, sig);
+		let yuv_commitment_proofs = self.holder_commitment.get_commitment_yuv_proofs();
+
+		(signed_holder_tx, yuv_commitment_proofs)
 	}
 
 	#[cfg(any(test, feature="unsafe_revoked_tx_signing"))]
@@ -1144,7 +1349,7 @@ impl<ChannelSigner: WriteableEcdsaChannelSigner> OnchainTxHandler<ChannelSigner>
 		self.holder_commitment.add_holder_sig(funding_redeemscript, sig)
 	}
 
-	pub(crate) fn get_fully_signed_htlc_tx(&mut self, outp: &::bitcoin::OutPoint, preimage: &Option<PaymentPreimage>) -> Option<Transaction> {
+	pub(crate) fn get_fully_signed_htlc_tx(&mut self, outp: &::bitcoin::OutPoint, preimage: &Option<PaymentPreimage>) -> Option<(Transaction, Option<YuvTxType>)> {
 		let mut htlc_tx = None;
 		let commitment_txid = self.holder_commitment.trust().txid();
 		// Check if the HTLC spends from the current holder commitment
@@ -1214,7 +1419,8 @@ impl<ChannelSigner: WriteableEcdsaChannelSigner> OnchainTxHandler<ChannelSigner>
 	pub(crate) fn unsafe_get_fully_signed_htlc_tx(&mut self, outp: &::bitcoin::OutPoint, preimage: &Option<PaymentPreimage>) -> Option<Transaction> {
 		let latest_had_sigs = self.holder_htlc_sigs.is_some();
 		let prev_had_sigs = self.prev_holder_htlc_sigs.is_some();
-		let ret = self.get_fully_signed_htlc_tx(outp, preimage);
+		let ret = self.get_fully_signed_htlc_tx(outp, preimage)
+			.map(|(tx, _)| tx);
 		if !latest_had_sigs {
 			self.holder_htlc_sigs = None;
 		}
@@ -1223,4 +1429,8 @@ impl<ChannelSigner: WriteableEcdsaChannelSigner> OnchainTxHandler<ChannelSigner>
 		}
 		ret
 	}
+}
+
+fn is_yuv_parents_absent_err(err: String) -> bool {
+	err.contains("Parent transaction is not found")
 }

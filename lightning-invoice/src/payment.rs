@@ -15,11 +15,11 @@ use crate::prelude::*;
 use bitcoin_hashes::Hash;
 
 use lightning::chain;
-use lightning::chain::chaininterface::{BroadcasterInterface, FeeEstimator};
+use lightning::chain::chaininterface::{BroadcasterInterface, FeeEstimator, YuvBroadcaster};
 use lightning::sign::{NodeSigner, SignerProvider, EntropySource};
 use lightning::ln::PaymentHash;
 use lightning::ln::channelmanager::{AChannelManager, ChannelManager, PaymentId, Retry, RetryableSendFailure, RecipientOnionFields, ProbeSendFailure};
-use lightning::routing::router::{PaymentParameters, RouteParameters, Router};
+use lightning::routing::router::{DEFAULT_YUV_MAX_PATH_COUNT, PaymentParameters, RouteParameters, Router};
 use lightning::util::logger::Logger;
 
 use core::fmt::Debug;
@@ -117,7 +117,14 @@ fn pay_invoice_using_amount<P: Deref>(
 	if let Some(features) = invoice.features() {
 		payment_params = payment_params.with_bolt11_features(features.clone()).unwrap();
 	}
-	let route_params = RouteParameters::from_payment_params_and_value(payment_params, amount_msats);
+	let route_params = match invoice.yuv_pixel() {
+		Some(yuv_pixel) => {
+			payment_params = payment_params.with_max_path_count(DEFAULT_YUV_MAX_PATH_COUNT);
+			RouteParameters::from_payment_params_and_value(payment_params, amount_msats)
+				.with_yuv(yuv_pixel)
+		}
+		None => RouteParameters::from_payment_params_and_value(payment_params, amount_msats)
+	};
 
 	payer.send_payment(payment_hash, recipient_onion, payment_id, route_params, retry_strategy)
 }
@@ -217,10 +224,11 @@ trait Payer {
 	) -> Result<(), PaymentError>;
 }
 
-impl<M: Deref, T: Deref, ES: Deref, NS: Deref, SP: Deref, F: Deref, R: Deref, L: Deref> Payer for ChannelManager<M, T, ES, NS, SP, F, R, L>
+impl<M: Deref, T: Deref, YT: Deref, ES: Deref, NS: Deref, SP: Deref, F: Deref, R: Deref, L: Deref> Payer for ChannelManager<M, T, YT, ES, NS, SP, F, R, L>
 where
 		M::Target: chain::Watch<<SP::Target as SignerProvider>::Signer>,
 		T::Target: BroadcasterInterface,
+		YT::Target: YuvBroadcaster,
 		ES::Target: EntropySource,
 		NS::Target: NodeSigner,
 		SP::Target: SignerProvider,
@@ -242,27 +250,36 @@ mod tests {
 	use super::*;
 	use crate::{InvoiceBuilder, Currency};
 	use bitcoin_hashes::sha256::Hash as Sha256;
-	use lightning::events::Event;
+	use lightning::events::{Event, PaymentPurpose};
 	use lightning::ln::msgs::ChannelMessageHandler;
 	use lightning::ln::{PaymentPreimage, PaymentSecret};
 	use lightning::ln::functional_test_utils::*;
 	use secp256k1::{SecretKey, Secp256k1};
 	use std::collections::VecDeque;
 	use std::time::{SystemTime, Duration};
+	use yuv_pixels::{Luma, Pixel};
+	use crate::utils::create_yuv_invoice_from_channelmanager_and_duration_since_epoch;
 
 	struct TestPayer {
 		expectations: core::cell::RefCell<VecDeque<Amount>>,
+		yuv_expectations: core::cell::RefCell<VecDeque<Pixel>>,
 	}
 
 	impl TestPayer {
 		fn new() -> Self {
 			Self {
 				expectations: core::cell::RefCell::new(VecDeque::new()),
+				yuv_expectations: core::cell::RefCell::new(VecDeque::new()),
 			}
 		}
 
 		fn expect_send(self, value_msat: Amount) -> Self {
 			self.expectations.borrow_mut().push_back(value_msat);
+			self
+		}
+
+		fn expect_yuv_send(self, yuv_pixel: Pixel) -> Self {
+			self.yuv_expectations.borrow_mut().push_back(yuv_pixel);
 			self
 		}
 
@@ -327,6 +344,24 @@ mod tests {
 			.unwrap()
 	}
 
+	fn yuv_invoice(payment_preimage: PaymentPreimage) -> Bolt11Invoice {
+		let payment_hash = Sha256::hash(&payment_preimage.0);
+		let private_key = SecretKey::from_slice(&[42; 32]).unwrap();
+
+		InvoiceBuilder::new(Currency::Bitcoin)
+			.description("test".into())
+			.payment_hash(payment_hash)
+			.payment_secret(PaymentSecret([0; 32]))
+			.duration_since_epoch(duration_since_epoch())
+			.min_final_cltv_expiry_delta(144)
+			.amount_milli_satoshis(128)
+			.yuv_pixel(new_test_pixel(None, None, &secp256k1::Secp256k1::new()))
+			.build_signed(|hash| {
+				Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key)
+			})
+			.unwrap()
+	}
+
 	fn zero_value_invoice(payment_preimage: PaymentPreimage) -> Bolt11Invoice {
 		let payment_hash = Sha256::hash(&payment_preimage.0);
 		let private_key = SecretKey::from_slice(&[42; 32]).unwrap();
@@ -363,6 +398,22 @@ mod tests {
 
 		let payer = TestPayer::new().expect_send(Amount(amt_msat));
 		pay_invoice_using_amount(&invoice, amt_msat, payment_id, Retry::Attempts(0), &payer).unwrap();
+	}
+
+	#[test]
+	fn pays_yuv_invoice() {
+		let payment_id = PaymentId([42; 32]);
+		let payment_preimage = PaymentPreimage([1; 32]);
+		let invoice = yuv_invoice(payment_preimage);
+		let final_value_msat = invoice.amount_milli_satoshis().unwrap();
+		let final_pixel = invoice.yuv_pixel().unwrap();
+
+		let payer = TestPayer::new()
+			.expect_send(Amount(final_value_msat))
+			.expect_yuv_send(final_pixel);
+		pay_invoice_using_amount(
+			&invoice, final_value_msat, payment_id, Retry::Attempts(0), &payer,
+		).unwrap();
 	}
 
 	#[test]
@@ -428,5 +479,60 @@ mod tests {
 			},
 			_ => panic!("Unexpected event")
 		}
+	}
+
+	#[test]
+	#[cfg(feature = "std")]
+	fn test_yuv_invoice() {
+		let mut node_cfg_with_yuv_support = test_default_channel_config();
+		node_cfg_with_yuv_support.support_yuv_payments = true;
+
+		let chanmon_cfgs = create_chanmon_cfgs(2);
+		let node_cfgs = create_node_cfgs(2, &chanmon_cfgs);
+		let node_chanmgrs = create_node_chanmgrs(
+			2, &node_cfgs, &[Some(node_cfg_with_yuv_support), Some(node_cfg_with_yuv_support)],
+		);
+		let nodes = create_network(2, &node_cfgs, &node_chanmgrs);
+
+		let funding_sat_amount = 100_000;
+		let funding_yuv_amount = 100;
+
+		let secp_ctx = Secp256k1::new();
+		let funding_yuv_pixel = new_test_pixel(Some(Luma::from(funding_yuv_amount)), None, &secp_ctx);
+
+		let _ = create_chan_with_yuv(&nodes, 0, 1, funding_sat_amount, 0, funding_yuv_pixel);
+
+		let duration = SystemTime::now()
+			.duration_since(SystemTime::UNIX_EPOCH)
+			.expect("for the foreseeable future this shouldn't happen");
+
+		let invoice = create_yuv_invoice_from_channelmanager_and_duration_since_epoch(
+			nodes[1].node,
+			nodes[1].keys_manager,
+			nodes[1].logger,
+			Currency::BitcoinTestnet,
+			Some(5_000_000),
+			"test".to_string(),
+			duration,
+			 100,
+			None,
+			Pixel::new(50, funding_yuv_pixel.chroma),
+		).unwrap();
+
+		pay_invoice(&invoice, Retry::Attempts(0), nodes[0].node).unwrap();
+		check_added_monitors(&nodes[0], 1);
+		let send_event = SendEvent::from_node(&nodes[0]);
+		nodes[1].node.handle_update_add_htlc(&nodes[0].node.get_our_node_id(), &send_event.msgs[0]);
+		commitment_signed_dance!(nodes[1], nodes[0], &send_event.commitment_msg, false);
+
+		expect_pending_htlcs_forwardable!(nodes[1]);
+
+		let mut events = nodes[1].node.get_and_clear_pending_events();
+		assert_eq!(events.len(), 1);
+		let Event::PaymentClaimable{ purpose: PaymentPurpose::InvoicePayment {
+			payment_preimage: Some(_), ..
+		}, .. } = events.pop().unwrap() else {
+			panic!("Unexpected event")
+		};
 	}
 }
