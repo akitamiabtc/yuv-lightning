@@ -1966,7 +1966,7 @@ fn do_test_intercepted_payment(test: InterceptTest) {
 		expect_payment_failed_conditions(&nodes[0], payment_hash, false, fail_conditions);
 	} else if test == InterceptTest::Forward {
 		// Check that we'll fail as expected when sending to a channel that isn't in `ChannelReady` yet.
-		let temp_chan_id = nodes[1].node.create_channel(nodes[2].node.get_our_node_id(), 100_000, 0, 42, None, None).unwrap();
+		let temp_chan_id = nodes[1].node.create_channel(nodes[2].node.get_our_node_id(), 100_000, 0, 42, None, None, None).unwrap();
 		let unusable_chan_err = nodes[1].node.forward_intercepted_htlc(intercept_id, &temp_chan_id, nodes[2].node.get_our_node_id(), expected_outbound_amount_msat).unwrap_err();
 		assert_eq!(unusable_chan_err , APIError::ChannelUnavailable {
 			err: format!("Channel with id {} for the passed counterparty node_id {} is still opening.",
@@ -4280,6 +4280,7 @@ fn peel_payment_onion_custom_tlvs() {
 		skimmed_fee_msat: None,
 		onion_routing_packet,
 		blinding_point: None,
+		yuv_amount: None,
 	};
 	let peeled_onion = crate::ln::onion_payment::peel_payment_onion(
 		&update_add, &&chanmon_cfgs[1].keys_manager, &&chanmon_cfgs[1].logger, &secp_ctx,

@@ -246,6 +246,8 @@ pub fn do_test<Out: test_logger::Output>(data: &[u8], out: Out) {
 							channel_shutdown_state: Some(channelmanager::ChannelShutdownState::NotShuttingDown),
 							yuv_holder_pixel: None,
 							yuv_counterparty_pixel: None,
+							pending_inbound_htlcs: Vec::new(),
+							pending_outbound_htlcs: Vec::new(),
 						});
 					}
 					Some(&$first_hops_vec[..])

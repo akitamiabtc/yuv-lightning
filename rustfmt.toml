@@ -1,3 +1,5 @@
+disable_all_formatting = true
+
 use_small_heuristics = "Max"
 fn_args_layout = "Compressed"
 hard_tabs = true

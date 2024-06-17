@@ -13,6 +13,7 @@
 //! [`ChannelManager`]: crate::ln::channelmanager::ChannelManager
 //! [`ChannelMonitor`]: crate::chain::channelmonitor::ChannelMonitor
 
+use crate::ln::ChannelId;
 use crate::prelude::*;
 use crate::io::{self, Read, Seek, Write};
 use crate::io_extras::{copy, sink};
@@ -30,7 +31,7 @@ use bitcoin::secp256k1::schnorr;
 use bitcoin::blockdata::constants::ChainHash;
 use bitcoin::blockdata::script::{self, ScriptBuf};
 use bitcoin::blockdata::transaction::{OutPoint, Transaction, TxOut};
-use bitcoin::{consensus, Witness, XOnlyPublicKey};
+use bitcoin::{consensus, Witness, secp256k1::XOnlyPublicKey};
 use bitcoin::consensus::Encodable;
 use bitcoin::hashes::sha256d::Hash as Sha256dHash;
 use bitcoin::hash_types::{Txid, BlockHash};
@@ -43,7 +44,7 @@ use crate::chain::ClaimId;
 use crate::ln::msgs::{DecodeError, UpdateBalance};
 #[cfg(taproot)]
 use crate::ln::msgs::PartialSignatureWithNonce;
-use crate::ln::{PaymentPreimage, PaymentHash, PaymentSecret, ChannelId};
+use crate::ln::types::{PaymentPreimage, PaymentHash, PaymentSecret};
 use crate::ln::channel::{UpdateBalanceInfo, UpdateBalanceRequest, YuvPayment};
 
 use crate::util::byte_utils::{be48_to_array, slice_to_be48};
@@ -896,7 +897,7 @@ impl_for_vec!(crate::ln::channelmanager::MonitorUpdateCompletionAction);
 impl_for_vec!(crate::ln::msgs::SocketAddress);
 impl_for_vec!((A, B), A, B);
 impl_for_vec!(PublicKey);
-impl_for_vec!(Script);
+impl_for_vec!(ScriptBuf);
 impl_for_vec!(Option<u64>);
 impl_for_vec!(Option<u128>);
 impl_writeable_for_vec!(&crate::routing::router::BlindedTail);
@@ -1751,7 +1752,7 @@ impl Readable for hash160::Hash {
 
 impl Writeable for hash160::Hash {
 	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), io::Error> {
-		Ok(self.to_vec().write(writer)?)
+		Ok(self.to_byte_array().to_vec().write(writer)?)
 	}
 }
 

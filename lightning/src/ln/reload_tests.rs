@@ -24,7 +24,6 @@ use crate::util::test_utils;
 use crate::util::errors::APIError;
 use crate::util::ser::{Writeable, ReadableArgs};
 use crate::util::config::UserConfig;
-use crate::util::string::UntrustedString;
 use crate::chain::chaininterface::YuvBroadcaster;
 
 use bitcoin::hash_types::BlockHash;
@@ -248,7 +247,7 @@ fn test_manager_serialize_deserialize_events() {
 	let push_msat = 10001;
 	let node_a = nodes.remove(0);
 	let node_b = nodes.remove(0);
-	node_a.node.create_channel(node_b.node.get_our_node_id(), channel_value, push_msat, 42, None, None).unwrap();
+	node_a.node.create_channel(node_b.node.get_our_node_id(), channel_value, push_msat, 42, None, None, None).unwrap();
 	node_b.node.handle_open_channel(&node_a.node.get_our_node_id(), &get_event_msg!(node_a, MessageSendEvent::SendOpenChannel, node_b.node.get_our_node_id()));
 	node_a.node.handle_accept_channel(&node_b.node.get_our_node_id(), &get_event_msg!(node_b, MessageSendEvent::SendAcceptChannel, node_a.node.get_our_node_id()));
 
@@ -393,7 +392,7 @@ fn test_manager_serialize_deserialize_inconsistent_monitor() {
 	fee_estimator = test_utils::TestFeeEstimator { sat_per_kw: Mutex::new(253) };
 	persister = test_utils::TestPersister::new();
 	let keys_manager = &chanmon_cfgs[0].keys_manager;
-	let yuv_tx_broadcaster = nodes[0].yuv_tx_broadcaster.map(|v| v as &YuvBroadcaster);
+	let yuv_tx_broadcaster = nodes[0].yuv_tx_broadcaster.map(|v| v as &dyn YuvBroadcaster);
 	new_chain_monitor = test_utils::TestChainMonitor::new(Some(nodes[0].chain_source), nodes[0].tx_broadcaster, yuv_tx_broadcaster, &logger, &fee_estimator, &persister, keys_manager);
 	nodes[0].chain_monitor = &new_chain_monitor;
 
@@ -415,7 +414,7 @@ fn test_manager_serialize_deserialize_inconsistent_monitor() {
 	}
 
 	let mut nodes_0_read = &nodes_0_serialized[..];
-	if let Err(msgs::DecodeError::InvalidValue) =
+	if let Err(msgs::DecodeError::DangerousValue) =
 		<(BlockHash, ChannelManager<&test_utils::TestChainMonitor, &test_utils::TestBroadcaster, &test_utils::TestYuvBroadcaster, &test_utils::TestKeysInterface, &test_utils::TestKeysInterface, &test_utils::TestKeysInterface, &test_utils::TestFeeEstimator, &test_utils::TestRouter, &test_utils::TestLogger>)>::read(&mut nodes_0_read, ChannelManagerReadArgs {
 		default_config: UserConfig::default(),
 		entropy_source: keys_manager,

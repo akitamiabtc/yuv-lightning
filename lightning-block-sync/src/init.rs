@@ -73,7 +73,7 @@ BlockSourceResult<ValidatedBlockHeader> where B::Target: BlockSource {
 /// 	P: chainmonitor::Persist<SP::EcdsaSigner>,
 /// >(
 /// 	block_source: &B,
-/// 	chain_monitor: &ChainMonitor<SP::Signer, &C, &T, &YT, &F, &L, &P>,
+/// 	chain_monitor: &ChainMonitor<SP::EcdsaSigner, &C, &T, &YT, &F, &L, &P>,
 /// 	config: UserConfig,
 /// 	entropy_source: &ES,
 /// 	node_signer: &NS,
@@ -106,7 +106,7 @@ BlockSourceResult<ValidatedBlockHeader> where B::Target: BlockSource {
 /// 			config,
 /// 			vec![&mut monitor],
 /// 		);
-/// 		<(BlockHash, ChannelManager<&ChainMonitor<SP::Signer, &C, &T, &YT, &F, &L, &P>, &T, &YT, &ES, &NS, &SP, &F, &R, &L>)>::read(
+/// 		<(BlockHash, ChannelManager<&ChainMonitor<SP::EcdsaSigner, &C, &T, &YT, &F, &L, &P>, &T, &YT, &ES, &NS, &SP, &F, &R, &L>)>::read(
 /// 			&mut Cursor::new(&serialized_manager), read_args).unwrap()
 /// 	};
 ///

@@ -23,6 +23,7 @@ use bitcoin::secp256k1::PublicKey;
 use bitcoin::secp256k1::Scalar;
 use bitcoin::secp256k1::Secp256k1;
 use bitcoin::secp256k1::SecretKey;
+use yuv_pixels::{PixelHash, Tweakable};
 
 macro_rules! doc_comment {
 	($x:expr, $($tt:tt)*) => {
@@ -87,6 +88,17 @@ macro_rules! key_impl {
 		/// Get inner Public Key
 		pub fn to_public_key(&self) -> PublicKey {
 			self.0
+		}
+
+		/// Tweak the provided public key with the given pixel.
+		pub fn tweak(&self, pixel: impl Into<PixelHash>) -> Self {
+			Self(self.to_public_key().tweak(pixel))
+		}
+
+		/// Tweak the provided public key with the given pixel if it is Some, otherwise return the
+		/// original public key.
+		pub fn maybe_tweak(&self, pixel: Option<impl Into<PixelHash>>) -> Self {
+			Self(self.to_public_key().maybe_tweak(pixel))
 		}
 	}
 }
@@ -249,6 +261,17 @@ impl RevocationKey {
 	/// Get inner Public Key
 	pub fn to_public_key(&self) -> PublicKey {
 		self.0
+	}
+
+	/// Tweak the provided public key with the given pixel.
+	pub fn tweak(&self, pixel: impl Into<PixelHash>) -> Self {
+		Self(self.to_public_key().tweak(pixel))
+	}
+
+	/// Tweak the provided public key with the given pixel if it is Some, otherwise return the
+	/// original public key.
+	pub fn maybe_tweak(&self, pixel: Option<impl Into<PixelHash>>) -> Self {
+		Self(self.to_public_key().maybe_tweak(pixel))
 	}
 }
 key_read_write!(RevocationKey);

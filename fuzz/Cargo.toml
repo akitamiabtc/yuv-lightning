@@ -27,8 +27,8 @@ afl = { version = "0.12", optional = true }
 honggfuzz = { version = "0.5", optional = true, default-features = false }
 libfuzzer-sys = { version = "0.4", optional = true }
 
-yuv-pixels = { git = "https://github.com/akitamiabtc/yuv.git", tag = "v0.1.0-alpha", default-features = false }
-yuv-types  = { git = "https://github.com/akitamiabtc/yuv.git", tag = "v0.1.0-alpha", default-features = false }
+yuv-pixels = { git = "ssh://git@github.com/akitamiabtc/yuv.git", tag = "v0.3.1", default-features = false }
+yuv-types  = { git = "ssh://git@github.com/akitamiabtc/yuv.git", tag = "v0.3.1", default-features = false }
 
 [build-dependencies]
 cc = "1.0"

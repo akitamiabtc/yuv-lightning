@@ -366,7 +366,7 @@ pub trait WalletSource {
 	fn list_confirmed_utxos(&self) -> Result<Vec<Utxo>, ()>;
 	/// Returns a script to use for change above dust resulting from a successful coin selection
 	/// attempt.
-	fn get_change_script(&self) -> Result<Script, ()>;
+	fn get_change_script(&self) -> Result<ScriptBuf, ()>;
 	/// Return a key to which the wallet will send change in case the
 	/// transaction is YUV one.
 	fn get_change_yuv_pubkey(&self) -> Result<PublicKey, ()>;

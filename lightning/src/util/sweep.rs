@@ -66,6 +66,21 @@ impl TrackedSpendableOutput {
 				outpoint: output.outpoint,
 				script_pubkey: output.output.script_pubkey.clone(),
 			},
+			SpendableOutputDescriptor::YuvStaticOutput(output) => WatchedOutput {
+				block_hash,
+				outpoint: output.outpoint,
+				script_pubkey: output.output.script_pubkey.clone(),
+			},
+			SpendableOutputDescriptor::DelayedYuvPaymentOutput(output) => WatchedOutput {
+				block_hash,
+				outpoint: output.inner.outpoint,
+				script_pubkey: output.inner.output.script_pubkey.clone(),
+			},
+			SpendableOutputDescriptor::StaticYuvPaymentOutput(output) => WatchedOutput {
+				block_hash,
+				outpoint: output.inner.outpoint,
+				script_pubkey: output.inner.output.script_pubkey.clone(),
+			},
 		}
 	}
 
@@ -75,6 +90,9 @@ impl TrackedSpendableOutput {
 			SpendableOutputDescriptor::StaticOutput { outpoint, .. } => *outpoint,
 			SpendableOutputDescriptor::DelayedPaymentOutput(output) => output.outpoint,
 			SpendableOutputDescriptor::StaticPaymentOutput(output) => output.outpoint,
+			SpendableOutputDescriptor::YuvStaticOutput(output) => output.outpoint,
+			SpendableOutputDescriptor::DelayedYuvPaymentOutput(output) => output.inner.outpoint,
+			SpendableOutputDescriptor::StaticYuvPaymentOutput(output) => output.inner.outpoint,
 		}
 		.into_bitcoin_outpoint();
 

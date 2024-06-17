@@ -9,7 +9,7 @@
 
 use crate::routing::gossip::{NetworkGraph, NodeAlias, P2PGossipSync};
 use crate::ln::features::{ChannelFeatures, NodeFeatures};
-use crate::ln::msgs::{ChannelAnnouncement, ChannelUpdate, NodeAnnouncement, RoutingMessageHandler, UnsignedChannelAnnouncement, UnsignedChannelUpdate, UnsignedNodeAnnouncement, MAX_VALUE_MSAT};
+use crate::ln::msgs::{ChannelAnnouncement, ChannelUpdate, MAX_VALUE_MSAT, NodeAnnouncement, RoutingMessageHandler, SocketAddress, UnsignedChannelAnnouncement, UnsignedChannelUpdate, UnsignedNodeAnnouncement};
 use crate::util::test_utils;
 use crate::util::ser::Writeable;
 
@@ -21,7 +21,7 @@ use bitcoin::network::constants::Network;
 use bitcoin::secp256k1::{PublicKey,SecretKey};
 use bitcoin::secp256k1::{Secp256k1, All};
 use yuv_pixels::{Chroma, Pixel};
-use crate::ln::chan_utils::make_funding_redeemscript_from_node_ids;
+use crate::ln::chan_utils::make_funding_redeemscript;
 
 #[allow(unused)]
 use crate::prelude::*;
@@ -47,12 +47,15 @@ pub(super) fn add_channel_internal(
 	yuv_pixel: Option<Pixel>,
 	chain_source: Option<Arc<test_utils::TestChainSource>>,
 ) {
-	let node_id_1 = NodeId::from_pubkey(&PublicKey::from_secret_key(&secp_ctx, node_1_privkey));
-	let node_id_2 = NodeId::from_pubkey(&PublicKey::from_secret_key(&secp_ctx, node_2_privkey));
+	let node_pk_1 = &PublicKey::from_secret_key(&secp_ctx, node_1_privkey);
+	let node_pk_2 = &PublicKey::from_secret_key(&secp_ctx, node_2_privkey);
+
+	let node_id_1 = NodeId::from_pubkey(node_pk_1);
+	let node_id_2 = NodeId::from_pubkey(node_pk_2);
 
 	if let Some(chain_source) = chain_source.as_ref() {
 		let expected_script =
-			make_funding_redeemscript_from_node_ids(&node_id_1, &node_id_2, yuv_pixel.as_ref()).unwrap().to_v0_p2wsh();
+			make_funding_redeemscript(&node_pk_1, &node_pk_2, yuv_pixel.as_ref()).to_v0_p2wsh();
 
 		chain_source.set_txout(expected_script, MAX_VALUE_MSAT / 1000);
 	}

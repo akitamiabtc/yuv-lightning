@@ -263,7 +263,7 @@ fn shutdown_on_unfunded_channel() {
 	let node_chanmgrs = create_node_chanmgrs(2, &node_cfgs, &[None, None]);
 	let nodes = create_network(2, &node_cfgs, &node_chanmgrs);
 
-	nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 1_000_000, 100_000, 0, None, None).unwrap();
+	nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 1_000_000, 100_000, 0, None, None, None).unwrap();
 	let open_chan = get_event_msg!(nodes[0], MessageSendEvent::SendOpenChannel, nodes[1].node.get_our_node_id());
 
 	// Create a dummy P2WPKH script
@@ -272,7 +272,7 @@ fn shutdown_on_unfunded_channel() {
 		.into_script();
 
 	nodes[0].node.handle_shutdown(&nodes[1].node.get_our_node_id(), &msgs::Shutdown {
-		channel_id: open_chan.temporary_channel_id, scriptpubkey: script, yuv_inner_key: None,
+		channel_id: open_chan.common_fields.temporary_channel_id, scriptpubkey: script, yuv_inner_key: None,
 	});
 	check_closed_event!(nodes[0], 1, ClosureReason::CounterpartyCoopClosedUnfundedChannel, [nodes[1].node.get_our_node_id()], 1_000_000);
 }
@@ -285,7 +285,7 @@ fn close_on_unfunded_channel() {
 	let node_chanmgrs = create_node_chanmgrs(2, &node_cfgs, &[None, None]);
 	let nodes = create_network(2, &node_cfgs, &node_chanmgrs);
 
-	let chan_id = nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 1_000_000, 100_000, 0, None, None).unwrap();
+	let chan_id = nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 1_000_000, 100_000, 0, None, None, None).unwrap();
 	let _open_chan = get_event_msg!(nodes[0], MessageSendEvent::SendOpenChannel, nodes[1].node.get_our_node_id());
 
 	nodes[0].node.close_channel(&chan_id, &nodes[1].node.get_our_node_id()).unwrap();
@@ -826,7 +826,7 @@ fn test_unsupported_anysegwit_upfront_shutdown_script() {
 		.into_script();
 
 	// Check script when handling an open_channel message
-	nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 100000, 10001, 42, None, None).unwrap();
+	nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 100000, 10001, 42, None, None, None).unwrap();
 	let mut open_channel = get_event_msg!(nodes[0], MessageSendEvent::SendOpenChannel, nodes[1].node.get_our_node_id());
 	open_channel.common_fields.shutdown_scriptpubkey = Some(anysegwit_shutdown_script.clone());
 	nodes[1].node.handle_open_channel(&nodes[0].node.get_our_node_id(), &open_channel);
@@ -849,7 +849,7 @@ fn test_unsupported_anysegwit_upfront_shutdown_script() {
 	let nodes = create_network(2, &node_cfgs, &node_chanmgrs);
 
 	// Check script when handling an accept_channel message
-	nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 100000, 10001, 42, None, None).unwrap();
+	nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 100000, 10001, 42, None, None, None).unwrap();
 	let open_channel = get_event_msg!(nodes[0], MessageSendEvent::SendOpenChannel, nodes[1].node.get_our_node_id());
 	nodes[1].node.handle_open_channel(&nodes[0].node.get_our_node_id(), &open_channel);
 	let mut accept_channel = get_event_msg!(nodes[1], MessageSendEvent::SendAcceptChannel, nodes[0].node.get_our_node_id());
@@ -876,7 +876,7 @@ fn test_invalid_upfront_shutdown_script() {
 	let node_chanmgrs = create_node_chanmgrs(2, &node_cfgs, &[None, None]);
 	let nodes = create_network(2, &node_cfgs, &node_chanmgrs);
 
-	nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 100000, 10001, 42, None, None).unwrap();
+	nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 100000, 10001, 42, None, None, None).unwrap();
 
 	// Use a segwit v0 script with an unsupported witness program
 	let mut open_channel = get_event_msg!(nodes[0], MessageSendEvent::SendOpenChannel, nodes[1].node.get_our_node_id());
@@ -1428,7 +1428,7 @@ fn batch_funding_failure() {
 		ExpectedCloseEvent::from_id_reason(temp_chan_id_b, false, ClosureReason::ProcessingError { err: temp_err }),
 	];
 
-	nodes[0].node.batch_funding_transaction_generated(&chans, tx).unwrap_err();
+	nodes[0].node.batch_funding_transaction_generated(&chans, tx, None).unwrap_err();
 
 	let msgs = nodes[0].node.get_and_clear_pending_msg_events();
 	assert_eq!(msgs.len(), 3);

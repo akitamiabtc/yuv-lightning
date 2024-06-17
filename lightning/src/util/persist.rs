@@ -155,19 +155,17 @@ pub trait KVStore {
 }
 
 /// Trait that handles persisting a [`ChannelManager`], [`NetworkGraph`], and [`WriteableScore`] to disk.
-pub trait Persister<'a, M: Deref, T: Deref, YT: Deref, ES: Deref, NS: Deref, SP: Deref, F: Deref, R: Deref, L: Deref, S: WriteableScore<'a>>
-	where M::Target: 'static + chain::Watch<<SP::Target as SignerProvider>::Signer>,
-		T::Target: 'static + BroadcasterInterface,
-		YT::Target: 'static + YuvBroadcaster,
-		ES::Target: 'static + EntropySource,
-		NS::Target: 'static + NodeSigner,
-		SP::Target: 'static + SignerProvider,
-		F::Target: 'static + FeeEstimator,
-		R::Target: 'static + Router,
-		L::Target: 'static + Logger,
+///
+/// [`ChannelManager`]: crate::ln::channelmanager::ChannelManager
+pub trait Persister<'a, CM: Deref, L: Deref, S: WriteableScore<'a>>
+where
+	CM::Target: 'static + AChannelManager,
+	L::Target: 'static + Logger,
 {
 	/// Persist the given ['ChannelManager'] to disk, returning an error if persistence failed.
-	fn persist_manager(&self, channel_manager: &ChannelManager<M, T, YT, ES, NS, SP, F, R, L>) -> Result<(), io::Error>;
+	///
+	/// [`ChannelManager`]: crate::ln::channelmanager::ChannelManager
+	fn persist_manager(&self, channel_manager: &CM) -> Result<(), io::Error>;
 
 	/// Persist the given [`NetworkGraph`] to disk, returning an error if persistence failed.
 	fn persist_graph(&self, network_graph: &NetworkGraph<L>) -> Result<(), io::Error>;
@@ -177,19 +175,12 @@ pub trait Persister<'a, M: Deref, T: Deref, YT: Deref, ES: Deref, NS: Deref, SP:
 }
 
 
-impl<'a, A: KVStore, M: Deref, T: Deref, YT: Deref, ES: Deref, NS: Deref, SP: Deref, F: Deref, R: Deref, L: Deref, S: WriteableScore<'a>> Persister<'a, M, T, YT, ES, NS, SP, F, R, L, S> for A
-	where M::Target: 'static + chain::Watch<<SP::Target as SignerProvider>::Signer>,
-		T::Target: 'static + BroadcasterInterface,
-		YT::Target: 'static + YuvBroadcaster,
-		ES::Target: 'static + EntropySource,
-		NS::Target: 'static + NodeSigner,
-		SP::Target: 'static + SignerProvider,
-		F::Target: 'static + FeeEstimator,
-		R::Target: 'static + Router,
-		L::Target: 'static + Logger,
+impl<'a, A: KVStore + ?Sized, CM: Deref, L: Deref, S: WriteableScore<'a>> Persister<'a, CM, L, S> for A
+where
+	CM::Target: 'static + AChannelManager,
+	L::Target: 'static + Logger,
 {
-	/// Persist the given [`ChannelManager`] to disk, returning an error if persistence failed.
-	fn persist_manager(&self, channel_manager: &ChannelManager<M, T, YT, ES, NS, SP, F, R, L>) -> Result<(), io::Error> {
+	fn persist_manager(&self, channel_manager: &CM) -> Result<(), io::Error> {
 		self.write(CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
 			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
 			CHANNEL_MANAGER_PERSISTENCE_KEY,
@@ -466,7 +457,7 @@ where
 	/// documentation for [`MonitorUpdatingPersister`].
 	pub fn read_all_channel_monitors_with_updates<B: Deref, YB: Deref, F: Deref>(
 		&self, broadcaster: &B, yuv_broadcaster: Option<YB>, fee_estimator: &F,
-	) -> Result<Vec<(BlockHash, ChannelMonitor<<SP::Target as SignerProvider>::Signer>)>, io::Error>
+	) -> Result<Vec<(BlockHash, ChannelMonitor<<SP::Target as SignerProvider>::EcdsaSigner>)>, io::Error>
 	where
 		B::Target: BroadcasterInterface,
 		YB::Target: YuvBroadcaster,
@@ -507,7 +498,7 @@ where
 	/// function to accomplish this. Take care to limit the number of parallel readers.
 	pub fn read_channel_monitor_with_updates<B: Deref, YB: Deref, F: Deref>(
 		&self, broadcaster: &B, yuv_broadcaster: Option<YB>, fee_estimator: &F, monitor_key: String,
-	) -> Result<(BlockHash, ChannelMonitor<<SP::Target as SignerProvider>::Signer>), io::Error>
+	) -> Result<(BlockHash, ChannelMonitor<<SP::Target as SignerProvider>::EcdsaSigner>), io::Error>
 	where
 		B::Target: BroadcasterInterface,
 		YB::Target: YuvBroadcaster,
@@ -989,7 +980,7 @@ mod tests {
 			&chanmon_cfgs[0].tx_broadcaster,
 			chanmon_cfgs[0].yuv_tx_broadcaster
 				.as_ref()
-				.map(|v| v as &YuvBroadcaster),
+				.map(|v| v as &dyn YuvBroadcaster),
 			&chanmon_cfgs[0].logger,
 			&chanmon_cfgs[0].fee_estimator,
 			&persister_0,
@@ -998,7 +989,7 @@ mod tests {
 
 		let yuv_broadcaster = chanmon_cfgs[0].yuv_tx_broadcaster
 			.as_ref()
-			.map(|v| v as &YuvBroadcaster);
+			.map(|v| v as &dyn YuvBroadcaster);
 		let chain_mon_1 = test_utils::TestChainMonitor::new(
 			Some(&chanmon_cfgs[1].chain_source),
 			&chanmon_cfgs[1].tx_broadcaster,
@@ -1018,10 +1009,10 @@ mod tests {
 		// Check that the persisted channel data is empty before any channels are open.
 		let yuv_broadcaster_0 = chanmon_cfgs[0].yuv_tx_broadcaster
 			.as_ref()
-			.map(|v| v as &YuvBroadcaster);
+			.map(|v| v as &dyn YuvBroadcaster);
 		let yuv_broadcaster_1 = chanmon_cfgs[0].yuv_tx_broadcaster
 			.as_ref()
-			.map(|v| v as &YuvBroadcaster);
+			.map(|v| v as &dyn YuvBroadcaster);
 
 		let mut persisted_chan_data_0 = persister_0.read_all_channel_monitors_with_updates(
 			&broadcaster_0,
@@ -1212,7 +1203,7 @@ mod tests {
 
 		let yuv_broadcaster = chanmon_cfgs[0].yuv_tx_broadcaster
 			.as_ref()
-			.map(|v| v as &YuvBroadcaster);
+			.map(|v| v as &dyn YuvBroadcaster);
 
 		let chain_mon_0 = test_utils::TestChainMonitor::new(
 			Some(&chanmon_cfgs[0].chain_source),
@@ -1238,7 +1229,7 @@ mod tests {
 		let nodes = create_network(2, &node_cfgs, &node_chanmgrs);
 
 		let broadcaster_0 = &chanmon_cfgs[2].tx_broadcaster;
-		let yuv_broadcaster_0 = chanmon_cfgs[2].yuv_tx_broadcaster.as_ref().map(|v| v as &YuvBroadcaster);
+		let yuv_broadcaster_0 = chanmon_cfgs[2].yuv_tx_broadcaster.as_ref().map(|v| v as &dyn YuvBroadcaster);
 
 		// Check that the persisted channel data is empty before any channels are
 		// open.

@@ -27,8 +27,9 @@
 use bitcoin::blockdata::constants::ChainHash;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::secp256k1::ecdsa::Signature;
-use bitcoin::blockdata::script::Script;
-use bitcoin::hash_types::{Txid, BlockHash};
+use bitcoin::{secp256k1, Witness};
+use bitcoin::blockdata::script::ScriptBuf;
+use bitcoin::hash_types::Txid;
 
 use crate::blinded_path::payment::{BlindedPaymentTlvs, ForwardTlvs, ReceiveTlvs};
 use crate::ln::types::{ChannelId, PaymentPreimage, PaymentHash, PaymentSecret};
@@ -45,9 +46,11 @@ use core::fmt::Debug;
 use core::ops::Deref;
 #[cfg(feature = "std")]
 use core::str::FromStr;
-use bitcoin::{secp256k1, Witness};
 use yuv_pixels::{Luma, Pixel};
 use yuv_types::YuvTxType;
+#[cfg(feature = "std")]
+use std::net::SocketAddr;
+use core::fmt::Display;
 use crate::io::{self, Cursor, Read};
 use crate::io_extras::read_to_end;
 
@@ -184,64 +187,6 @@ pub struct Pong {
 /// Contains fields that are both common to [`open_channel`] and `open_channel2` messages.
 ///
 /// [`open_channel`]: https://github.com/lightning/bolts/blob/master/02-peer-protocol.md#the-open_channel-message
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct OpenChannel {
-	/// The genesis hash of the blockchain where the channel is to be opened
-	pub chain_hash: BlockHash,
-	/// A temporary channel ID, until the funding outpoint is announced
-	pub temporary_channel_id: ChannelId,
-	/// The channel value
-	pub funding_satoshis: u64,
-	/// The amount to push to the counterparty as part of the open, in milli-satoshi
-	pub push_msat: u64,
-	/// The threshold below which outputs on transactions broadcast by sender will be omitted
-	pub dust_limit_satoshis: u64,
-	/// The maximum inbound HTLC value in flight towards sender, in milli-satoshi
-	pub max_htlc_value_in_flight_msat: u64,
-	/// The minimum value unencumbered by HTLCs for the counterparty to keep in the channel
-	pub channel_reserve_satoshis: u64,
-	/// The minimum HTLC size incoming to sender, in milli-satoshi
-	pub htlc_minimum_msat: u64,
-	/// The feerate per 1000-weight of sender generated transactions, until updated by
-	/// [`UpdateFee`]
-	pub feerate_per_kw: u32,
-	/// The number of blocks which the counterparty will have to wait to claim on-chain funds if
-	/// they broadcast a commitment transaction
-	pub to_self_delay: u16,
-	/// The maximum number of inbound HTLCs towards sender
-	pub max_accepted_htlcs: u16,
-	/// The sender's key controlling the funding transaction
-	pub funding_pubkey: PublicKey,
-	/// Used to derive a revocation key for transactions broadcast by counterparty
-	pub revocation_basepoint: PublicKey,
-	/// A payment key to sender for transactions broadcast by counterparty
-	pub payment_point: PublicKey,
-	/// Used to derive a payment key to sender for transactions broadcast by sender
-	pub delayed_payment_basepoint: PublicKey,
-	/// Used to derive an HTLC payment key to sender
-	pub htlc_basepoint: PublicKey,
-	/// The first to-be-broadcast-by-sender transaction's per commitment point
-	pub first_per_commitment_point: PublicKey,
-	/// The channel flags to be used
-	pub channel_flags: u8,
-	/// A request to pre-set the to-sender output's `scriptPubkey` for when we collaboratively close
-	pub shutdown_scriptpubkey: Option<Script>,
-	/// The channel type that this channel will represent
-	///
-	/// If this is `None`, we derive the channel type from the intersection of our
-	/// feature bits with our counterparty's feature bits from the [`Init`] message.
-	pub channel_type: Option<ChannelTypeFeatures>,
-	/// The YUV [`Pixel`] the funder adds to the channel.
-	///
-	/// If this is `None`, the channel doesn't contains any YUV tokens. If it is `Some` the Node
-	/// have to support `YuvPayments` feature.
-	pub yuv_pixel: Option<Pixel>,
-}
-
-/// An open_channel2 message to be sent by or received from the channel initiator.
-///
-/// Used in V2 channel establishment
-///
 // TODO(dual_funding): Add spec link for `open_channel2`.
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub struct CommonOpenChannelFields {
@@ -292,6 +237,11 @@ pub struct CommonOpenChannelFields {
 	/// If this is `None`, we derive the channel type from the intersection of our
 	/// feature bits with our counterparty's feature bits from the [`Init`] message.
 	pub channel_type: Option<ChannelTypeFeatures>,
+	/// The YUV [`Pixel`] the funder adds to the channel.
+	///
+	/// If this is `None`, the channel doesn't contains any YUV tokens. If it is `Some` the Node
+	/// have to support `YuvPayments` feature.
+	pub yuv_pixel: Option<Pixel>,
 }
 
 /// An [`open_channel`] message to be sent to or received from a peer.
@@ -658,7 +608,7 @@ pub struct Shutdown {
 	/// The destination of this peer's funds on closing.
 	///
 	/// Must be in one of these forms: P2PKH, P2SH, P2WPKH, P2WSH, P2TR.
-	pub scriptpubkey: Script,
+	pub scriptpubkey: ScriptBuf,
 	/// The pixel's inner key for the YUV pixel proof. Must be presented if YUV feature is used for
 	/// the channel.
 	pub yuv_inner_key: Option<PublicKey>,
@@ -714,7 +664,12 @@ pub struct UpdateAddHTLC {
 	///
 	/// [`ChannelConfig::accept_underpaying_htlcs`]: crate::util::config::ChannelConfig::accept_underpaying_htlcs
 	pub skimmed_fee_msat: Option<u64>,
-	pub(crate) onion_routing_packet: OnionPacket,
+
+	/// The onion routing packet with encrypted data for the next hop.
+	pub onion_routing_packet: OnionPacket,
+	/// Provided if we are relaying or receiving a payment within a blinded path, to decrypt the onion
+	/// routing packet and the recipient-provided encrypted payload within.
+	pub blinding_point: Option<PublicKey>,
 
 	/// Optional amount of YUV tokens to be sent with the HTLC.
 	pub yuv_amount: Option<u128>,
@@ -2287,7 +2242,7 @@ impl_writeable_msg!(FundingCreated, {
 	funding_output_index,
 	signature
 }, {
-	(6, yuv_funding_proofs, option)
+	(200, yuv_funding_proofs, option)
 });
 #[cfg(taproot)]
 impl_writeable_msg!(FundingCreated, {
@@ -2298,7 +2253,7 @@ impl_writeable_msg!(FundingCreated, {
 }, {
 	(2, partial_signature_with_nonce, option),
 	(4, next_local_nonce, option),
-	(6, yuv_funding_proofs, option)
+	(200, yuv_funding_proofs, option)
 });
 
 #[cfg(not(taproot))]
@@ -2354,30 +2309,34 @@ impl Readable for Init {
 	}
 }
 
-impl_writeable_msg!(OpenChannel, {
-	chain_hash,
-	temporary_channel_id,
-	funding_satoshis,
-	push_msat,
-	dust_limit_satoshis,
-	max_htlc_value_in_flight_msat,
-	channel_reserve_satoshis,
-	htlc_minimum_msat,
-	feerate_per_kw,
-	to_self_delay,
-	max_accepted_htlcs,
-	funding_pubkey,
-	revocation_basepoint,
-	payment_point,
-	delayed_payment_basepoint,
-	htlc_basepoint,
-	first_per_commitment_point,
-	channel_flags,
-}, {
-	(0, shutdown_scriptpubkey, (option, encoding: (Script, WithoutLength))), // Don't encode length twice.
-	(1, channel_type, option),
-	(2, yuv_pixel, option),
-});
+impl Writeable for OpenChannel {
+	fn write<W: Writer>(&self, w: &mut W) -> Result<(), io::Error> {
+		self.common_fields.chain_hash.write(w)?;
+		self.common_fields.temporary_channel_id.write(w)?;
+		self.common_fields.funding_satoshis.write(w)?;
+		self.push_msat.write(w)?;
+		self.common_fields.dust_limit_satoshis.write(w)?;
+		self.common_fields.max_htlc_value_in_flight_msat.write(w)?;
+		self.channel_reserve_satoshis.write(w)?;
+		self.common_fields.htlc_minimum_msat.write(w)?;
+		self.common_fields.commitment_feerate_sat_per_1000_weight.write(w)?;
+		self.common_fields.to_self_delay.write(w)?;
+		self.common_fields.max_accepted_htlcs.write(w)?;
+		self.common_fields.funding_pubkey.write(w)?;
+		self.common_fields.revocation_basepoint.write(w)?;
+		self.common_fields.payment_basepoint.write(w)?;
+		self.common_fields.delayed_payment_basepoint.write(w)?;
+		self.common_fields.htlc_basepoint.write(w)?;
+		self.common_fields.first_per_commitment_point.write(w)?;
+		self.common_fields.channel_flags.write(w)?;
+		encode_tlv_stream!(w, {
+			(0, self.common_fields.shutdown_scriptpubkey.as_ref().map(|s| WithoutLength(s)), option), // Don't encode length twice.
+			(1, self.common_fields.channel_type, option),
+			(200, self.common_fields.yuv_pixel, option),
+		});
+		Ok(())
+	}
+}
 
 impl Readable for OpenChannel {
 	fn read<R: Read>(r: &mut R) -> Result<Self, DecodeError> {
@@ -2402,9 +2361,11 @@ impl Readable for OpenChannel {
 
 		let mut shutdown_scriptpubkey: Option<ScriptBuf> = None;
 		let mut channel_type: Option<ChannelTypeFeatures> = None;
+		let mut yuv_pixel: Option<Pixel> = None;
 		decode_tlv_stream!(r, {
 			(0, shutdown_scriptpubkey, (option, encoding: (ScriptBuf, WithoutLength))),
 			(1, channel_type, option),
+			(200, yuv_pixel, option),
 		});
 		Ok(OpenChannel {
 			common_fields: CommonOpenChannelFields {
@@ -2426,6 +2387,7 @@ impl Readable for OpenChannel {
 				channel_flags,
 				shutdown_scriptpubkey,
 				channel_type,
+				yuv_pixel,
 			},
 			push_msat,
 			channel_reserve_satoshis,
@@ -2458,6 +2420,7 @@ impl Writeable for OpenChannelV2 {
 			(0, self.common_fields.shutdown_scriptpubkey.as_ref().map(|s| WithoutLength(s)), option), // Don't encode length twice.
 			(1, self.common_fields.channel_type, option),
 			(2, self.require_confirmed_inputs, option),
+			(200, self.common_fields.yuv_pixel, option),
 		});
 		Ok(())
 	}
@@ -2488,10 +2451,12 @@ impl Readable for OpenChannelV2 {
 		let mut shutdown_scriptpubkey: Option<ScriptBuf> = None;
 		let mut channel_type: Option<ChannelTypeFeatures> = None;
 		let mut require_confirmed_inputs: Option<()> = None;
+		let mut yuv_pixel: Option<Pixel> = None;
 		decode_tlv_stream!(r, {
 			(0, shutdown_scriptpubkey, (option, encoding: (ScriptBuf, WithoutLength))),
 			(1, channel_type, option),
 			(2, require_confirmed_inputs, option),
+			(200, yuv_pixel, option),
 		});
 		Ok(OpenChannelV2 {
 			common_fields: CommonOpenChannelFields {
@@ -2513,6 +2478,7 @@ impl Readable for OpenChannelV2 {
 				channel_flags,
 				shutdown_scriptpubkey,
 				channel_type,
+				yuv_pixel,
 			},
 			funding_feerate_sat_per_1000_weight,
 			locktime,
@@ -2542,7 +2508,7 @@ impl_writeable_msg!(Shutdown, {
 	channel_id,
 	scriptpubkey,
 }, {
-	(0, yuv_inner_key, option)
+	(200, yuv_inner_key, option)
 });
 
 impl_writeable_msg!(UpdateFailHTLC, {
@@ -2615,8 +2581,9 @@ impl_writeable_msg!(UpdateAddHTLC, {
 	cltv_expiry,
 	onion_routing_packet,
 }, {
-	(0, yuv_amount, option),
-	(65537, skimmed_fee_msat, option),
+	(0, blinding_point, option),
+	(200, yuv_amount, option),
+	(65537, skimmed_fee_msat, option)
 });
 
 impl Readable for OnionMessage {
@@ -3310,7 +3277,8 @@ mod tests {
 	use hex::DisplayHex;
 	use crate::ln::types::{ChannelId, PaymentPreimage, PaymentHash, PaymentSecret};
 	use crate::ln::features::{ChannelFeatures, ChannelTypeFeatures, InitFeatures, NodeFeatures};
-	use crate::ln::msgs::{self, FinalOnionHopData, OnionErrorPacket, UpdateBalance};
+	use crate::ln::msgs::UpdateBalance;
+	use crate::ln::msgs::{self, FinalOnionHopData, OnionErrorPacket, CommonOpenChannelFields, CommonAcceptChannelFields, TrampolineOnionPacket};
 	use crate::ln::msgs::SocketAddress;
 	use crate::routing::gossip::{NodeAlias, NodeId};
 	use crate::util::ser::{BigSize, Hostname, Readable, ReadableArgs, TransactionU16LenLimited, Writeable};
@@ -3334,8 +3302,9 @@ mod tests {
 	use crate::chain::transaction::OutPoint;
 
 	#[cfg(feature = "std")]
-	use std::net::{Ipv4Addr, Ipv6Addr};
+	use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6, ToSocketAddrs};
 	use yuv_pixels::Luma;
+	#[cfg(feature = "std")]
 	use crate::ln::msgs::SocketAddressParseError;
 
 	#[test]
@@ -3634,10 +3603,10 @@ mod tests {
 			let flag = target_value.last_mut().unwrap();
 			*flag = *flag | 1 << 1;
 		}
-		target_value.append(&mut hex::decode("009000000000000f42400000271000000014").unwrap());
-		target_value.append(&mut hex::decode("0000777788889999").unwrap());
+		target_value.append(&mut <Vec<u8>>::from_hex("009000000000000f42400000271000000014").unwrap());
+		target_value.append(&mut <Vec<u8>>::from_hex("0000777788889999").unwrap());
 		if yuv_pixel {
-			target_value.append(&mut hex::decode("7975762d110000000000000000002bdc546291f4b1").unwrap());
+			target_value.append(&mut <Vec<u8>>::from_hex("7975762d110000000000000000002bdc546291f4b1").unwrap());
 		}
 		if excess_data {
 			target_value.append(&mut <Vec<u8>>::from_hex("000000003b9aca00").unwrap());
@@ -3688,23 +3657,10 @@ mod tests {
 				channel_flags: if random_bit { 1 << 5 } else { 0 },
 				shutdown_scriptpubkey: if shutdown { Some(Address::p2pkh(&::bitcoin::PublicKey{compressed: true, inner: pubkey_1}, Network::Testnet).script_pubkey()) } else { None },
 				channel_type: if incl_chan_type { Some(ChannelTypeFeatures::empty()) } else { None },
+				yuv_pixel: None,
 			},
 			push_msat: 2536655962884945560,
 			channel_reserve_satoshis: 8665828695742877976,
-			htlc_minimum_msat: 2316138423780173,
-			feerate_per_kw: 821716,
-			to_self_delay: 49340,
-			max_accepted_htlcs: 49340,
-			funding_pubkey: pubkey_1,
-			revocation_basepoint: pubkey_2,
-			payment_point: pubkey_3,
-			delayed_payment_basepoint: pubkey_4,
-			htlc_basepoint: pubkey_5,
-			first_per_commitment_point: pubkey_6,
-			channel_flags: if random_bit { 1 << 5 } else { 0 },
-			shutdown_scriptpubkey: if shutdown { Some(Address::p2pkh(&::bitcoin::PublicKey{compressed: true, inner: pubkey_1}, Network::Testnet).script_pubkey()) } else { None },
-			channel_type: if incl_chan_type { Some(ChannelTypeFeatures::empty()) } else { None },
-			yuv_pixel: None,
 		};
 		let encoded_value = open_channel.encode();
 		let mut target_value = Vec::new();
@@ -3765,6 +3721,7 @@ mod tests {
 				channel_flags: if random_bit { 1 << 5 } else { 0 },
 				shutdown_scriptpubkey: if shutdown { Some(Address::p2pkh(&::bitcoin::PublicKey{compressed: true, inner: pubkey_1}, Network::Testnet).script_pubkey()) } else { None },
 				channel_type: if incl_chan_type { Some(ChannelTypeFeatures::empty()) } else { None },
+				yuv_pixel: None,
 			},
 			funding_feerate_sat_per_1000_weight: 821716,
 			locktime: 305419896,
@@ -4299,6 +4256,7 @@ mod tests {
 			onion_routing_packet,
 			skimmed_fee_msat: None,
 			yuv_amount: None,
+			blinding_point: None,
 		};
 		let encoded_value = update_add_htlc.encode();
 		let target_value = <Vec<u8>>::from_hex("020202020202020202020202020202020202020202020202020202020202020200083a840000034d32144668701144760101010101010101010101010101010101010101010101010101010101010101000c89d4ff031b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010202020202020202020202020202020202020202020202020202020202020202").unwrap();
@@ -4836,7 +4794,7 @@ mod tests {
 			new_yuv_pixel_luma: yuv_luma,
 		};
 
-		assert_eq!(update_balance.encode(), hex::decode(format!("020202020202020202020202020202020202020202020202020202020202020200000000000004d2{}", hex_encoded_luma)).unwrap());
+		assert_eq!(update_balance.encode(), Vec::<u8>::from_hex(&format!("020202020202020202020202020202020202020202020202020202020202020200000000000004d2{}", hex_encoded_luma)).unwrap());
 	}
 
 	#[test]
@@ -4847,7 +4805,7 @@ mod tests {
 	}
 
 	fn do_decoding_update_balance(yuv_luma: Option<Luma>, encoded_update_balance: &str) {
-		let update_balance = UpdateBalance::read(&mut Cursor::new(hex::decode(encoded_update_balance).unwrap())).unwrap();
+		let update_balance = UpdateBalance::read(&mut Cursor::new(Vec::<u8>::from_hex(&encoded_update_balance).unwrap())).unwrap();
 
 		assert_eq!(ChannelId::from_bytes([2; 32]), update_balance.channel_id);
 		assert_eq!(1234, update_balance.new_balance_msat);

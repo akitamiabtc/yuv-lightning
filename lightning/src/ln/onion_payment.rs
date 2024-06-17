@@ -121,12 +121,13 @@ pub(super) fn create_fwd_pending_htlc_info(
 		outgoing_amt_msat: amt_to_forward,
 		outgoing_cltv_value,
 		skimmed_fee_msat: None,
+		outgoing_yuv_amount: msg.yuv_amount,
 	})
 }
 
 pub(super) fn create_recv_pending_htlc_info(
 	hop_data: msgs::InboundOnionPayload, shared_secret: [u8; 32], payment_hash: PaymentHash,
-	amt_msat: u64, cltv_expiry: u32, phantom_shared_secret: Option<[u8; 32]>, allow_underpay: bool,
+	amt_msat: u64, yuv_amount: Option<u128>, cltv_expiry: u32, phantom_shared_secret: Option<[u8; 32]>, allow_underpay: bool,
 	counterparty_skimmed_fee_msat: Option<u64>, current_height: u32, accept_mpp_keysend: bool,
 ) -> Result<PendingHTLCInfo, InboundHTLCErr> {
 	let (
@@ -263,6 +264,7 @@ pub(super) fn create_recv_pending_htlc_info(
 		outgoing_amt_msat: onion_amt_msat,
 		outgoing_cltv_value: onion_cltv_expiry,
 		skimmed_fee_msat: counterparty_skimmed_fee_msat,
+		outgoing_yuv_amount: yuv_amount,
 	})
 }
 
@@ -327,7 +329,7 @@ where
 		},
 		onion_utils::Hop::Receive(received_data) => {
 			create_recv_pending_htlc_info(
-				received_data, shared_secret, msg.payment_hash, msg.amount_msat, msg.cltv_expiry,
+				received_data, shared_secret, msg.payment_hash, msg.amount_msat, msg.yuv_amount, msg.cltv_expiry,
 				None, allow_skimmed_fees, msg.skimmed_fee_msat, cur_height, accept_mpp_keysend,
 			)?
 		}
@@ -533,7 +535,7 @@ mod tests {
 		// Ensure the onion will not fit all the payloads by adding a large custom TLV.
 		recipient_onion.custom_tlvs.push((13377331, vec![0; 1156]));
 
-		let path = Path { hops, blinded_tail: None, };
+		let path = Path { hops, blinded_tail: None, chroma: None };
 		let onion_keys = super::onion_utils::construct_onion_keys(&secp_ctx, &path, &session_priv).unwrap();
 		let (onion_payloads, ..) = super::onion_utils::build_onion_payloads(
 			&path, total_amt_msat, recipient_onion, cur_height + 1, &Some(keysend_preimage)
@@ -560,6 +562,7 @@ mod tests {
 		let path = Path {
 			hops: hops,
 			blinded_tail: None,
+			chroma: None,
 		};
 
 		let (onion, amount_msat, cltv_expiry) = create_payment_onion(
@@ -610,6 +613,7 @@ mod tests {
 			onion_routing_packet,
 			skimmed_fee_msat: None,
 			blinding_point: None,
+			yuv_amount: None,
 		}
 	}
 

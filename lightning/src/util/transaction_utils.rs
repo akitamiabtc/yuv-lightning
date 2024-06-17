@@ -45,16 +45,16 @@ pub(crate) fn maybe_add_yuv_change_output(
 	tx: &mut Transaction,
 	output_proofs: &mut ProofMap,
 	input_value: u64,
-	witness_max_weight: usize,
+	witness_max_weight: u64,
 	feerate_sat_per_1000_weight: u32,
 	change_destination_pubkey: &PublicKey,
 	chroma: Chroma,
-) -> Result<usize, ()> {
+) -> Result<u64, ()> {
 	let pixel = Pixel::new(0, chroma);
 	let pixel_key = change_destination_pubkey.tweak(pixel);
 
 	let pubkey_hash = WPubkeyHash::hash(&pixel_key.serialize());
-	let change_destination_script = Script::new_v0_p2wpkh(&pubkey_hash);
+	let change_destination_script = ScriptBuf::new_v0_p2wpkh(&pubkey_hash);
 
 	let AddChangeOutputResult { weight, added } = maybe_add_change_output_internal(
 		tx, input_value,
@@ -80,15 +80,15 @@ pub(crate) fn maybe_add_yuv_change_output(
 /// Result of the `maybe_add_change_output_internal` function.
 pub(crate) struct AddChangeOutputResult {
 	/// New calculated weight of the transaction.
-	pub(crate) weight: usize,
+	pub(crate) weight: u64,
 
 	/// True if a change output was added, false otherwise.
 	pub(crate) added: bool,
 }
 
 impl AddChangeOutputResult {
-	pub(crate) fn new_added(weight: usize) -> Self { Self { weight, added: true } }
-	pub(crate) fn new(weight: usize) -> Self { Self { weight, added: false } }
+	pub(crate) fn new_added(weight: u64) -> Self { Self { weight, added: true } }
+	pub(crate) fn new(weight: u64) -> Self { Self { weight, added: false } }
 }
 
 /// Possibly adds a change output to the given transaction, always doing so if there are excess
@@ -96,7 +96,7 @@ impl AddChangeOutputResult {
 /// Assumes at least one input will have a witness (ie spends a segwit output).
 /// Returns an Err(()) if the requested feerate cannot be met.
 /// Returns the expected maximum weight of the fully signed transaction on success.
-pub(crate) fn maybe_add_change_output(tx: &mut Transaction, input_value: u64, witness_max_weight: usize, feerate_sat_per_1000_weight: u32, change_destination_script: Script) -> Result<usize, ()> {
+pub(crate) fn maybe_add_change_output(tx: &mut Transaction, input_value: u64, witness_max_weight: u64, feerate_sat_per_1000_weight: u32, change_destination_script: ScriptBuf) -> Result<u64, ()> {
 	maybe_add_change_output_internal(
 		tx, input_value,
 		witness_max_weight,
@@ -109,9 +109,9 @@ pub(crate) fn maybe_add_change_output(tx: &mut Transaction, input_value: u64, wi
 fn maybe_add_change_output_internal(
 	tx: &mut Transaction,
 	input_value: u64,
-	witness_max_weight: usize,
+	witness_max_weight: u64,
 	feerate_sat_per_1000_weight: u32,
-	change_destination_script: Script
+	change_destination_script: ScriptBuf,
 ) -> Result<AddChangeOutputResult, ()> {
 	if input_value > MAX_VALUE_MSAT / 1000 { return Err(()); }
 
@@ -138,12 +138,11 @@ fn maybe_add_change_output_internal(
 	if change_value >= dust_value.to_sat() as i64 {
 		change_output.value = change_value as u64;
 		tx.output.push(change_output);
-
-		Ok(AddChangeOutputResult::new_added(weight_with_change as usize))
+		Ok(AddChangeOutputResult::new_added(weight_with_change as u64))
 	} else if (input_value - output_value) as i64 - (starting_weight as i64) * feerate_sat_per_1000_weight as i64 / 1000 < 0 {
 		Err(())
 	} else {
-		Ok(AddChangeOutputResult::new(starting_weight as usize))
+		Ok(AddChangeOutputResult::new(starting_weight))
 	}
 }
 

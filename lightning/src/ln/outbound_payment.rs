@@ -41,12 +41,6 @@ use crate::sync::Mutex;
 /// [`ChannelManager::timer_tick_occurred`]: crate::ln::channelmanager::ChannelManager::timer_tick_occurred
 pub(crate) const IDEMPOTENCY_TIMEOUT_TICKS: u8 = 7;
 
-/// The number of ticks of [`ChannelManager::timer_tick_occurred`] until an invoice request without
-/// a response is timed out.
-///
-/// [`ChannelManager::timer_tick_occurred`]: crate::ln::channelmanager::ChannelManager::timer_tick_occurred
-const INVOICE_REQUEST_TIMEOUT_TICKS: u8 = 3;
-
 pub(crate) struct YuvPendingRetryablePayment {
 	/// Asset type of the payment.
 	pub(crate) pending_yuv_pixel: Pixel,
@@ -816,12 +810,12 @@ impl OutboundPayments {
 			hash_map::Entry::Vacant(_) => return Err(Bolt12PaymentError::UnexpectedInvoice),
 		};
 
-		let route_params = RouteParameters {
-			payment_params: PaymentParameters::from_bolt12_invoice(&invoice),
-			final_value_msat: invoice.amount_msats(),
-			max_total_routing_fee_msat,
-			yuv_pixel: None,
-		};
+		let pay_params = PaymentParameters::from_bolt12_invoice(&invoice);
+		let amount_msat = invoice.amount_msats();
+		let mut route_params = RouteParameters::from_payment_params_and_value(pay_params, amount_msat);
+		if let Some(max_fee_msat) = max_total_routing_fee_msat {
+			route_params.max_total_routing_fee_msat = Some(max_fee_msat);
+		}
 
 		self.find_route_and_send_payment(
 			payment_hash, payment_id, route_params, router, first_hops, &inflight_htlcs,
@@ -1848,7 +1842,7 @@ impl_writeable_tlv_based_enum_upgradable!(PendingOutboundPayment,
 		(9, custom_tlvs, optional_vec),
 		(10, starting_block_height, required),
 		(11, remaining_max_total_routing_fee_msat, option),
-		(12, yuv_data, option),
+		(200, yuv_data, option),
 		(not_written, retry_strategy, (static_value, None)),
 		(not_written, attempts, (static_value, PaymentAttempts::new())),
 	},

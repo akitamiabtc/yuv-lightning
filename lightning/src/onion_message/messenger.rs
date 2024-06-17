@@ -1191,13 +1191,13 @@ where
 /// [`SimpleArcChannelManager`]: crate::ln::channelmanager::SimpleArcChannelManager
 /// [`SimpleArcPeerManager`]: crate::ln::peer_handler::SimpleArcPeerManager
 #[cfg(not(c_bindings))]
-pub type SimpleArcOnionMessenger<M, T, F, L> = OnionMessenger<
+pub type SimpleArcOnionMessenger<M, T, YT, F, L> = OnionMessenger<
 	Arc<KeysManager>,
 	Arc<KeysManager>,
 	Arc<L>,
-	Arc<SimpleArcChannelManager<M, T, F, L>>,
+	Arc<SimpleArcChannelManager<M, T, YT, F, L>>,
 	Arc<DefaultMessageRouter<Arc<NetworkGraph<Arc<L>>>, Arc<L>, Arc<KeysManager>>>,
-	Arc<SimpleArcChannelManager<M, T, F, L>>,
+	Arc<SimpleArcChannelManager<M, T, YT, F, L>>,
 	IgnoringMessageHandler
 >;
 
@@ -1210,14 +1210,14 @@ pub type SimpleArcOnionMessenger<M, T, F, L> = OnionMessenger<
 /// [`SimpleRefPeerManager`]: crate::ln::peer_handler::SimpleRefPeerManager
 #[cfg(not(c_bindings))]
 pub type SimpleRefOnionMessenger<
-	'a, 'b, 'c, 'd, 'e, 'f, 'g, 'h, 'i, 'j, M, T, F, L
+	'a, 'b, 'c, 'd, 'e, 'f, 'g, 'h, 'i, 'j, M, T, YT, F, L
 > = OnionMessenger<
 	&'a KeysManager,
 	&'a KeysManager,
 	&'b L,
-	&'i SimpleRefChannelManager<'a, 'b, 'c, 'd, 'e, 'f, 'g, 'h, M, T, F, L>,
+	&'i SimpleRefChannelManager<'a, 'b, 'c, 'd, 'e, 'f, 'g, 'h, M, T, YT, F, L>,
 	&'j DefaultMessageRouter<&'g NetworkGraph<&'b L>, &'b L, &'a KeysManager>,
-	&'i SimpleRefChannelManager<'a, 'b, 'c, 'd, 'e, 'f, 'g, 'h, M, T, F, L>,
+	&'i SimpleRefChannelManager<'a, 'b, 'c, 'd, 'e, 'f, 'g, 'h, M, T, YT, F, L>,
 	IgnoringMessageHandler
 >;
 

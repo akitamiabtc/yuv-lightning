@@ -19,7 +19,6 @@ use bitcoin::secp256k1;
 use bitcoin::hashes::sha256d::Hash as Sha256dHash;
 use bitcoin::hashes::Hash;
 use bitcoin::network::constants::Network;
-use bitcoin::blockdata::constants::genesis_block;
 use yuv_pixels::Chroma;
 
 use crate::events::{MessageSendEvent, MessageSendEventsProvider};
@@ -811,7 +810,7 @@ impl Writeable for ChannelUpdateInfo {
 			(8, Some(self.htlc_maximum_msat), required),
 			(10, self.fees, required),
 			(12, self.last_update_message, required),
-			(14, self.htlc_maximum_yuv, option),
+			(200, self.htlc_maximum_yuv, option),
 		});
 		Ok(())
 	}
@@ -836,7 +835,7 @@ impl Readable for ChannelUpdateInfo {
 			(8, htlc_maximum_msat, required),
 			(10, fees, required),
 			(12, last_update_message, required),
-			(14, htlc_maximum_yuv, option),
+			(200, htlc_maximum_yuv, option),
 		});
 
 		if let Some(htlc_maximum_msat) = htlc_maximum_msat {
@@ -971,7 +970,7 @@ impl Writeable for ChannelInfo {
 			(8, self.two_to_one, required),
 			(10, self.capacity_sats, required),
 			(12, self.announcement_message, required),
-			(14, self.yuv_data, option),
+			(200, self.yuv_data, option),
 		});
 
 		Ok(())
@@ -1016,7 +1015,7 @@ impl Readable for ChannelInfo {
 			(8, two_to_one_wrap, upgradable_option),
 			(10, capacity_sats, required),
 			(12, announcement_message, required),
-			(14, yuv_data, option),
+			(200, yuv_data, option),
 		});
 
 		Ok(ChannelInfo {
@@ -1039,58 +1038,20 @@ impl Readable for ChannelInfo {
 pub struct DirectedChannelInfo<'a> {
 	channel: &'a ChannelInfo,
 	direction: &'a ChannelUpdateInfo,
-	htlc_maximum_msat: u64,
-	/// Not empty if the `YuvPayments` feature is enabled.
-	htlc_maximum_yuv: Option<u128>,
-	effective_capacity: EffectiveCapacity,
+	/// The direction this channel is in - if set, it indicates that we're traversing the channel
+	/// from [`ChannelInfo::node_one`] to [`ChannelInfo::node_two`].
+	from_node_one: bool,
 }
 
 impl<'a> DirectedChannelInfo<'a> {
 	#[inline]
-	fn new(channel: &'a ChannelInfo, direction: &'a ChannelUpdateInfo) -> Self {
-		let mut htlc_maximum_msat = direction.htlc_maximum_msat;
-		let capacity_msat = channel.capacity_sats.map(|capacity_sats| capacity_sats * 1000);
-
-		let htlc_maximum_yuv = direction.htlc_maximum_yuv;
-		let capacity_yuv = channel.yuv_data.as_ref().map(|yuv_data| yuv_data.capacity);
-
-		let effective_capacity = match capacity_msat {
-			Some(capacity_msat) => {
-				htlc_maximum_msat = cmp::min(htlc_maximum_msat, capacity_msat);
-
-				EffectiveCapacity::Total {
-					capacity_msat,
-					htlc_maximum_msat,
-					capacity_yuv,
-					htlc_maximum_yuv,
-				}
-			},
-			None => EffectiveCapacity::AdvertisedMaxHTLC {
-				amount_msat: htlc_maximum_msat,
-				amount_yuv: htlc_maximum_yuv,
-			},
-		};
-
-		Self {
-			channel, direction, htlc_maximum_msat, effective_capacity, htlc_maximum_yuv,
-		}
+	fn new(channel: &'a ChannelInfo, direction: &'a ChannelUpdateInfo, from_node_one: bool) -> Self {
+		Self { channel, direction, from_node_one }
 	}
 
 	/// Returns information for the channel.
 	#[inline]
 	pub fn channel(&self) -> &'a ChannelInfo { self.channel }
-
-	/// Returns the maximum HTLC amount allowed over the channel in the direction.
-	#[inline]
-	pub fn htlc_maximum_msat(&self) -> u64 {
-		self.htlc_maximum_msat
-	}
-
-	/// Returns the maximum YUV HTLC amount allowed over the channel in the direction.
-	#[inline]
-	pub fn htlc_maximum_yuv(&self) -> Option<u128> {
-		self.htlc_maximum_yuv
-	}
 
 	/// Returns the [`EffectiveCapacity`] of the channel in the direction.
 	///
@@ -1102,12 +1063,15 @@ impl<'a> DirectedChannelInfo<'a> {
 		let mut htlc_maximum_msat = self.direction().htlc_maximum_msat;
 		let capacity_msat = self.channel.capacity_sats.map(|capacity_sats| capacity_sats * 1000);
 
+		let htlc_maximum_yuv = self.direction().htlc_maximum_yuv;
+		let capacity_yuv = self.channel.yuv_data.as_ref().map(|yuv_data| yuv_data.capacity);
+
 		match capacity_msat {
 			Some(capacity_msat) => {
 				htlc_maximum_msat = cmp::min(htlc_maximum_msat, capacity_msat);
-				EffectiveCapacity::Total { capacity_msat, htlc_maximum_msat }
+				EffectiveCapacity::Total { capacity_msat, htlc_maximum_msat, capacity_yuv, htlc_maximum_yuv }
 			},
-			None => EffectiveCapacity::AdvertisedMaxHTLC { amount_msat: htlc_maximum_msat },
+			None => EffectiveCapacity::AdvertisedMaxHTLC { amount_msat: htlc_maximum_msat, amount_yuv: htlc_maximum_yuv },
 		}
 	}
 
@@ -3561,7 +3525,7 @@ pub(crate) mod tests {
 		assert_eq!(chan_info_some_updates, read_chan_info);
 
 		// Check the serialization hasn't changed.
-		let legacy_chan_info_with_some: Vec<u8> = hex::decode("d10009000700000000000000010800000000000156660221027f921585f2ac0c7c70e36110adecfd8fd14b8a99bfb3d000a283fcac358fce88043636340004000000170201010402002a060800000000000004d2080909000000000000162e0a0d0c00040000000902040000000a0c010006210355f8d2238a322d16b602bd0ceaad5b01019fb055971eaadcc9b29226a4da6c23083636340004000000170201010402002a060800000000000004d2080909000000000000162e0a0d0c00040000000902040000000a0c01000a01000c0100").unwrap();
+		let legacy_chan_info_with_some: Vec<u8> = <Vec<u8>>::from_hex("d10009000700000000000000010800000000000156660221027f921585f2ac0c7c70e36110adecfd8fd14b8a99bfb3d000a283fcac358fce88043636340004000000170201010402002a060800000000000004d2080909000000000000162e0a0d0c00040000000902040000000a0c010006210355f8d2238a322d16b602bd0ceaad5b01019fb055971eaadcc9b29226a4da6c23083636340004000000170201010402002a060800000000000004d2080909000000000000162e0a0d0c00040000000902040000000a0c01000a01000c0100").unwrap();
 		assert_eq!(encoded_chan_info, legacy_chan_info_with_some);
 
 		// Check we can decode legacy ChannelInfo, even if the `two_to_one` / `one_to_two` /

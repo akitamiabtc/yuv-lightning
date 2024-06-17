@@ -99,16 +99,6 @@ pub struct ReceiveTlvs {
 	pub payment_context: PaymentContext,
 }
 
-impl ReceiveTlvs {
-	/// Create a new [`ReceiveTlvs`] with the given parameters.
-	pub fn new(payment_secret: PaymentSecret, payment_constraints: PaymentConstraints) -> Self {
-		Self {
-			payment_secret,
-			payment_constraints,
-		}
-	}
-}
-
 /// Data to construct a [`BlindedHop`] for sending a payment over.
 ///
 /// [`BlindedHop`]: crate::blinded_path::BlindedHop
@@ -166,13 +156,84 @@ pub struct PaymentConstraints {
 	pub htlc_minimum_msat: u64,
 }
 
-impl PaymentConstraints {
-	/// Create a new [`PaymentConstraints`] with the given parameters.
-	pub fn new(max_cltv_expiry: u32, htlc_minimum_msat: u64) -> Self {
-		Self {
-			max_cltv_expiry,
-			htlc_minimum_msat,
-		}
+/// The context of an inbound payment, which is included in a [`BlindedPath`] via [`ReceiveTlvs`]
+/// and surfaced in [`PaymentPurpose`].
+///
+/// [`BlindedPath`]: crate::blinded_path::BlindedPath
+/// [`PaymentPurpose`]: crate::events::PaymentPurpose
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PaymentContext {
+	/// The payment context was unknown.
+	Unknown(UnknownPaymentContext),
+
+	/// The payment was made for an invoice requested from a BOLT 12 [`Offer`].
+	///
+	/// [`Offer`]: crate::offers::offer::Offer
+	Bolt12Offer(Bolt12OfferContext),
+
+	/// The payment was made for an invoice sent for a BOLT 12 [`Refund`].
+	///
+	/// [`Refund`]: crate::offers::refund::Refund
+	Bolt12Refund(Bolt12RefundContext),
+}
+
+// Used when writing PaymentContext in Event::PaymentClaimable to avoid cloning.
+pub(crate) enum PaymentContextRef<'a> {
+	Bolt12Offer(&'a Bolt12OfferContext),
+	Bolt12Refund(&'a Bolt12RefundContext),
+}
+
+/// An unknown payment context.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UnknownPaymentContext(());
+
+/// The context of a payment made for an invoice requested from a BOLT 12 [`Offer`].
+///
+/// [`Offer`]: crate::offers::offer::Offer
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Bolt12OfferContext {
+	/// The identifier of the [`Offer`].
+	///
+	/// [`Offer`]: crate::offers::offer::Offer
+	pub offer_id: OfferId,
+
+	/// Fields from an [`InvoiceRequest`] sent for a [`Bolt12Invoice`].
+	///
+	/// [`InvoiceRequest`]: crate::offers::invoice_request::InvoiceRequest
+	/// [`Bolt12Invoice`]: crate::offers::invoice::Bolt12Invoice
+	pub invoice_request: InvoiceRequestFields,
+}
+
+/// The context of a payment made for an invoice sent for a BOLT 12 [`Refund`].
+///
+/// [`Refund`]: crate::offers::refund::Refund
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Bolt12RefundContext {}
+
+impl PaymentContext {
+	pub(crate) fn unknown() -> Self {
+		PaymentContext::Unknown(UnknownPaymentContext(()))
+	}
+}
+
+impl TryFrom<CounterpartyForwardingInfo> for PaymentRelay {
+	type Error = ();
+
+	fn try_from(info: CounterpartyForwardingInfo) -> Result<Self, ()> {
+		let CounterpartyForwardingInfo {
+			fee_base_msat, fee_proportional_millionths, cltv_expiry_delta
+		} = info;
+
+		// Avoid exposing esoteric CLTV expiry deltas
+		let cltv_expiry_delta = match cltv_expiry_delta {
+			0..=40 => 40,
+			41..=80 => 80,
+			81..=144 => 144,
+			145..=216 => 216,
+			_ => return Err(()),
+		};
+
+		Ok(Self { cltv_expiry_delta, fee_proportional_millionths, fee_base_msat })
 	}
 }
 
@@ -417,12 +478,11 @@ impl_writeable_tlv_based!(Bolt12RefundContext, {});
 
 #[cfg(test)]
 mod tests {
-	use crate::blinded_path::payment::{
-		ForwardNode, ForwardTlvs, PaymentConstraints, PaymentRelay, ReceiveTlvs,
-	};
-	use crate::ln::features::BlindedHopFeatures;
-	use crate::ln::PaymentSecret;
 	use bitcoin::secp256k1::PublicKey;
+	use crate::blinded_path::payment::{ForwardNode, ForwardTlvs, ReceiveTlvs, PaymentConstraints, PaymentContext, PaymentRelay};
+	use crate::ln::types::PaymentSecret;
+	use crate::ln::features::BlindedHopFeatures;
+	use crate::ln::functional_test_utils::TEST_FINAL_CLTV;
 
 	#[test]
 	fn compute_payinfo() {

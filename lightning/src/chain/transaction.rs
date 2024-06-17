@@ -61,11 +61,6 @@ impl OutPoint {
 		Self { txid, index }
 	}
 
-	/// Convert an `OutPoint` to a lightning channel id.
-	pub fn to_channel_id(&self) -> ChannelId {
-		ChannelId::v1_from_funding_txid(&self.txid.as_inner(), self.index)
-	}
-
 	/// Converts this OutPoint into the OutPoint field as used by rust-bitcoin
 	///
 	/// This is not exported to bindings users as the same type is used universally in the C bindings

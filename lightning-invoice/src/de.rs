@@ -11,9 +11,8 @@ use core::str::FromStr;
 use bech32::{u5, FromBase32};
 
 use bitcoin::{Address, Network, PubkeyHash, ScriptHash};
-use bitcoin::util::address::{Payload, WitnessVersion};
-use bitcoin_hashes::Hash;
-use bitcoin_hashes::sha256;
+use bitcoin::address::{Payload, WitnessVersion};
+use bitcoin::hashes::{Hash, sha256};
 use crate::prelude::*;
 use lightning::ln::types::PaymentSecret;
 use lightning::routing::gossip::RoutingFees;
@@ -33,6 +32,7 @@ use self::hrp_sm::parse_hrp;
 mod hrp_sm {
 	use core::ops::Range;
 	use crate::RawHrpParts;
+	use crate::alloc::string::ToString;
 
 	#[derive(PartialEq, Eq, Debug)]
 	enum States {
@@ -430,10 +430,10 @@ pub fn parse_pixel_from_hrp(
 	}
 
 	let yuv_chroma = match chroma_p2tr.payload {
-		Payload::WitnessProgram {
-			version: WitnessVersion::V1,
-			program: chroma_raw,
-		} => Chroma::from_bytes(&chroma_raw).map_err(|_| Bolt11ParseError::InvalidYuvChromaP2TR)?,
+		Payload::WitnessProgram(w_program) if w_program.version() == WitnessVersion::V1 => {
+			Chroma::from_bytes(w_program.program().as_bytes())
+				.map_err(|_| Bolt11ParseError::InvalidYuvChromaP2TR)?
+		},
 		_ => return Err(Bolt11ParseError::InvalidYuvChromaP2TR)
 	};
 
@@ -850,10 +850,10 @@ mod test {
 	use secp256k1::PublicKey;
 	use bech32::u5;
 	use bitcoin::Network;
-	use bitcoin_hashes::hex::FromHex;
-	use bitcoin_hashes::sha256;
 	use yuv_pixels::Pixel;
 	use lightning::ln::functional_test_utils::new_test_pixel;
+	use bitcoin::hashes::sha256;
+	use std::str::FromStr;
 	use crate::de::hrp_sm::parse_hrp;
 
 	const CHARSET_REV: [i8; 128] = [
@@ -1224,7 +1224,7 @@ mod test {
 					data: RawDataPart {
 						timestamp: PositiveTimestamp::from_unix_timestamp(1496314658).unwrap(),
 						tagged_fields: vec ! [
-							PaymentHash(Sha256(sha256::Hash::from_hex(
+							PaymentHash(Sha256(sha256::Hash::from_str(
 								"0001020304050607080900010203040506070809000102030405060708090102"
 							).unwrap())).into(),
 							Description(

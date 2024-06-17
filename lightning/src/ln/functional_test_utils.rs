@@ -11,16 +11,14 @@
 //! nodes for functional tests.
 
 use crate::chain::{BestBlock, ChannelMonitorUpdateStatus, Confirm, Listen, Watch, chainmonitor::Persist, YuvConfirm};
-use crate::sign::EntropySource;
 use crate::chain::channelmonitor::ChannelMonitor;
 use crate::chain::transaction::OutPoint;
 use crate::events::{ClaimedHTLC, ClosureReason, Event, HTLCDestination, MessageSendEvent, MessageSendEventsProvider, PathFailure, PaymentPurpose, PaymentFailureReason};
 use crate::events::bump_transaction::{BumpTransactionEvent, BumpTransactionEventHandler, Wallet, WalletSource};
-use crate::ln::{ChannelId, PaymentPreimage, PaymentHash, PaymentSecret};
+use crate::ln::chan_utils::make_funding_redeemscript;
+use crate::ln::types::{ChannelId, PaymentPreimage, PaymentHash, PaymentSecret};
 use crate::ln::channelmanager::{AChannelManager, ChainParameters, ChannelManager, ChannelManagerReadArgs, RAACommitmentOrder, PaymentSendFailure, RecipientOnionFields, PaymentId, MIN_CLTV_EXPIRY_DELTA, UpdateBalance};
-use crate::routing::gossip::{P2PGossipSync, NetworkGraph, NetworkUpdate};
-use crate::routing::router::{self, PaymentParameters, Route, RouteParameters};
-use crate::ln::features::{Bolt11InvoiceFeatures, InitFeatures};
+use crate::ln::features::{InitFeatures, Bolt11InvoiceFeatures};
 use crate::ln::msgs;
 use crate::ln::msgs::{ChannelMessageHandler, OnionMessageHandler, RoutingMessageHandler};
 use crate::ln::peer_handler::IgnoringMessageHandler;
@@ -45,7 +43,8 @@ use bitcoin::hash_types::{BlockHash, TxMerkleNode};
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash as _;
 use bitcoin::network::constants::Network;
-use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
+use bitcoin::pow::CompactTarget;
+use bitcoin::secp256k1::{PublicKey, SecretKey, Secp256k1, self};
 
 use alloc::rc::Rc;
 use core::cell::RefCell;
@@ -54,18 +53,11 @@ use core::mem;
 use core::ops::Deref;
 use crate::io;
 use crate::prelude::*;
-use core::cell::RefCell;
-use alloc::rc::Rc;
-use alloc::collections::BTreeMap;
-use crate::sync::{Arc, Mutex, LockTestExt, RwLock};
-use core::mem;
-use core::iter::repeat;
-use bitcoin::{PackedLockTime, secp256k1, TxIn, TxMerkleNode};
 use yuv_pixels::{Chroma, Luma, MultisigPixelProof, Pixel, PixelProof};
-use yuv_types::{YuvTransaction, YuvTxType};
-use crate::chain::chaininterface::YuvBroadcaster;
-use crate::ln::chan_utils::make_funding_redeemscript_from_node_ids;
+use yuv_types::{YuvTransaction, YuvTxType, ProofMap};
+use crate::sync::{Arc, Mutex, LockTestExt, RwLock};
 use crate::ln::channel::{UpdateBalanceRequest, YuvPayment};
+use crate::chain::chaininterface::YuvBroadcaster;
 
 pub const CHAN_CONFIRM_DEPTH: u32 = 10;
 
@@ -1167,7 +1159,7 @@ pub fn _reload_node<'a, 'b, 'c>(node: &'a Node<'a, 'b, 'c>, default_config: User
 macro_rules! reload_node {
 	($node: expr, $new_config: expr, $chanman_encoded: expr, $monitors_encoded: expr, $persister: ident, $new_chain_monitor: ident, $new_channelmanager: ident) => {
 		let chanman_encoded = $chanman_encoded;
-		let yuv_broadcaster = $node.yuv_tx_broadcaster.map(|v| v as &YuvBroadcaster);
+		let yuv_broadcaster = $node.yuv_tx_broadcaster.map(|v| v as &dyn YuvBroadcaster);
 
 		$persister = test_utils::TestPersister::new();
 		$new_chain_monitor = test_utils::TestChainMonitor::new(Some($node.chain_source), $node.tx_broadcaster.clone(), yuv_broadcaster, $node.logger, $node.fee_estimator, &$persister, &$node.keys_manager);
@@ -1282,7 +1274,7 @@ pub fn open_zero_conf_channel<'a, 'b, 'c, 'd>(initiator: &'a Node<'b, 'c, 'd>, r
 	let initiator_channels = initiator.node.list_usable_channels().len();
 	let receiver_channels = receiver.node.list_usable_channels().len();
 
-	initiator.node.create_channel(receiver.node.get_our_node_id(), 100_000, 10_001, 42, None, initiator_config).unwrap();
+	initiator.node.create_channel(receiver.node.get_our_node_id(), 100_000, 10_001, 42, None, None, initiator_config).unwrap();
 	let open_channel = get_event_msg!(initiator, MessageSendEvent::SendOpenChannel, receiver.node.get_our_node_id());
 
 	receiver.node.handle_open_channel(&initiator.node.get_our_node_id(), &open_channel);
@@ -1347,8 +1339,8 @@ pub fn open_zero_conf_channel<'a, 'b, 'c, 'd>(initiator: &'a Node<'b, 'c, 'd>, r
 	(tx, as_channel_ready.channel_id)
 }
 
-pub fn create_chan_between_nodes_with_value_init<'a, 'b, 'c>(node_a: &Node<'a, 'b, 'c>, node_b: &Node<'a, 'b, 'c>, channel_value: u64, push_msat: u64) -> Transaction {
-	let create_chan_id = node_a.node.create_channel(node_b.node.get_our_node_id(), channel_value, push_msat, 42, None, None).unwrap();
+pub fn exchange_open_accept_chan<'a, 'b, 'c>(node_a: &Node<'a, 'b, 'c>, node_b: &Node<'a, 'b, 'c>, channel_value: u64, push_msat: u64) -> ChannelId {
+	let create_chan_id = node_a.node.create_channel(node_b.node.get_our_node_id(), channel_value, push_msat, 42, None, None, None).unwrap();
 	let open_channel_msg = get_event_msg!(node_a, MessageSendEvent::SendOpenChannel, node_b.node.get_our_node_id());
 	assert_eq!(open_channel_msg.common_fields.temporary_channel_id, create_chan_id);
 	assert_eq!(node_a.node.list_channels().iter().find(|channel| channel.channel_id == create_chan_id).unwrap().user_channel_id, 42);
@@ -1470,7 +1462,7 @@ pub fn create_announced_chan_between_nodes_with_value<'a, 'b, 'c: 'd, 'd>(nodes:
 pub fn create_unannounced_chan_between_nodes_with_value<'a, 'b, 'c, 'd>(nodes: &'a Vec<Node<'b, 'c, 'd>>, a: usize, b: usize, channel_value: u64, push_msat: u64) -> (msgs::ChannelReady, Transaction) {
 	let mut no_announce_cfg = test_default_channel_config();
 	no_announce_cfg.channel_handshake_config.announced_channel = false;
-	nodes[a].node.create_channel(nodes[b].node.get_our_node_id(), channel_value, push_msat, 42, None, Some(no_announce_cfg)).unwrap();
+	nodes[a].node.create_channel(nodes[b].node.get_our_node_id(), channel_value, push_msat, 42, None, None, Some(no_announce_cfg)).unwrap();
 	let open_channel = get_event_msg!(nodes[a], MessageSendEvent::SendOpenChannel, nodes[b].node.get_our_node_id());
 	nodes[b].node.handle_open_channel(&nodes[a].node.get_our_node_id(), &open_channel);
 	let accept_channel = get_event_msg!(nodes[b], MessageSendEvent::SendAcceptChannel, nodes[a].node.get_our_node_id());
@@ -1559,11 +1551,11 @@ pub fn update_nodes_with_chan_announce_internal<'a, 'b, 'c, 'd>(
 ) {
 	for node in nodes {
 		if let Some(yuv_pixel) = yuv_pixel {
-			let expected_script = make_funding_redeemscript_from_node_ids(
-				&ann.contents.bitcoin_key_1,
-				&ann.contents.bitcoin_key_2,
+			let expected_script = make_funding_redeemscript(
+				&ann.contents.bitcoin_key_1.as_pubkey().unwrap(),
+				&ann.contents.bitcoin_key_2.as_pubkey().unwrap(),
 				Some(&yuv_pixel),
-			).unwrap().to_v0_p2wsh();
+			).to_v0_p2wsh();
 
 			node.chain_source
 				.set_txout(expected_script, satoshis_value)
@@ -1718,7 +1710,7 @@ macro_rules! check_closed_broadcast {
 	}
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct ExpectedCloseEvent {
 	pub channel_capacity_sats: Option<u64>,
 	pub channel_id: Option<ChannelId>,
@@ -2362,8 +2354,8 @@ pub fn expect_payment_forwarded<CM: AChannelManager, H: NodeHolder<CM=CM>>(
 ) -> Option<u64> {
 	match event {
 		Event::PaymentForwarded {
-			fee_earned_msat, prev_channel_id, claim_from_onchain_tx, next_channel_id,
-			outbound_amount_forwarded_msat: _, ..
+			prev_channel_id, next_channel_id, prev_user_channel_id, next_user_channel_id,
+			total_fee_earned_msat, skimmed_fee_msat, claim_from_onchain_tx, ..
 		} => {
 			if allow_1_msat_fee_overpay {
 				// Aggregating fees for blinded paths may result in a rounding error, causing slight
@@ -3080,7 +3072,7 @@ fn _route_payment<'a, 'b, 'c>(origin_node: &Node<'a, 'b, 'c>, expected_route: &[
 	let invoice_features = if yuv_amount.is_some() {
 		Bolt11InvoiceFeatures::empty()
 	} else {
-		expected_route.last().unwrap().node.invoice_features()
+		expected_route.last().unwrap().node.bolt11_invoice_features()
 	};
 
 	let payment_params = PaymentParameters::from_node_id(expected_route.last().unwrap().node.get_our_node_id(), TEST_FINAL_CLTV)
@@ -3964,7 +3956,10 @@ pub fn create_batch_channel_funding<'a, 'b, 'c>(
 	for (other_node, channel_value_satoshis, push_msat, user_channel_id, override_config) in params {
 		// Initialize channel opening.
 		let temp_chan_id = funding_node.node.create_channel(
-			other_node.node.get_our_node_id(), *channel_value_satoshis, *push_msat, *user_channel_id, None, *override_config,
+			other_node.node.get_our_node_id(), *channel_value_satoshis, *push_msat, *user_channel_id,
+			None,
+			None,
+			*override_config,
 		).unwrap();
 		let open_channel_msg = get_event_msg!(funding_node, MessageSendEvent::SendOpenChannel, other_node.node.get_our_node_id());
 		other_node.node.handle_open_channel(&funding_node.node.get_our_node_id(), &open_channel_msg);
@@ -4100,13 +4095,14 @@ pub fn create_chan_with_yuv_init<'a, 'b, 'c>(
 		42,
 		Some(funding_pixel),
 		None,
+		None,
 	).unwrap();
 	let open_channel_msg = get_event_msg!(
 		node_a,
 		MessageSendEvent::SendOpenChannel,
 		node_b.node.get_our_node_id()
 	);
-	assert_eq!(open_channel_msg.temporary_channel_id, create_chan_id);
+	assert_eq!(open_channel_msg.common_fields.temporary_channel_id, create_chan_id);
 	let user_channel_id = node_a.node.list_channels()
 		.iter()
 		.find(|channel| {
@@ -4114,7 +4110,7 @@ pub fn create_chan_with_yuv_init<'a, 'b, 'c>(
 		}).unwrap()
 		.user_channel_id;
 	assert_eq!(user_channel_id, 42);
-	assert_eq!(open_channel_msg.yuv_pixel, Some(funding_pixel));
+	assert_eq!(open_channel_msg.common_fields.yuv_pixel, Some(funding_pixel));
 
 	node_b.node.handle_open_channel(&node_a.node.get_our_node_id(), &open_channel_msg);
 	if node_b.node.get_current_default_configuration().manually_accept_inbound_channels {
@@ -4135,7 +4131,7 @@ pub fn create_chan_with_yuv_init<'a, 'b, 'c>(
 		MessageSendEvent::SendAcceptChannel,
 		node_a.node.get_our_node_id()
 	);
-	assert_eq!(accept_channel_msg.temporary_channel_id, create_chan_id);
+	assert_eq!(accept_channel_msg.common_fields.temporary_channel_id, create_chan_id);
 
 	node_a.node.handle_accept_channel(&node_b.node.get_our_node_id(), &accept_channel_msg);
 	let user_channel_id = node_b.node.list_channels()
@@ -4291,13 +4287,13 @@ fn create_yuv_funding_transaction<'a, 'b, 'c>(
 			);
 			let script_pubkey = multisig_proof.to_script_pubkey();
 
-			let mut output_proofs = BTreeMap::new();
+			let mut output_proofs = ProofMap::new();
 			output_proofs.insert(0, multisig_proof.into());
 
 			let yuv_tx = YuvTransaction {
 				bitcoin_tx: Transaction {
 					version: chan_id as i32,
-					lock_time: PackedLockTime::ZERO,
+					lock_time: LockTime::ZERO,
 					input,
 					output: vec![TxOut {
 						value: *channel_value_satoshis,
@@ -4424,8 +4420,8 @@ pub fn close_yuv_channel<'a, 'b, 'c>(
 	// UpdateMonitor with update shutdown script due to YUV payments.
 	check_added_monitors!(node_a, 1);
 
-	let yuv_payment_details_a = node_a.node.get_channel_yuv_payment_details(channel_id).unwrap();
-	let yuv_payment_details_b = node_b.node.get_channel_yuv_payment_details(channel_id).unwrap();
+	let yuv_payment_details_a = node_a.node.get_channel_yuv_payment_details(channel_id, node_b.node.get_our_node_id()).unwrap();
+	let yuv_payment_details_b = node_b.node.get_channel_yuv_payment_details(channel_id, node_a.node.get_our_node_id()).unwrap();
 
 	assert_eq!(
 		yuv_payment_details_a.holder_shutdown_inner_key.unwrap(),

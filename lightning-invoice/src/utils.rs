@@ -368,7 +368,7 @@ pub fn create_yuv_invoice_from_channelmanager_and_duration_since_epoch<M: Deref,
 	invoice_expiry_delta_secs: u32, min_final_cltv_expiry_delta: Option<u16>, yuv_pixel: Pixel,
 ) -> Result<Bolt11Invoice, SignOrCreationError<()>>
 	where
-		M::Target: chain::Watch<<SP::Target as SignerProvider>::Signer>,
+		M::Target: chain::Watch<<SP::Target as SignerProvider>::EcdsaSigner>,
 		T::Target: BroadcasterInterface,
 		YT::Target: YuvBroadcaster,
 		ES::Target: EntropySource,
@@ -440,16 +440,16 @@ pub fn create_invoice_from_channelmanager_with_description_hash_and_duration_sin
 	network: Currency, amt_msat: Option<u64>, description_hash: Sha256,
 	duration_since_epoch: Duration, invoice_expiry_delta_secs: u32, min_final_cltv_expiry_delta: Option<u16>,
 ) -> Result<Bolt11Invoice, SignOrCreationError<()>>
-where
-	M::Target: chain::Watch<<SP::Target as SignerProvider>::Signer>,
-	T::Target: BroadcasterInterface,
-	YT::Target: YuvBroadcaster,
-	ES::Target: EntropySource,
-	NS::Target: NodeSigner,
-	SP::Target: SignerProvider,
-	F::Target: FeeEstimator,
-	R::Target: Router,
-	L::Target: Logger,
+		where
+			M::Target: chain::Watch<<SP::Target as SignerProvider>::EcdsaSigner>,
+			T::Target: BroadcasterInterface,
+			YT::Target: YuvBroadcaster,
+			ES::Target: EntropySource,
+			NS::Target: NodeSigner,
+			SP::Target: SignerProvider,
+			F::Target: FeeEstimator,
+			R::Target: Router,
+			L::Target: Logger,
 {
 	_create_invoice_from_channelmanager_and_duration_since_epoch(
 		channelmanager, node_signer, logger, network, amt_msat,
@@ -1213,7 +1213,7 @@ mod test {
 		// is never handled, the `channel.counterparty.forwarding_info` is never assigned.
 		let mut private_chan_cfg = UserConfig::default();
 		private_chan_cfg.channel_handshake_config.announced_channel = false;
-		let temporary_channel_id = nodes[2].node.create_channel(nodes[0].node.get_our_node_id(), 1_000_000, 500_000_000, 42, None, Some(private_chan_cfg)).unwrap();
+		let temporary_channel_id = nodes[2].node.create_channel(nodes[0].node.get_our_node_id(), 1_000_000, 500_000_000, 42, None, None, Some(private_chan_cfg)).unwrap();
 		let open_channel = get_event_msg!(nodes[2], MessageSendEvent::SendOpenChannel, nodes[0].node.get_our_node_id());
 		nodes[0].node.handle_open_channel(&nodes[2].node.get_our_node_id(), &open_channel);
 		let accept_channel = get_event_msg!(nodes[0], MessageSendEvent::SendAcceptChannel, nodes[2].node.get_our_node_id());
@@ -1621,7 +1621,7 @@ mod test {
 		// is never handled, the `channel.counterparty.forwarding_info` is never assigned.
 		let mut private_chan_cfg = UserConfig::default();
 		private_chan_cfg.channel_handshake_config.announced_channel = false;
-		let temporary_channel_id = nodes[1].node.create_channel(nodes[3].node.get_our_node_id(), 1_000_000, 500_000_000, 42, None, Some(private_chan_cfg)).unwrap();
+		let temporary_channel_id = nodes[1].node.create_channel(nodes[3].node.get_our_node_id(), 1_000_000, 500_000_000, 42, None, None, Some(private_chan_cfg)).unwrap();
 		let open_channel = get_event_msg!(nodes[1], MessageSendEvent::SendOpenChannel, nodes[3].node.get_our_node_id());
 		nodes[3].node.handle_open_channel(&nodes[1].node.get_our_node_id(), &open_channel);
 		let accept_channel = get_event_msg!(nodes[3], MessageSendEvent::SendAcceptChannel, nodes[1].node.get_our_node_id());

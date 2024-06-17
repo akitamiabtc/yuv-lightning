@@ -2811,7 +2811,7 @@ fn do_test_monitor_claims_with_random_signatures(anchors: bool, confirm_counterp
 	};
 
 	get_monitor!(closing_node, chan_id).broadcast_latest_holder_commitment_txn(
-		&closing_node.tx_broadcaster, &closing_node.fee_estimator, &closing_node.logger
+		&closing_node.tx_broadcaster, closing_node.yuv_tx_broadcaster, &closing_node.fee_estimator, &closing_node.logger
 	);
 
 	// The commitment transaction comes first.
