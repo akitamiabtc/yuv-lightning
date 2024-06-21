@@ -1,3 +1,7 @@
+# 0.2.1+lightning-0.0.123 - Jun 21, 2024
+
+* Some changes for LND compatibility
+
 # 0.2.0+lightning-0.0.123 - Jun 12, 2024
 
 * Merged the latest rust-lightning changes. See CHANGELOG.md 

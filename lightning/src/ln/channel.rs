@@ -86,7 +86,7 @@ pub struct AvailableBalances {
 
 /// The result message if [`Channel::closing_signed`] is successful.
 #[derive(Clone, Default)]
-pub struct ClosingSignedResult {
+pub(crate) struct ClosingSignedResult {
 	/// The protocol's message to send to the remote peer.
 	pub msg: Option<msgs::ClosingSigned>,
 	/// The closing transaction to broadcast to the chain.
@@ -7604,19 +7604,15 @@ impl<SP: Deref> Channel<SP> where
 		let counterparty_node_id = NodeId::from_pubkey(&self.context.get_counterparty_node_id());
 		let were_node_one = node_id.as_slice() < counterparty_node_id.as_slice();
 
-		let mut features = channelmanager::provided_channel_features(&user_config);
-		if self.context.yuv_payment.is_some() {
-			features.set_yuv_payments_optional();
-		}
-
 		let msg = msgs::UnsignedChannelAnnouncement {
-			features,
+			features: channelmanager::provided_channel_features(&user_config),
 			chain_hash,
 			short_channel_id,
 			node_id_1: if were_node_one { node_id } else { counterparty_node_id },
 			node_id_2: if were_node_one { counterparty_node_id } else { node_id },
 			bitcoin_key_1: NodeId::from_pubkey(if were_node_one { &self.context.get_holder_pubkeys().funding_pubkey } else { self.context.counterparty_funding_pubkey() }),
 			bitcoin_key_2: NodeId::from_pubkey(if were_node_one { self.context.counterparty_funding_pubkey() } else { &self.context.get_holder_pubkeys().funding_pubkey }),
+			is_yuv_payments_supported: self.context.yuv_payment.is_some(),
 			excess_data: Vec::new(),
 		};
 

@@ -26,8 +26,8 @@ secp256k1 = { version = "0.27.0", default-features = false, features = ["recover
 serde = { version = "1.0.118", optional = true }
 bitcoin = { version = "0.30.2", default-features = false }
 
-yuv-pixels = { git = "https://github.com/akitamiabtc/yuv.git", tag = "v0.3.1", default-features = false }
-yuv-types  = { git = "https://github.com/akitamiabtc/yuv.git", tag = "v0.3.1", default-features = false }
+yuv-pixels = { git = "https://github.com/akitamiabtc/yuv.git", tag = "v0.3.2", default-features = false }
+yuv-types  = { git = "https://github.com/akitamiabtc/yuv.git", tag = "v0.3.2", default-features = false }
 
 [dev-dependencies]
 lightning = { version = "0.2.0", path = "../lightning", default-features = false, features = ["_test_utils"] }

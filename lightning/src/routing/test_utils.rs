@@ -42,7 +42,7 @@ pub(super) fn add_channel_internal(
 	secp_ctx: &Secp256k1<All>,
 	node_1_privkey: &SecretKey,
 	node_2_privkey: &SecretKey,
-	mut features: ChannelFeatures,
+	features: ChannelFeatures,
 	short_channel_id: u64,
 	yuv_pixel: Option<Pixel>,
 	chain_source: Option<Arc<test_utils::TestChainSource>>,
@@ -61,7 +61,6 @@ pub(super) fn add_channel_internal(
 	}
 
 	if let Some(yuv_pixel) = yuv_pixel {
-		features.set_yuv_payments_required();
 		chain_source.as_ref().map(|chain_source| chain_source.set_yuv_pixel(yuv_pixel));
 	}
 
@@ -73,6 +72,7 @@ pub(super) fn add_channel_internal(
 		node_id_2,
 		bitcoin_key_1: node_id_1,
 		bitcoin_key_2: node_id_2,
+		is_yuv_payments_supported: yuv_pixel.is_some(),
 		excess_data: Vec::new(),
 	};
 

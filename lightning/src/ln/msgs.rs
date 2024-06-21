@@ -1229,6 +1229,8 @@ pub struct UnsignedChannelAnnouncement {
 	pub bitcoin_key_1: NodeId,
 	/// The funding key for the second node
 	pub bitcoin_key_2: NodeId,
+	/// The flag that indicates if the YUV payments are used for the announced channel.
+	pub is_yuv_payments_supported: bool,
 	/// Excess data which was signed as a part of the message which we do not (yet) understand how
 	/// to decode.
 	///
@@ -2872,14 +2874,22 @@ impl Writeable for UnsignedChannelAnnouncement {
 		self.node_id_2.write(w)?;
 		self.bitcoin_key_1.write(w)?;
 		self.bitcoin_key_2.write(w)?;
+
+		if self.is_yuv_payments_supported {
+			write_tlv_fields!(w, {
+				(201, Some(true), option),
+			});
+		}
+
 		w.write_all(&self.excess_data[..])?;
+
 		Ok(())
 	}
 }
 
 impl Readable for UnsignedChannelAnnouncement {
 	fn read<R: Read>(r: &mut R) -> Result<Self, DecodeError> {
-		Ok(Self {
+		let mut result = Self {
 			features: Readable::read(r)?,
 			chain_hash: Readable::read(r)?,
 			short_channel_id: Readable::read(r)?,
@@ -2887,8 +2897,40 @@ impl Readable for UnsignedChannelAnnouncement {
 			node_id_2: Readable::read(r)?,
 			bitcoin_key_1: Readable::read(r)?,
 			bitcoin_key_2: Readable::read(r)?,
-			excess_data: read_to_end(r)?,
-		})
+			is_yuv_payments_supported: false,
+			excess_data: Vec::new(),
+		};
+
+		let mut excess_data  = Vec::new();
+		r.read_to_end(&mut excess_data)?;
+
+		if !excess_data.is_empty() {
+			// We don't handle error here, because if it happened we don't know what is in the
+			// excess_data.
+			if result.try_read_excess_data(excess_data.clone()).is_err() {
+				result.excess_data = excess_data;
+			}
+		}
+
+		Ok(result)
+	}
+}
+
+impl UnsignedChannelAnnouncement {
+	/// As the `UnsignedChannelAnnouncement`, accordingly to the BOLTs, doesn't have TLV fields we
+	/// need just to TRY read the excess_data, because we aren't sure if it's data that is related
+	/// to another protocol.
+	fn try_read_excess_data(&mut self, mut excess_data: Vec<u8>) -> Result<(), DecodeError> {
+		let mut r = Cursor::new(&mut excess_data);
+
+		let mut is_yuv_payments_supported: Option<bool> = None;
+		read_tlv_fields!(&mut r, {
+			(201, is_yuv_payments_supported, option),
+		});
+
+		self.is_yuv_payments_supported = is_yuv_payments_supported.unwrap_or(false);
+
+		Ok(())
 	}
 }
 
@@ -2899,10 +2941,6 @@ impl_writeable!(ChannelAnnouncement, {
 	bitcoin_signature_2,
 	contents
 });
-
-/// This prefix is needed to determine if the `UnsignedChannelUpdate` was sent by the node that
-/// supports YUV payments feature, and excess data contains the YUV amount.
-const YUV_UNSIGNED_CHANNEL_UPDATE_PREFIX: [u8; 4] = *b"yuv-";
 
 impl Writeable for UnsignedChannelUpdate {
 	fn write<W: Writer>(&self, w: &mut W) -> Result<(), io::Error> {
@@ -2920,8 +2958,9 @@ impl Writeable for UnsignedChannelUpdate {
 		self.htlc_maximum_msat.write(w)?;
 
 		if self.htlc_maximum_yuv.is_some() {
-			YUV_UNSIGNED_CHANNEL_UPDATE_PREFIX.write(w)?;
-			self.htlc_maximum_yuv.write(w)?;
+			write_tlv_fields!(w, {
+				(201, self.htlc_maximum_yuv, option),
+			});
 		}
 
 		w.write_all(&self.excess_data[..])?;
@@ -2956,7 +2995,9 @@ impl Readable for UnsignedChannelUpdate {
 		if !excess_data.is_empty() {
 			// We don't handle error here, because if it happened we don't know what is in the
 			// excess_data.
-			let _ = result.try_read_yuv_excess_data(excess_data);
+			if result.try_read_excess_data(excess_data.clone()).is_err() {
+				result.excess_data = excess_data;
+			}
 		}
 
 		Ok(result)
@@ -2967,17 +3008,15 @@ impl UnsignedChannelUpdate {
 	/// As the `UnsignedChannelUpdate`, accordingly to the BOLTs, doesn't have TLV fields we need
 	/// just to TRY read the excess_data, because we aren't sure if it's data that is related to
 	/// another protocol.
-	fn try_read_yuv_excess_data(&mut self, mut excess_data: Vec<u8>) -> Result<(), DecodeError> {
+	fn try_read_excess_data(&mut self, mut excess_data: Vec<u8>) -> Result<(), DecodeError> {
 		let mut r = Cursor::new(&mut excess_data);
 
-		let prefix: [u8;4] = Readable::read(&mut r)?;
-		if prefix == YUV_UNSIGNED_CHANNEL_UPDATE_PREFIX {
-			self.htlc_maximum_yuv = Readable::read(&mut r)?;
-			self.excess_data = read_to_end(&mut r)?;
-			return Ok(());
-		}
+		let mut htlc_maximum_yuv_opt: Option<u128> = None;
+		read_tlv_fields!(&mut r, {
+			(201, htlc_maximum_yuv_opt, option),
+		});
 
-		self.excess_data = excess_data;
+		self.htlc_maximum_yuv = htlc_maximum_yuv_opt;
 
 		Ok(())
 	}
@@ -3428,6 +3467,7 @@ mod tests {
 			node_id_2: NodeId::from_pubkey(&pubkey_2),
 			bitcoin_key_1: NodeId::from_pubkey(&pubkey_3),
 			bitcoin_key_2: NodeId::from_pubkey(&pubkey_4),
+			is_yuv_payments_supported: false,
 			excess_data: if excess_data { vec![10, 0, 0, 20, 0, 0, 30, 0, 0, 40] } else { Vec::new() },
 		};
 		let channel_announcement = msgs::ChannelAnnouncement {
@@ -3606,7 +3646,7 @@ mod tests {
 		target_value.append(&mut <Vec<u8>>::from_hex("009000000000000f42400000271000000014").unwrap());
 		target_value.append(&mut <Vec<u8>>::from_hex("0000777788889999").unwrap());
 		if yuv_pixel {
-			target_value.append(&mut <Vec<u8>>::from_hex("7975762d110000000000000000002bdc546291f4b1").unwrap());
+			target_value.append(&mut <Vec<u8>>::from_hex("12c9100000000000000000002bdc546291f4b1").unwrap());
 		}
 		if excess_data {
 			target_value.append(&mut <Vec<u8>>::from_hex("000000003b9aca00").unwrap());

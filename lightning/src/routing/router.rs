@@ -4141,7 +4141,7 @@ mod tests {
 		assert_eq!(route.paths[0].hops[0].fee_msat, 200);
 		assert_eq!(route.paths[0].hops[0].cltv_expiry_delta, (13 << 4) | 1);
 		assert_eq!(route.paths[0].hops[0].node_features.le_flags(), &vec![0b11]); // it should also override our view of their features
-		assert_eq!(route.paths[0].hops[0].channel_features.le_flags(), &[0; 1]); // No feature flags will meet the relevant-to-channel conversion
+		assert_eq!(route.paths[0].hops[0].channel_features.le_flags(), &Vec::<u8>::new()); // No feature flags will meet the relevant-to-channel conversion
 
 		assert_eq!(route.paths[0].hops[1].pubkey, nodes[2]);
 		assert_eq!(route.paths[0].hops[1].short_channel_id, 13);
@@ -4188,7 +4188,7 @@ mod tests {
 		assert_eq!(route.paths[0].hops[0].fee_msat, 200);
 		assert_eq!(route.paths[0].hops[0].cltv_expiry_delta, (13 << 4) | 1);
 		assert_eq!(route.paths[0].hops[0].node_features.le_flags(), &vec![0b11]); // it should also override our view of their features
-		assert_eq!(route.paths[0].hops[0].channel_features.le_flags(), &[0; 1]); // No feature flags will meet the relevant-to-channel conversion
+		assert_eq!(route.paths[0].hops[0].channel_features.le_flags(), &Vec::<u8>::new()); // No feature flags will meet the relevant-to-channel conversion
 
 		assert_eq!(route.paths[0].hops[1].pubkey, nodes[2]);
 		assert_eq!(route.paths[0].hops[1].short_channel_id, 13);
@@ -4253,7 +4253,7 @@ mod tests {
 		assert_eq!(route.paths[0].hops[0].fee_msat, 200);
 		assert_eq!(route.paths[0].hops[0].cltv_expiry_delta, (13 << 4) | 1);
 		assert_eq!(route.paths[0].hops[0].node_features.le_flags(), &vec![0b11]);
-		assert_eq!(route.paths[0].hops[0].channel_features.le_flags(), &[0; 1]); // No feature flags will meet the relevant-to-channel conversion
+		assert_eq!(route.paths[0].hops[0].channel_features.le_flags(), &Vec::<u8>::new()); // No feature flags will meet the relevant-to-channel conversion
 
 		assert_eq!(route.paths[0].hops[1].pubkey, nodes[2]);
 		assert_eq!(route.paths[0].hops[1].short_channel_id, 13);
@@ -4809,7 +4809,7 @@ mod tests {
 		assert_eq!(route.paths[0].hops[0].fee_msat, 0);
 		assert_eq!(route.paths[0].hops[0].cltv_expiry_delta, (8 << 4) | 1);
 		assert_eq!(route.paths[0].hops[0].node_features.le_flags(), &vec![0b11]);
-		assert_eq!(route.paths[0].hops[0].channel_features.le_flags(), &[0; 1]); // No feature flags will meet the relevant-to-channel conversion
+		assert_eq!(route.paths[0].hops[0].channel_features.le_flags(), &Vec::<u8>::new()); // No feature flags will meet the relevant-to-channel conversion
 
 		assert_eq!(route.paths[0].hops[1].pubkey, nodes[6]);
 		assert_eq!(route.paths[0].hops[1].short_channel_id, 8);
@@ -4951,7 +4951,7 @@ mod tests {
 		assert_eq!(route.paths[0].hops[0].fee_msat, 1001);
 		assert_eq!(route.paths[0].hops[0].cltv_expiry_delta, (8 << 4) | 1);
 		assert_eq!(route.paths[0].hops[0].node_features.le_flags(), &[0b11]);
-		assert_eq!(route.paths[0].hops[0].channel_features.le_flags(), &[0; 1]); // We can't learn any flags from invoices, sadly
+		assert_eq!(route.paths[0].hops[0].channel_features.le_flags(), &[0; 0]); // We can't learn any flags from invoices, sadly
 
 		assert_eq!(route.paths[0].hops[1].pubkey, target_node_id);
 		assert_eq!(route.paths[0].hops[1].short_channel_id, 8);

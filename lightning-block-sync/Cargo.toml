@@ -25,9 +25,9 @@ lightning = { version = "0.2.0", path = "../lightning" }
 tokio = { version = "1.35", features = [ "io-util", "net", "time", "rt" ], optional = true }
 serde_json = { version = "1.0", optional = true }
 chunked_transfer = { version = "1.4", optional = true }
-yuv-pixels = { git = "https://github.com/akitamiabtc/yuv.git", tag = "v0.3.1", default-features = false, features = ["std"] }
-yuv-types = { git = "https://github.com/akitamiabtc/yuv.git", tag = "v0.3.1", default-features = false, features = ["std"] }
-yuv-rpc-api = { git = "https://github.com/akitamiabtc/yuv.git", tag = "v0.3.1", default-features = false }
+yuv-pixels = { git = "https://github.com/akitamiabtc/yuv.git", tag = "v0.3.2", default-features = false, features = ["std"] }
+yuv-types = { git = "https://github.com/akitamiabtc/yuv.git", tag = "v0.3.2", default-features = false, features = ["std"] }
+yuv-rpc-api = { git = "https://github.com/akitamiabtc/yuv.git", tag = "v0.3.2", default-features = false }
 
 [dev-dependencies]
 lightning = { version = "0.2.0", path = "../lightning", features = ["_test_utils"] }

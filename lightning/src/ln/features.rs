@@ -188,32 +188,7 @@ mod sealed {
 		// Byte 7
 		Trampoline,
 	]);
-	define_context!(ChannelContext, [
-		// Byte 0
-		,
-		// Byte 1,
-		,
-		// Byte 2
-		,
-		// Byte 3
-		,
-		// Byte 4
-		,
-		// Byte 5
-		,
-		// Byte 6
-		,
-		// Byte 7
-		,
-		// Byte 8
-		,
-		// Byte 9
-		,
-		// Byte 10
-		,
-		// Byte 11
-		YuvPayments,
-	]);
+	define_context!(ChannelContext, []);
 	define_context!(Bolt11InvoiceContext, [
 		// Byte 0
 		,
@@ -470,7 +445,7 @@ mod sealed {
 		"Feature flags for Trampoline routing.", set_trampoline_routing_optional, set_trampoline_routing_required,
 		supports_trampoline_routing, requires_trampoline_routing);
 
-	define_feature!(89, YuvPayments, [InitContext, ChannelContext],
+	define_feature!(89, YuvPayments, [InitContext],
 		"Feature flags for YUV payments.", set_yuv_payments_optional, set_yuv_payments_required,
 		supports_yuv_payments, requires_yuv_payments);
 	// Note: update the module-level docs when a new feature bit is added!
@@ -1174,13 +1149,13 @@ mod tests {
 	#[test]
 	fn convert_to_context_with_unknown_flags() {
 		// Ensure the `from` context has fewer known feature bytes than the `to` context.
-		assert!(<sealed::Bolt11InvoiceContext as sealed::Context>::KNOWN_FEATURE_MASK.len() <
-			<sealed::ChannelContext as sealed::Context>::KNOWN_FEATURE_MASK.len());
-		let mut invoice_features = Bolt11InvoiceFeatures::empty();
-		invoice_features.set_unknown_feature_optional();
-		assert!(invoice_features.supports_unknown_bits());
-		let channel_features: ChannelFeatures = invoice_features.to_context_internal();
-		assert!(!channel_features.supports_unknown_bits());
+		assert!(<sealed::ChannelContext as sealed::Context>::KNOWN_FEATURE_MASK.len() <
+			<sealed::Bolt11InvoiceContext as sealed::Context>::KNOWN_FEATURE_MASK.len());
+		let mut channel_features = ChannelFeatures::empty();
+		channel_features.set_unknown_feature_optional();
+		assert!(channel_features.supports_unknown_bits());
+		let invoice_features: Bolt11InvoiceFeatures = channel_features.to_context_internal();
+		assert!(!invoice_features.supports_unknown_bits());
 	}
 
 	#[test]

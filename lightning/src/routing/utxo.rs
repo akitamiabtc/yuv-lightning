@@ -602,7 +602,7 @@ impl PendingChecks {
 				Ok(CheckAnnouncementResult::none())
 			},
 			&Some(ref utxo_lookup) => {
-				let utxo = if msg.features.supports_yuv_payments() {
+				let utxo = if msg.is_yuv_payments_supported {
 					utxo_lookup.get_utxo_with_yuv(&msg.chain_hash, msg.short_channel_id)
 				} else {
 					utxo_lookup.get_utxo(&msg.chain_hash, msg.short_channel_id)

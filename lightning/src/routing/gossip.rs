@@ -2296,6 +2296,7 @@ pub(crate) mod tests {
 			node_id_2: NodeId::from_pubkey(&node_id_2),
 			bitcoin_key_1: NodeId::from_pubkey(&PublicKey::from_secret_key(&secp_ctx, node_1_btckey)),
 			bitcoin_key_2: NodeId::from_pubkey(&PublicKey::from_secret_key(&secp_ctx, node_2_btckey)),
+			is_yuv_payments_supported: false,
 			excess_data: Vec::new(),
 		};
 		f(&mut unsigned_announcement);
@@ -3525,7 +3526,7 @@ pub(crate) mod tests {
 		assert_eq!(chan_info_some_updates, read_chan_info);
 
 		// Check the serialization hasn't changed.
-		let legacy_chan_info_with_some: Vec<u8> = <Vec<u8>>::from_hex("d10009000700000000000000010800000000000156660221027f921585f2ac0c7c70e36110adecfd8fd14b8a99bfb3d000a283fcac358fce88043636340004000000170201010402002a060800000000000004d2080909000000000000162e0a0d0c00040000000902040000000a0c010006210355f8d2238a322d16b602bd0ceaad5b01019fb055971eaadcc9b29226a4da6c23083636340004000000170201010402002a060800000000000004d2080909000000000000162e0a0d0c00040000000902040000000a0c01000a01000c0100").unwrap();
+		let legacy_chan_info_with_some: Vec<u8> = <Vec<u8>>::from_hex("ca00020000010800000000000156660221027f921585f2ac0c7c70e36110adecfd8fd14b8a99bfb3d000a283fcac358fce88043636340004000000170201010402002a060800000000000004d2080909000000000000162e0a0d0c00040000000902040000000a0c010006210355f8d2238a322d16b602bd0ceaad5b01019fb055971eaadcc9b29226a4da6c23083636340004000000170201010402002a060800000000000004d2080909000000000000162e0a0d0c00040000000902040000000a0c01000a01000c0100").unwrap();
 		assert_eq!(encoded_chan_info, legacy_chan_info_with_some);
 
 		// Check we can decode legacy ChannelInfo, even if the `two_to_one` / `one_to_two` /

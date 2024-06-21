@@ -47,8 +47,8 @@ possiblyrandom = { version = "0.2", optional = true, default-features = false }
 hex = { package = "hex-conservative", version = "0.1.1", default-features = false }
 regex = { version = "1.5.6", optional = true }
 backtrace = { version = "0.3", optional = true }
-yuv-pixels = { git = "https://github.com/akitamiabtc/yuv.git", tag = "v0.3.1", default-features = false }
-yuv-types  = { git = "https://github.com/akitamiabtc/yuv.git", tag = "v0.3.1", default-features = false }
+yuv-pixels = { git = "https://github.com/akitamiabtc/yuv.git", tag = "v0.3.2", default-features = false }
+yuv-types  = { git = "https://github.com/akitamiabtc/yuv.git", tag = "v0.3.2", default-features = false }
 
 core2 = { version = "0.3.0", optional = true, default-features = false }
 libm = { version = "0.2", optional = true, default-features = false }
