@@ -425,7 +425,9 @@ pub fn parse_pixel_from_hrp(
 	let chroma_p2tr = Address::from_str(&yuv_chroma_raw)
 		.map_err(|_| Bolt11ParseError::InvalidYuvChromaP2TR)?;
 
-	if chroma_p2tr.network != expected_network {
+	let actual_network = chroma_p2tr.network;
+	let is_signet = expected_network == Network::Signet && actual_network == Network::Testnet;
+	if actual_network != expected_network && !is_signet {
 		return Err(Bolt11ParseError::InvalidYuvChromaP2TR)
 	}
 

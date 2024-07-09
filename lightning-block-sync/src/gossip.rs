@@ -17,7 +17,7 @@ use lightning::routing::utxo::{UtxoEntry, UtxoFuture, UtxoLookup, UtxoLookupErro
 use lightning::util::logger::Logger;
 
 use yuv_pixels::Pixel;
-use yuv_rpc_api::transactions::GetRawYuvTransactionResponse;
+use yuv_rpc_api::transactions::{GetRawYuvTransactionResponseHex, YuvTransactionStatus as TxStatus};
 
 use std::sync::{Arc, Mutex};
 use std::collections::VecDeque;
@@ -53,7 +53,7 @@ pub trait UtxoSource : BlockSource + 'static {
 /// A trait for fetching transactions from YUV node
 pub trait YuvTransactionSource: Send + Sync + 'static {
 	/// Fetches the transaction with the given txid.
-	fn yuv_transaction_by_id<'a>(&'a self, txid: &'a Txid) -> AsyncYuvSourceResult<'a, GetRawYuvTransactionResponse>;
+	fn yuv_transaction_by_id<'a>(&'a self, txid: &'a Txid) -> AsyncYuvSourceResult<'a, GetRawYuvTransactionResponseHex>;
 }
 
 /// A generic trait which is able to spawn futures in the background.
@@ -324,16 +324,14 @@ impl<S: FutureSpawner,
 	/// is not attached yet inside YUV node.
 	async fn fetch_pixel(yuv_source: YS, OutPoint { txid, vout }: OutPoint) -> Result<Option<Pixel>, UtxoLookupError> {
 		let response = yuv_source.yuv_transaction_by_id(&txid).await.map_err(|_| UtxoLookupError::UnknownTx)?;
-
-		use GetRawYuvTransactionResponse as TxStatus;
-		let tx = match response {
+		let tx = match response.status {
 			// If the transaction is not found, we can't look up the pixel
 			TxStatus::None => return Err(UtxoLookupYuvError::NoPixelAttached.into()),
-			// If the transaction is pending or checked, we can't look up the
-			// pixel, but it exists, so we may need to retry a little bit later
-			TxStatus::Pending | TxStatus::Checked => return Ok(None),
 			// If the transaction is attached, we can look up the pixel
-			TxStatus::Attached(tx) => tx,
+			TxStatus::Attached => response.data.ok_or(UtxoLookupYuvError::NoPixelAttached)?,
+			// If the transaction is initialized, pending, waiting mined, mined, or attaching, we can't look up the
+			// pixel, but it exists, so we may need to retry a little bit later
+			TxStatus::Initialized | TxStatus::Pending | TxStatus::WaitingMined | TxStatus::Mined | TxStatus::Attaching => return Ok(None),
 		};
 
 		let pixel = tx.tx_type

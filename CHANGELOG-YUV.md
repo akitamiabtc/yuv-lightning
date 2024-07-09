@@ -1,6 +1,16 @@
-# 0.2.1+lightning-0.0.123 - Jun 21, 2024
+# 0.3.0+lightning-0.0.123 - Jul 09, 2024
 
-* Some changes for LND compatibility
+## API Updates
+
+* Use TLV for the excess_data in the ChannelAnnouncement message.
+* Remove the YuvPayments feature from the ChannelContext.
+* Add the rust-toolchain.toml file where the Rust v1.78.0 version is locked.
+* Update the YUV dependencies versions.
+
+## Backwards Compatibility
+
+The nodes of this version are not compatible with the nodes of the previous
+versions in case of using the YUV payments with public channels.
 
 # 0.2.0+lightning-0.0.123 - Jun 12, 2024
 

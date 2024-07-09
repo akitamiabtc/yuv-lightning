@@ -7,7 +7,7 @@ use crate::gossip::{UtxoSource, YuvTransactionSource};
 
 use bitcoin::hash_types::BlockHash;
 use bitcoin::{OutPoint, Txid};
-use yuv_rpc_api::transactions::GetRawYuvTransactionResponse;
+use yuv_rpc_api::transactions::GetRawYuvTransactionResponseHex;
 
 use std::sync::Mutex;
 
@@ -160,9 +160,9 @@ impl UtxoSource for RpcClient {
 	}
 }
 
-struct YuvTransactionWrapper(GetRawYuvTransactionResponse);
+struct YuvTransactionWrapper(GetRawYuvTransactionResponseHex);
 
-impl From<YuvTransactionWrapper> for GetRawYuvTransactionResponse {
+impl From<YuvTransactionWrapper> for GetRawYuvTransactionResponseHex {
 	fn from(wrapper: YuvTransactionWrapper) -> Self {
 		wrapper.0
 	}
@@ -188,7 +188,7 @@ impl TryFrom<JsonResponse> for YuvTransactionWrapper {
 }
 
 impl YuvTransactionSource for RpcClient {
-	fn yuv_transaction_by_id<'a>(&'a self, txid: &'a Txid) -> AsyncYuvSourceResult<'a, GetRawYuvTransactionResponse> {
+	fn yuv_transaction_by_id<'a>(&'a self, txid: &'a Txid) -> AsyncYuvSourceResult<'a, GetRawYuvTransactionResponseHex> {
 		Box::pin(async move {
 			let txid_param = serde_json::json!(txid.to_string());
 
