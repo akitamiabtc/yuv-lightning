@@ -62,7 +62,7 @@ use core::{cmp, mem};
 use crate::io::{self, Error};
 use core::ops::Deref;
 use alloc::collections::BTreeMap;
-use yuv_pixels::{Luma, Pixel, PixelProof, Tweakable};
+use yuv_pixels::{Luma, MultisigPixelProof, Pixel, PixelProof, Tweakable};
 use yuv_types::{YuvTransaction, YuvTxType};
 use crate::sync::{Mutex, LockTestExt};
 
@@ -3349,10 +3349,13 @@ impl<Signer: WriteableEcdsaChannelSigner> ChannelMonitorImpl<Signer> {
 		let channel_parameters =
 			&self.onchain_tx_handler.channel_transaction_parameters.as_counterparty_broadcastable();
 
+		let funding_yuv_pixel_proof = self.get_funding_yuv_pixel_proof();
+
 		CommitmentTransaction::new_with_auxiliary_htlc_data(commitment_number,
 			to_broadcaster_value, to_countersignatory_value, broadcaster_funding_key,
 			countersignatory_funding_key, keys, feerate_per_kw, &mut nondust_htlcs,
-			channel_parameters, to_broadcaster_yuv_pixel, to_countersignatory_yuv_pixel, None)
+			channel_parameters, to_broadcaster_yuv_pixel, to_countersignatory_yuv_pixel,
+			funding_yuv_pixel_proof)
 	}
 
 	fn counterparty_commitment_txs_from_update(&self, update: &ChannelMonitorUpdate) -> Vec<CommitmentTransaction> {
@@ -3633,8 +3636,8 @@ impl<Signer: WriteableEcdsaChannelSigner> ChannelMonitorImpl<Signer> {
 			}
 
 			for mut justice_package in justice_packages {
-				if let Some(funding_yuv_pixel) = self.funding_yuv_pixel {
-					let input_proofs = self.get_funding_yuv_pixel_proof(funding_yuv_pixel);
+				if let Some(funding_pixel_proof) = self.get_funding_yuv_pixel_proof() {
+					let input_proofs = BTreeMap::from([(0, funding_pixel_proof.into())]);
 					let output_proofs = output_proofs.clone()
 						.expect("always presented when funding pixel is presented");
 
@@ -4989,24 +4992,21 @@ impl<Signer: WriteableEcdsaChannelSigner> ChannelMonitorImpl<Signer> {
 		}
 	}
 
-	fn get_funding_yuv_pixel_proof(&self, funding_yuv_pixel: Pixel) -> BTreeMap<u32, PixelProof> {
+	fn get_funding_yuv_pixel_proof(&self) -> Option<MultisigPixelProof> {
+		let funding_yuv_pixel = self.funding_yuv_pixel?;
 		let chan_params = &self.onchain_tx_handler.channel_transaction_parameters;
-		let mut input_proofs = BTreeMap::new();
-		input_proofs.insert(
-			0,
-			PixelProof::multisig(
-				funding_yuv_pixel,
-				vec![
-					chan_params.holder_pubkeys.funding_pubkey.clone(),
-					chan_params.counterparty_parameters
-						.as_ref().unwrap().pubkeys.funding_pubkey.clone(),
-				],
-				// The participants number in funding tx multisig.
-				2,
-			),
+
+		let holder_funding_pubkey = chan_params.holder_pubkeys.funding_pubkey.clone();
+		let counterparty_funding_pubkey = chan_params.counterparty_parameters
+			.as_ref().unwrap().pubkeys.funding_pubkey.clone();
+
+		let funding_pixel_proof = MultisigPixelProof::new(
+			funding_yuv_pixel,
+			vec![holder_funding_pubkey, counterparty_funding_pubkey],
+			2, // The participants number in funding tx multisig.
 		);
 
-		input_proofs
+		return Some(funding_pixel_proof)
 	}
 
 	fn get_holder_yuv_pixel_proof(

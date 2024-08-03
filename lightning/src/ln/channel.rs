@@ -54,7 +54,7 @@ use core::ops::Deref;
 use core::default::Default;
 #[cfg(any(test, fuzzing, debug_assertions))]
 use crate::sync::Mutex;
-use yuv_pixels::{Luma, Pixel, Tweakable};
+use yuv_pixels::{Luma, MultisigPixelProof, Pixel, PixelProof, Tweakable};
 use yuv_types::{YuvTransaction, YuvTxType};
 use crate::sign::type_resolver::ChannelSignerType;
 
@@ -1269,11 +1269,14 @@ pub struct YuvPayment {
 	/// Contains funder's YUV pixel data for YUV payments. Supported only with `YuvPayments` feature.
 	/// It is used for multisig in funding transaction.
 	pub funding_pixel: Pixel,
-	/// Contains YUV pixel proof for funding transaction.
+	/// Contains YUV pixel proof for funding output.
+	pub funding_pixel_proof: Option<MultisigPixelProof>,
+	/// Contains the whole YUV pixel proofs for the funding transaction.
+	///
 	/// Must be either [`YuvTxType::Issue`] or [`YuvTxType::Transfer`].
 	///
-	/// It is presented since the funding created.
-	pub funding_pixel_proof: Option<YuvTxType>,
+	/// It is provided to be able to broadcast the funding transaction to the YUV network.
+	pub funding_tx_type: Option<YuvTxType>,
 	/// True if funding YUV transaction if confirmed within YUV network.
 	pub is_funding_yuv_transaction_confirmed: bool,
 	/// Holder's per-commitment YUV pixel data for YUV payments.
@@ -1983,6 +1986,12 @@ impl<SP: Deref> ChannelContext<SP> where SP::Target: SignerProvider  {
 				);
 			}
 
+			let funding_pixel_proof = MultisigPixelProof::new(
+				funding_pixel,
+				vec![counterparty_pubkeys.funding_pubkey, pubkeys.funding_pubkey],
+				2,
+			);
+
 			YuvPayment {
 				funding_pixel,
 				counterparty_pixel: funding_pixel,
@@ -1990,8 +1999,9 @@ impl<SP: Deref> ChannelContext<SP> where SP::Target: SignerProvider  {
 
 				is_funding_yuv_transaction_confirmed: false,
 				holder_shutdown_inner_key: None,
-				funding_pixel_proof: None,
+				funding_pixel_proof: Some(funding_pixel_proof),
 				counterparty_shutdown_inner_key: None,
+				funding_tx_type: None,
 			}
 		});
 
@@ -2237,6 +2247,7 @@ impl<SP: Deref> ChannelContext<SP> where SP::Target: SignerProvider  {
 				holder_pixel: funding_yuv_pixel,
 				counterparty_pixel: Pixel::new(0, funding_yuv_pixel.chroma),
 				funding_pixel_proof: None,
+				funding_tx_type: None,
 				is_funding_yuv_transaction_confirmed: false,
 				counterparty_shutdown_inner_key: None,
 				holder_shutdown_inner_key: None,
@@ -2554,8 +2565,12 @@ impl<SP: Deref> ChannelContext<SP> where SP::Target: SignerProvider  {
 		Some(self.yuv_payment.as_ref()?.funding_pixel.clone())
 	}
 
-	pub fn get_funding_tx_yuv_proof(&self) -> Option<YuvTxType> {
+	pub fn get_funding_tx_yuv_proof(&self) -> Option<MultisigPixelProof> {
 		self.yuv_payment.as_ref()?.funding_pixel_proof.clone()
+	}
+
+	pub fn get_funding_yuv_tx_type(&self) -> Option<YuvTxType> {
+		self.yuv_payment.as_ref()?.funding_tx_type.clone()
 	}
 
 	pub fn get_holder_yuv_pixel(&self) -> Option<Pixel> {
@@ -2818,7 +2833,8 @@ impl<SP: Deref> ChannelContext<SP> where SP::Target: SignerProvider  {
 						feerate_per_kw as u64 * htlc_success_tx_weight(self.get_channel_type()) / 1000
 					};
 					if $htlc.amount_msat / 1000 >= broadcaster_dust_limit_satoshis + htlc_tx_fee {
-						log_trace!(logger, "   ...including {} {} HTLC {} (hash {}) with value {}", if $outbound { "outbound" } else { "inbound" }, $state_name, $htlc.htlc_id, &$htlc.payment_hash, $htlc.amount_msat);
+						log_trace!(logger, "   ...including {} {} HTLC {} (hash {}) with value {} (yuv {:?})", if $outbound { "outbound" } else { "inbound" }, $state_name, $htlc.htlc_id, &$htlc.payment_hash, $htlc.amount_msat,
+							$htlc.yuv_amount);
 						included_non_dust_htlcs.push((htlc_in_tx, $source));
 					} else {
 						log_trace!(logger, "   ...including {} {} dust HTLC {} (hash {}) with value {} (yuv {:?})", if $outbound { "outbound" } else { "inbound" }, $state_name, $htlc.htlc_id, &$htlc.payment_hash, $htlc.amount_msat, $htlc.yuv_amount);
@@ -3021,9 +3037,6 @@ impl<SP: Deref> ChannelContext<SP> where SP::Target: SignerProvider  {
 			if local { self.channel_transaction_parameters.as_holder_broadcastable() }
 			else { self.channel_transaction_parameters.as_counterparty_broadcastable() };
 
-		let funding_proof_opt = self.yuv_payment.as_ref()
-			.map_or(None, |yuv_payments| { yuv_payments.funding_pixel_proof.clone() });
-
 		let tx = CommitmentTransaction::new_with_auxiliary_htlc_data(
 			commitment_number,
 			value_to_a as u64,
@@ -3036,7 +3049,7 @@ impl<SP: Deref> ChannelContext<SP> where SP::Target: SignerProvider  {
 			&channel_parameters,
 			broadcaster_yuv_pixel,
 			countersignatory_yuv_pixel,
-			funding_proof_opt.as_ref(),
+			self.get_funding_tx_yuv_proof(),
 		);
 		let mut htlcs_included = included_non_dust_htlcs;
 		// The unwrap is safe, because all non-dust HTLCs have been assigned an output index
@@ -4365,9 +4378,9 @@ impl<SP: Deref> Channel<SP> where
 			holder_shutdown_script,
 			counterparty_shutdown_script,
 			funding_outpoint,
-			self.context.get_funding_tx_yuv_proof().as_ref(),
-			self.context.get_holder_yuv_pixel().as_ref(),
-			self.context.get_counterparty_yuv_pixel().as_ref(),
+			self.context.get_funding_tx_yuv_proof(),
+			self.context.get_holder_yuv_pixel(),
+			self.context.get_counterparty_yuv_pixel(),
 			holder_inner_key,
 			counterparty_inner_key,
 		);
@@ -6818,7 +6831,7 @@ impl<SP: Deref> Channel<SP> where
 	}
 
 	fn internal_htlc_satisfies_config(
-		&self, htlc: &msgs::UpdateAddHTLC, amt_to_forward: u64, outgoing_cltv_value: u32, config: &ChannelConfig,
+		&self, htlc: &msgs::UpdateAddHTLC, amt_to_forward: u64, outgoing_cltv_value: u32, config: &ChannelConfig, _amt_to_forward_yuv: Option<u128>,
 	) -> Result<(), (&'static str, u16)> {
 		let fee = amt_to_forward.checked_mul(config.forwarding_fee_proportional_millionths as u64)
 			.and_then(|prop_fee| (prop_fee / 1000000).checked_add(config.forwarding_fee_base_msat as u64));
@@ -6835,6 +6848,7 @@ impl<SP: Deref> Channel<SP> where
 				0x1000 | 13, // incorrect_cltv_expiry
 			));
 		}
+		// TODO(yuv/fees):  add check of fees for forward YUVs
 		Ok(())
 	}
 
@@ -6842,12 +6856,12 @@ impl<SP: Deref> Channel<SP> where
 	/// [`ChannelConfig`]. This first looks at the channel's current [`ChannelConfig`], and if
 	/// unsuccessful, falls back to the previous one if one exists.
 	pub fn htlc_satisfies_config(
-		&self, htlc: &msgs::UpdateAddHTLC, amt_to_forward: u64, outgoing_cltv_value: u32,
+		&self, htlc: &msgs::UpdateAddHTLC, amt_to_forward: u64, outgoing_cltv_value: u32, amt_to_forward_yuv: Option<u128>,
 	) -> Result<(), (&'static str, u16)> {
-		self.internal_htlc_satisfies_config(&htlc, amt_to_forward, outgoing_cltv_value, &self.context.config())
+		self.internal_htlc_satisfies_config(&htlc, amt_to_forward, outgoing_cltv_value, &self.context.config(), amt_to_forward_yuv)
 			.or_else(|err| {
 				if let Some(prev_config) = self.context.prev_config() {
-					self.internal_htlc_satisfies_config(htlc, amt_to_forward, outgoing_cltv_value, &prev_config)
+					self.internal_htlc_satisfies_config(htlc, amt_to_forward, outgoing_cltv_value, &prev_config, amt_to_forward_yuv)
 				} else {
 					Err(err)
 				}
@@ -7388,9 +7402,30 @@ impl<SP: Deref> Channel<SP> where
 			if let Some(yuv_payment) = self.context.yuv_payment.as_mut() {
 				yuv_payment.is_funding_yuv_transaction_confirmed = true;
 
-				if yuv_payment.funding_pixel_proof != Some(yuv_tx.tx_type.clone()) {
+				let expected_proof = yuv_payment.funding_pixel_proof
+					.as_ref()
+					.ok_or_else(|| ClosureReason::ProcessingError {
+						err: "funding pixel proof isn't initialized".to_string(),
+					})?;
+
+				let pixel_proof = yuv_tx.tx_type
+					.output_proofs()
+					.and_then(|output_proofs| {
+						output_proofs.get(&(txo_idx as u32))
+					});
+
+				let Some(PixelProof::Multisig(received_proof)) = pixel_proof else {
 					return Err(ClosureReason::ProcessingError {
-						err: "the provided funding pixel proof isn't the same as received from YUV L1".to_string(),
+						err: "the received YUV YUV proof isn't a multisig".to_string(),
+					})
+				};
+
+				let expected_script = expected_proof.to_script_pubkey();
+				let received_script = received_proof.to_script_pubkey();
+
+				if expected_script != received_script {
+					return Err(ClosureReason::ProcessingError {
+						err: "received YUV proof is different from the expected one".to_string(),
 					});
 				}
 			}
@@ -7914,8 +7949,8 @@ impl<SP: Deref> Channel<SP> where
 		}
 
 		let need_holding_cell = !self.context.channel_state.can_generate_new_commitment();
-		log_debug!(logger, "Pushing new outbound HTLC with hash {} for {} msat {}",
-			payment_hash, amount_msat,
+		log_debug!(logger, "Pushing new outbound HTLC with hash {} for {} msat (yuv {:?}) {}",
+			payment_hash, amount_msat, yuv_amount,
 			if force_holding_cell { "into holding cell" }
 			else if need_holding_cell { "into holding cell as we're awaiting an RAA or monitor" }
 			else { "to peer" });
@@ -8641,7 +8676,7 @@ impl<SP: Deref> OutboundV1Channel<SP> where SP::Target: SignerProvider {
 	}
 
 	/// Only allowed after [`ChannelContext::channel_transaction_parameters`] is set.
-	fn get_funding_created_msg<L: Deref>(&mut self, yuv_funding_proofs: Option<YuvTxType>, logger: &L) -> Option<msgs::FundingCreated> where L::Target: Logger {
+	fn get_funding_created_msg<L: Deref>(&mut self, logger: &L) -> Option<msgs::FundingCreated> where L::Target: Logger {
 		let counterparty_keys = self.context.build_remote_transaction_keys();
 		let counterparty_initial_commitment_tx = self.context.build_commitment_transaction(self.context.cur_counterparty_commitment_transaction_number, &counterparty_keys, false, false, logger).tx;
 		let signature = match &self.context.holder_signer {
@@ -8673,7 +8708,6 @@ impl<SP: Deref> OutboundV1Channel<SP> where SP::Target: SignerProvider {
 			partial_signature_with_nonce: None,
 			#[cfg(taproot)]
 			next_local_nonce: None,
-			yuv_funding_proofs,
 		})
 	}
 
@@ -8705,9 +8739,8 @@ impl<SP: Deref> OutboundV1Channel<SP> where SP::Target: SignerProvider {
 				panic!("YUV Proof isn't provided for channel that uses YUV payments");
 			}
 
-			yuv_payment.funding_pixel_proof = funding_yuv_pixel_proof.clone();
+			yuv_payment.funding_tx_type = funding_yuv_pixel_proof.clone();
 		}
-		;
 		self.context.channel_transaction_parameters.funding_outpoint = Some(funding_txo);
 		self.context.holder_signer.as_mut().provide_channel_parameters(&self.context.channel_transaction_parameters);
 
@@ -8727,7 +8760,7 @@ impl<SP: Deref> OutboundV1Channel<SP> where SP::Target: SignerProvider {
 		self.context.funding_transaction = Some(funding_transaction);
 		self.context.is_batch_funding = Some(()).filter(|_| is_batch_funding);
 
-		let funding_created = self.get_funding_created_msg(funding_yuv_pixel_proof, logger);
+		let funding_created = self.get_funding_created_msg(logger);
 		if funding_created.is_none() {
 			#[cfg(not(async_signing))] {
 				panic!("Failed to get signature for new funding creation");
@@ -8931,18 +8964,27 @@ impl<SP: Deref> OutboundV1Channel<SP> where SP::Target: SignerProvider {
 		// If channel uses YUV payments.
 		// In the funding transaction, the YUV key in the 2x2 multisig is committed to the first
 		// key in the multisig script (lexicographically sorted).
-		if let Some(yuv_payment) = &self.context.yuv_payment {
+		if let Some(yuv_payment) = &mut self.context.yuv_payment {
 			let holder_pubkeys = &mut self.context.channel_transaction_parameters.holder_pubkeys;
+			let funding_pixel = yuv_payment.funding_pixel;
 
 			if holder_pubkeys.funding_pubkey.serialize() < msg.common_fields.funding_pubkey.serialize() {
 				holder_pubkeys.funding_yuv_pixel_key = Some(
-					holder_pubkeys.funding_pubkey.tweak(yuv_payment.funding_pixel),
+					holder_pubkeys.funding_pubkey.tweak(funding_pixel),
 				);
 			} else {
 				counterparty_pubkeys.funding_yuv_pixel_key = Some(
-					msg.common_fields.funding_pubkey.tweak(yuv_payment.funding_pixel),
+					msg.common_fields.funding_pubkey.tweak(funding_pixel),
 				)
 			}
+
+			let funding_pixel_proof = MultisigPixelProof::new(
+				funding_pixel,
+				vec![counterparty_pubkeys.funding_pubkey, holder_pubkeys.funding_pubkey],
+				2,
+			);
+
+			yuv_payment.funding_pixel_proof = Some(funding_pixel_proof);
 		}
 
 		self.context.channel_transaction_parameters.counterparty_parameters = Some(CounterpartyChannelTransactionParameters {
@@ -9284,14 +9326,6 @@ impl<SP: Deref> InboundV1Channel<SP> where SP::Target: SignerProvider {
 				self.context.cur_counterparty_commitment_transaction_number != INITIAL_COMMITMENT_NUMBER ||
 				self.context.cur_holder_commitment_transaction_number != INITIAL_COMMITMENT_NUMBER {
 			panic!("Should not have advanced channel commitment tx numbers prior to funding_created");
-		}
-
-		if let Some(yuv_payment) = self.context.yuv_payment.as_mut() {
-			if msg.yuv_funding_proofs.is_none() {
-				return Err((self, ChannelError::Close("Missing YUV funding proofs when YUV payments feature is used for the channel".to_owned())));
-			}
-
-			yuv_payment.funding_pixel_proof = msg.yuv_funding_proofs.clone();
 		}
 
 		let funding_txo = OutPoint { txid: msg.funding_txid, index: msg.funding_output_index };
@@ -10815,7 +10849,7 @@ mod tests {
 	use bitcoin::hash_types::WPubkeyHash;
 	use bitcoin::blockdata::locktime::absolute::LockTime;
 	use bitcoin::address::{WitnessProgram, WitnessVersion};
-	use yuv_pixels::{Chroma, Luma, Pixel, Tweakable};
+	use yuv_pixels::{Chroma, Luma, MultisigPixelProof, Pixel, Tweakable};
 	use crate::prelude::*;
 
 	#[test]
@@ -11382,6 +11416,7 @@ mod tests {
 					pubkey: test_utils::pubkey(2), channel_features: ChannelFeatures::empty(),
 					node_features: NodeFeatures::empty(), short_channel_id: 0, fee_msat: 0,
 					cltv_expiry_delta: 0, maybe_announced_channel: false,
+					fee_yuv: None,
 				}],
 				blinded_tail: None,
 				chroma: None,
@@ -12596,6 +12631,7 @@ mod tests {
 			counterparty_pixel: Pixel::new(Luma::from(0), funding_yuv_pixel.chroma),
 			counterparty_shutdown_inner_key: None,
 			holder_shutdown_inner_key: None,
+			funding_tx_type: None,
 		};
 
 		assert_eq!(Some(yuv_payments), chan.context.yuv_payment);
@@ -12607,14 +12643,24 @@ mod tests {
 		// funding_yuv_pixel's luma. Holder's luma must be empty.
 		let chan = InboundV1Channel::<&TestKeysInterface>::new(&feeest, &&keys_provider, &&keys_provider, node_id, &channelmanager::provided_channel_type_features(&config), &channelmanager::provided_init_features(&config), &open_channel_msg, 7, &config, 0, &&logger, false).unwrap();
 
+		let holder_funding_key = chan.context.get_holder_pubkeys().funding_pubkey;
+		let counterparty_funding_key = chan.context.get_counterparty_pubkeys().funding_pubkey;
+
+		let funding_pixel_proof = MultisigPixelProof::new(
+			funding_yuv_pixel,
+			vec![counterparty_funding_key, holder_funding_key],
+			2,
+		);
+
 		let yuv_payments = YuvPayment {
 			funding_pixel: funding_yuv_pixel,
-			funding_pixel_proof: None,
+			funding_pixel_proof: Some(funding_pixel_proof),
 			is_funding_yuv_transaction_confirmed: false,
 			holder_pixel: Pixel::new(Luma::from(0), funding_yuv_pixel.chroma),
 			counterparty_pixel: funding_yuv_pixel,
 			counterparty_shutdown_inner_key: None,
 			holder_shutdown_inner_key: None,
+			funding_tx_type: None,
 		};
 
 		assert_eq!(Some(yuv_payments), chan.context.yuv_payment);

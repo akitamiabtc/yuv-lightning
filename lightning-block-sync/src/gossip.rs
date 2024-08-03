@@ -17,7 +17,7 @@ use lightning::routing::utxo::{UtxoEntry, UtxoFuture, UtxoLookup, UtxoLookupErro
 use lightning::util::logger::Logger;
 
 use yuv_pixels::Pixel;
-use yuv_rpc_api::transactions::{GetRawYuvTransactionResponseHex, YuvTransactionStatus as TxStatus};
+use yuv_rpc_api::transactions::{GetRawYuvTransactionResponseHex, YuvTransactionStatus};
 
 use std::sync::{Arc, Mutex};
 use std::collections::VecDeque;
@@ -30,7 +30,7 @@ use bitcoin::Txid;
 /// Max number of retries to fetch the pixel from YUV node.
 // TODO: move to config
 #[cfg(feature = "tokio")]
-const MAX_YUV_TX_FETCH_RETRIES: usize = 10;
+const MAX_YUV_TX_FETCH_RETRIES: usize = 600;
 
 /// A trait which extends [`BlockSource`] and can be queried to fetch the block at a given height
 /// as well as whether a given output is unspent (i.e. a member of the current UTXO set).
@@ -314,7 +314,7 @@ impl<S: FutureSpawner,
 				return Ok(pixel);
 			}
 
-			tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+			tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
 		}
 
 		Err(UtxoLookupYuvError::AttachTimeout.into())
@@ -323,15 +323,19 @@ impl<S: FutureSpawner,
 	/// Fetch the pixel from the YUV node. Is `None` if there is pixel, but it
 	/// is not attached yet inside YUV node.
 	async fn fetch_pixel(yuv_source: YS, OutPoint { txid, vout }: OutPoint) -> Result<Option<Pixel>, UtxoLookupError> {
-		let response = yuv_source.yuv_transaction_by_id(&txid).await.map_err(|_| UtxoLookupError::UnknownTx)?;
+		let response = yuv_source.yuv_transaction_by_id(&txid).await
+			.map_err(|_| UtxoLookupError::UnknownTx)?;
+
 		let tx = match response.status {
 			// If the transaction is not found, we can't look up the pixel
-			TxStatus::None => return Err(UtxoLookupYuvError::NoPixelAttached.into()),
+			YuvTransactionStatus::None => return Err(UtxoLookupYuvError::NoPixelAttached.into()),
 			// If the transaction is attached, we can look up the pixel
-			TxStatus::Attached => response.data.ok_or(UtxoLookupYuvError::NoPixelAttached)?,
-			// If the transaction is initialized, pending, waiting mined, mined, or attaching, we can't look up the
+			YuvTransactionStatus::Attached => {
+				response.data.ok_or(UtxoLookupYuvError::AttachedButNoTx)?
+			},
+			// If the transaction is pending or checked, we can't look up the
 			// pixel, but it exists, so we may need to retry a little bit later
-			TxStatus::Initialized | TxStatus::Pending | TxStatus::WaitingMined | TxStatus::Mined | TxStatus::Attaching => return Ok(None),
+			_ => return Ok(None),
 		};
 
 		let pixel = tx.tx_type

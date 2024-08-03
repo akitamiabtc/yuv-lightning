@@ -14,6 +14,7 @@ use bitcoin::secp256k1::{PublicKey, Secp256k1, self};
 
 use crate::blinded_path::{BlindedHop, BlindedPath, Direction, IntroductionNode};
 use crate::blinded_path::payment::{ForwardNode, ForwardTlvs, PaymentConstraints, PaymentRelay, ReceiveTlvs};
+use crate::ln::channel::MAX_STD_OUTPUT_DUST_LIMIT_SATOSHIS;
 use crate::ln::types::PaymentHash;
 use crate::ln::channelmanager::{ChannelDetails, PaymentId, MIN_FINAL_CLTV_EXPIRY_DELTA};
 use crate::ln::features::{BlindedHopFeatures, Bolt11InvoiceFeatures, Bolt12InvoiceFeatures, ChannelFeatures, NodeFeatures};
@@ -30,6 +31,7 @@ use crate::crypto::chacha20::ChaCha20;
 use crate::io;
 use crate::prelude::*;
 use alloc::collections::BinaryHeap;
+use core::cmp::Ordering;
 use core::{cmp, fmt};
 use core::ops::Deref;
 
@@ -335,6 +337,40 @@ impl Readable for InFlightHtlcs {
 	}
 }
 
+/// The "fee" value for the [`RouteHop`].
+#[derive(Clone, Debug, Hash, PartialEq, Eq, Copy)]
+pub enum FeeHopValue<T = u128> {
+	/// The fee taken on this hop (for paying for the use of the *next* channel in the path).
+	ForwardFee(T),
+	/// This is the full value of this [`Path`]'s part of the payment
+	///
+	/// This means that this hop is the last one.
+	FinalTotal(T),
+}
+
+impl<T> FeeHopValue<T> {
+	/// If value is last one, return final value of the path.
+	pub fn final_value(self) -> Option<T> {
+		match self {
+			Self::FinalTotal(v) => Some(v),
+			_ => None,
+		}
+	}
+
+	/// Return value of the fee or final value of the path.
+	pub fn value(self) -> T {
+		match self {
+			Self::FinalTotal(v) | Self::ForwardFee(v) => v,
+		}
+	}
+}
+
+impl_writeable_tlv_based_enum!(FeeHopValue,
+	;
+	(1, ForwardFee),
+	(2, FinalTotal),
+);
+
 /// A hop in a route, and additional metadata about it. "Hop" is defined as a node and the channel
 /// that leads to it.
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
@@ -356,6 +392,8 @@ pub struct RouteHop {
 	///
 	/// [`BlindedPath`]: crate::blinded_path::BlindedPath
 	pub fee_msat: u64,
+	/// The same as `fee_msat` but for YUV. for more info, check the doc of 
+	pub fee_yuv: Option<FeeHopValue>,
 	/// The CLTV delta added for this hop.
 	/// If this is the last hop in [`Path::hops`]:
 	/// * if we're sending to a [`BlindedPath`], this is the CLTV delta for the entire blinded path
@@ -382,6 +420,7 @@ impl_writeable_tlv_based!(RouteHop, {
 	(6, channel_features, required),
 	(8, fee_msat, required),
 	(10, cltv_expiry_delta, required),
+	(201, fee_yuv, option),
 });
 
 /// The blinded portion of a [`Path`], if we're routing to a recipient who provided blinded paths in
@@ -456,14 +495,12 @@ impl Path {
 	/// is called only in context of YUV payments.
 	pub fn final_pixel_yuv(&self) -> Option<Pixel> {
 		let amount = match &self.blinded_tail {
+ 			// FIXME(yuv/blinded): we don't support YUV with blinded pathes for now, but should handle this case somehow.
 			Some(blinded_tail) => blinded_tail.final_value_yuv,
-			None => self.hops.last().and_then(|_hop| Some(0)),
+			None => self.hops.last().and_then(|hop| hop.fee_yuv).and_then(|value| value.final_value()),
 		};
 
-		match (amount, self.chroma) {
-			(Some(amount), Some(chroma)) => Some(Pixel::new(amount, chroma)),
-			_ => None,
-		}
+		amount.zip(self.chroma).map(|(amount, chroma, )| Pixel::new(amount, chroma))
 	}
 
 	/// Gets the final hop's CLTV expiry delta.
@@ -700,10 +737,6 @@ pub const DEFAULT_MAX_TOTAL_CLTV_EXPIRY_DELTA: u32 = 1008;
 // The default limit is currently set rather arbitrary - there aren't any real fundamental path-count
 // limits, but for now more than 10 paths likely carries too much one-path failure.
 pub const DEFAULT_MAX_PATH_COUNT: u8 = 10;
-
-/// The same as [`DEFAULT_MAX_PATH_COUNT`] but when the YUV payments feature is enabled, because
-/// currently YUV doesn't support MPP.
-pub const DEFAULT_YUV_MAX_PATH_COUNT: u8 = 1;
 
 const DEFAULT_MAX_CHANNEL_SATURATION_POW_HALF: u8 = 2;
 
@@ -1590,6 +1623,9 @@ struct PathBuildingHop<'a> {
 
 	fee_msat: u64,
 
+	/// The same as `fee_msat`, but as YUV has no fees for now, only contribution is used here.
+	value_contribution_yuv: Option<u128>,
+
 	/// All the fees paid *after* this channel on the way to the destination
 	next_hops_fee_msat: u64,
 	/// Fee paid for the use of the current channel (see candidate.fees()).
@@ -1632,6 +1668,9 @@ impl<'a> core::fmt::Debug for PathBuildingHop<'a> {
 		#[cfg(all(not(ldk_bench), any(test, fuzzing)))]
 		let debug_struct = debug_struct
 			.field("value_contribution_msat", &self.value_contribution_msat);
+		#[cfg(all(not(ldk_bench), any(test, fuzzing)))]
+		let debug_struct = debug_struct
+			.field("value_contribution_yuv", &self.value_contribution_yuv);
 		debug_struct.finish()
 	}
 }
@@ -1650,6 +1689,15 @@ impl<'a> PaymentPath<'a> {
 	// TODO: Add a value_msat field to PaymentPath and use it instead of this function.
 	fn get_value_msat(&self) -> u64 {
 		self.hops.last().unwrap().0.fee_msat
+	}
+
+	fn get_htlc_minimum(&self) -> u64 {
+		self.hops.last().unwrap().0.path_htlc_minimum_msat
+	}
+
+	// Return value contribution of the path calcualted for YUV.
+	fn get_value_yuv(&self) -> Option<u128> {
+		self.hops.last().and_then(|(hop, _)| hop.value_contribution_yuv)
 	}
 
 	fn get_path_penalty_msat(&self) -> u64 {
@@ -1672,6 +1720,11 @@ impl<'a> PaymentPath<'a> {
 
 	fn get_cost_msat(&self) -> u64 {
 		self.get_total_fee_paid_msat().saturating_add(self.get_path_penalty_msat())
+	}
+
+	#[inline]
+	fn cost_per_value_sats(&self) -> u128 {
+		((self.get_cost_msat() as u128) << 64) / (self.get_value_msat() as u128)
 	}
 
 	// If the amount transferred by the path is updated, the fees should be adjusted. Any other way
@@ -2074,13 +2127,6 @@ where L::Target: Logger {
 			|info| info.features.supports_basic_mpp()))
 	} else { false };
 
-	if is_yuv_enabled && allow_mpp {
-		return Err(LightningError {
-			err: "YUV payments are not supported with MPP".to_owned(),
-			action: ErrorAction::IgnoreError,
-		});
-	}
-
 	let max_total_routing_fee_msat = route_params.max_total_routing_fee_msat.unwrap_or(u64::max_value());
 
 	log_trace!(logger, "Searching for a route from payer {} to {} {} MPP and {} first hops {}overriding the network graph with a fee limit of {} msat",
@@ -2151,7 +2197,9 @@ where L::Target: Logger {
 	let recommended_value_msat = final_value_msat * ROUTE_CAPACITY_PROVISION_FACTOR as u64;
 	let mut path_value_msat = final_value_msat;
 
-	let path_value_yuv = final_pixel_yuv.map(|p| p.luma.amount);
+	let recommended_value_yuv = final_pixel_yuv.map(|p| p.luma.amount * ROUTE_CAPACITY_PROVISION_FACTOR as u128);
+	let final_value_yuv =  final_pixel_yuv.map(|p| p.luma.amount);
+	let path_value_yuv = final_value_yuv;
 
 	// Routing Fragmentation Mitigation heuristic:
 	//
@@ -2167,8 +2215,12 @@ where L::Target: Logger {
 	} else {
 		final_value_msat
 	};
-
-	let minimal_value_contribution_yuv = final_pixel_yuv.map(|p| p.luma.amount);
+	// NOTE: we are doing the same here as for msats.
+	let minimal_value_contribution_yuv = final_value_yuv.map(|value_yuv|
+		if allow_mpp {
+			(value_yuv + (payment_params.max_path_count as u128 - 1)) / payment_params.max_path_count as u128
+		} else { value_yuv }
+	);
 
 	// When we start collecting routes we enforce the max_channel_saturation_power_of_half
 	// requirement strictly. After we've collected enough (or if we fail to find new routes) we
@@ -2274,7 +2326,7 @@ where L::Target: Logger {
 					let contributes_sufficient_yuv_value = if is_yuv_enabled {
 						available_value_contribution_yuv >= minimal_value_contribution_yuv
 					} else {
-						true
+						true // say that YUV contribution is efficient, as we only need satoshis in this case.
 					};
 
 					// Do not consider candidate hops that would exceed the maximum path length.
@@ -2419,6 +2471,7 @@ where L::Target: Logger {
 								was_processed: false,
 								#[cfg(all(not(ldk_bench), any(test, fuzzing)))]
 								value_contribution_msat,
+								value_contribution_yuv,
 							}
 						});
 
@@ -2843,7 +2896,7 @@ where L::Target: Logger {
 					let channel_usage = ChannelUsage {
 						amount_msat: final_value_msat + aggregate_next_hops_fee_msat,
 						inflight_htlc_msat: used_liquidity_msat,
-						yuv_amount: final_pixel_yuv.map(|p| p.luma.amount),
+						yuv_amount: final_value_yuv,
 						inflight_yuv: used_liquidity_yuv,
 						effective_capacity: candidate.effective_capacity(),
 					};
@@ -3019,8 +3072,13 @@ where L::Target: Logger {
 				ordered_hops.last_mut().unwrap().0.fee_msat = value_contribution_msat;
 				ordered_hops.last_mut().unwrap().0.hop_use_fee_msat = 0;
 
-				log_trace!(logger, "Found a path back to us from the target with {} hops contributing up to {} msat: \n {:#?}",
-					ordered_hops.len(), value_contribution_msat, ordered_hops.iter().map(|h| &(h.0)).collect::<Vec<&PathBuildingHop>>());
+				{
+					let (last_hop, _) = ordered_hops.last_mut().unwrap();
+					last_hop.value_contribution_yuv = value_contribution_yuv;
+				}
+
+				log_trace!(logger, "Found a path back to us from the target with {} hops contributing up to {} msat (yuv {:?}): \n {:#?}",
+					ordered_hops.len(), value_contribution_msat, value_contribution_yuv, ordered_hops.iter().map(|h| &(h.0)).collect::<Vec<&PathBuildingHop>>());
 
 				let mut payment_path = PaymentPath {
 					hops: ordered_hops,
@@ -3111,11 +3169,7 @@ where L::Target: Logger {
 				// Track the total amount all our collected paths allow to send so that we know
 				// when to stop looking for more paths
 				already_collected_value_msat += value_contribution_msat;
-
-				already_collected_value_yuv = match (already_collected_value_yuv, value_contribution_yuv) {
-					(Some(collected), Some(contribution)) => Some(collected + contribution),
-					_ => None,
-				};
+				already_collected_value_yuv = already_collected_value_yuv.zip(value_contribution_yuv).map(|(collected, contribution)| collected + contribution);
 
 				payment_paths.push(payment_path);
 				found_new_path = true;
@@ -3149,8 +3203,7 @@ where L::Target: Logger {
 			break 'paths_collection;
 		}
 
-		let is_yuv_already_collected = final_pixel_yuv
-			.map_or(true, |p| already_collected_value_yuv.unwrap() >= p.luma.amount);
+		let is_yuv_already_collected = final_value_yuv.zip(already_collected_value_yuv).map_or(true, |(final_value, collected)| collected >= final_value);
 
 		// Step (4).
 		// Stop either when the recommended value is reached or if no new path was found in this
@@ -3158,23 +3211,34 @@ where L::Target: Logger {
 		// In the latter case, making another path finding attempt won't help,
 		// because we deterministically terminated the search due to low liquidity.
 		//
-		// TODO: add optional logs about YUV
+		// FIXME: diversify yuv and satoshis collection
 		if !found_new_path && channel_saturation_pow_half != 0 {
 			channel_saturation_pow_half = 0;
-		} else if !found_new_path && hit_minimum_limit && already_collected_value_msat < final_value_msat && path_value_msat != recommended_value_msat && is_yuv_already_collected {
+		} else if !found_new_path && hit_minimum_limit && already_collected_value_msat < final_value_msat && path_value_msat != recommended_value_msat {
+			// NOTE: we don't do the same for YUV here, as we have no lower limits.
 			log_trace!(logger, "Failed to collect enough value, but running again to collect extra paths with a potentially higher limit.");
 			path_value_msat = recommended_value_msat;
+
 		} else if (already_collected_value_msat >= recommended_value_msat && is_yuv_already_collected) || !found_new_path {
 			log_trace!(logger, "Have now collected {} msat (seeking {} msat) in paths. Last path loop {} a new path.",
 				already_collected_value_msat, recommended_value_msat, if found_new_path { "found" } else { "did not find" });
+
+			if let Some((got, recommended)) = already_collected_value_yuv.zip(recommended_value_yuv) {
+				log_trace!(logger, "... with collected {} yuv (seeking {} yuv).", got, recommended);
+			}
+			
 			break 'paths_collection;
-		} else if found_new_path && already_collected_value_msat == final_value_msat && is_yuv_already_collected && payment_paths.len() == 1 {
+		} else if found_new_path && already_collected_value_msat == final_value_msat && payment_paths.len() == 1 {
 			// Further, if this was our first walk of the graph, and we weren't limited by an
 			// htlc_minimum_msat, return immediately because this path should suffice. If we were
 			// limited by an htlc_minimum_msat value, find another path with a higher value,
 			// potentially allowing us to pay fees to meet the htlc_minimum on the new path while
 			// still keeping a lower total fee than this path.
 			if !hit_minimum_limit {
+				if !is_yuv_already_collected {
+					// wa haven't collected enough YUVs yet, so we should consider going further.
+					continue;
+				}
 				log_trace!(logger, "Collected exactly our payment amount on the first pass, without hitting an htlc_minimum_msat limit, exiting.");
 				break 'paths_collection;
 			}
@@ -3210,23 +3274,33 @@ where L::Target: Logger {
 		return Err(LightningError{err: "Failed to find a sufficient route to the given destination".to_owned(), action: ErrorAction::IgnoreError});
 	}
 
-	if already_collected_value_yuv < final_pixel_yuv.map(|p| p.luma.amount) {
+	if already_collected_value_yuv < final_value_yuv {
 		return Err(LightningError{err: "Failed to find a sufficient with yuv route to the given destination".to_owned(), action: ErrorAction::IgnoreError});
 	}
 
 	// Step (6).
 	let mut selected_route = payment_paths;
 	debug_assert_eq!(selected_route.iter().map(|p| p.get_value_msat()).sum::<u64>(), already_collected_value_msat);
-
+	#[cfg(debug_assertion)]
+	if is_yuv_enabled {
+		debug_assert_eq!(selected_route.iter().map(|p| p.get_value_yuv().unwrap()).sum::<u128>(), already_collected_value_yuv.unwrap());
+	}
+	
 	let mut overpaid_value_msat = already_collected_value_msat - final_value_msat;
 
 	// First, sort by the cost-per-value of the path, dropping the paths that cost the most for
 	// the value they contribute towards the payment amount.
 	// We sort in descending order as we will remove from the front in `retain`, next.
-	selected_route.sort_unstable_by(|a, b|
-		(((b.get_cost_msat() as u128) << 64) / (b.get_value_msat() as u128))
-			.cmp(&(((a.get_cost_msat() as u128) << 64) / (a.get_value_msat() as u128)))
-	);
+	selected_route.sort_unstable_by(|a, b| {
+		b.cost_per_value_sats().cmp(&a.cost_per_value_sats()).then_with(|| {
+			// NOTE(yuv): firstly compare by sats, then if equal by YUV if feature enabled
+			if is_yuv_enabled {
+				b.get_value_yuv().cmp(&a.get_value_yuv())
+			} else {
+				Ordering::Equal // propagate equal, as we can't compare further
+			}
+		})
+	});
 
 	// We should make sure that at least 1 path left.
 	let mut paths_left = selected_route.len();
@@ -3234,18 +3308,45 @@ where L::Target: Logger {
 		if paths_left == 1 {
 			return true
 		}
+
 		let path_value_msat = path.get_value_msat();
 		if path_value_msat <= overpaid_value_msat {
+			// NOTE(yuv): don't remove overpaid pathes if it reduces YUV
+			// contribution in such a way that sum of paths is not enough.
+			if is_yuv_enabled {
+				let path_value_yuv = path.get_value_yuv();
+
+				let reduced_contribution_yuv = already_collected_value_yuv
+					.zip(path_value_yuv)
+					.map(|(collected, path_value)| collected - path_value);
+
+				let Some(is_less_than_final) = reduced_contribution_yuv.zip(final_value_yuv).map(|(r, f)| r < f) else {
+					unreachable!("as this if is under `is_yuv_enabled`, this should never panic");
+				};
+
+				if is_less_than_final {
+					return true; // continue, and keep this path
+				}
+
+				already_collected_value_yuv = reduced_contribution_yuv;
+			}
+			
 			overpaid_value_msat -= path_value_msat;
+			already_collected_value_msat -= path_value_msat;
 			paths_left -= 1;
 			return false;
 		}
 		true
 	});
 
+	if is_yuv_enabled {
+		reduce_overpaid_from_route(&mut selected_route, final_value_yuv.unwrap(),
+			 final_value_msat, already_collected_value_msat, paths_left);
+	}
+	
 	if overpaid_value_msat != 0 {
 		// Step (7).
-		// Now, subtract the remaining overpaid value from the most-expensive path.
+		// Sort paths from most expensive to least expensive:
 		// TODO: this could also be optimized by also sorting by feerate_per_sat_routed,
 		// so that the sender pays less fees overall. And also htlc_minimum_msat.
 		selected_route.sort_unstable_by(|a, b| {
@@ -3253,12 +3354,37 @@ where L::Target: Logger {
 			let b_f = b.hops.iter().map(|hop| hop.0.candidate.fees().proportional_millionths as u64).sum::<u64>();
 			a_f.cmp(&b_f).then_with(|| b.get_cost_msat().cmp(&a.get_cost_msat()))
 		});
-		let expensive_payment_path = selected_route.first_mut().unwrap();
 
-		// We already dropped all the paths with value below `overpaid_value_msat` above, thus this
-		// can't go negative.
-		let expensive_path_new_value_msat = expensive_payment_path.get_value_msat() - overpaid_value_msat;
-		expensive_payment_path.update_value_and_recompute_fees(expensive_path_new_value_msat);
+		// NOTE(yuv): in case of YUV the comment in `else` is not true, multiple pathes may
+		// have less than overpaid value. That's why in this case we substruct up to
+		// htlc_minimum_sats for most expensive pathes, until the overpaid_value is zero.
+		if is_yuv_enabled {
+			for path in selected_route.iter_mut() {
+				let path_current_value_msat = path.get_value_msat();
+				let path_new_value_msat = path_current_value_msat
+					.checked_sub(overpaid_value_msat)
+					// In case of overflow, set new path value to possible minimum (htlc_minimum or dust).
+					.unwrap_or_else(|| {
+						// if htlc_minimum is not set (zero) set minimum value as max dust value.
+						path.get_htlc_minimum().max(MAX_STD_OUTPUT_DUST_LIMIT_SATOSHIS)
+					});				
+				path.update_value_and_recompute_fees(path_new_value_msat);
+
+				// remove from overpaid 
+				overpaid_value_msat -= path_current_value_msat - path_new_value_msat;
+
+				if overpaid_value_msat == 0 {
+					break;
+				}
+			}
+		} else {
+			// Now, subtract the remaining overpaid value from the most-expensive path.
+			let expensive_payment_path = selected_route.first_mut().unwrap();
+			// We already dropped all the paths with value below `overpaid_value_msat` above, thus this
+			// can't go negative.
+			let expensive_path_new_value_msat = expensive_payment_path.get_value_msat() - overpaid_value_msat;
+			expensive_payment_path.update_value_and_recompute_fees(expensive_path_new_value_msat);
+		}
 	}
 
 	// Step (8).
@@ -3316,8 +3442,20 @@ where L::Target: Logger {
 				fee_msat: hop.fee_msat,
 				cltv_expiry_delta: hop.candidate.cltv_expiry_delta(),
 				maybe_announced_channel,
+				// Set this value as final, as we are not sure, if there will be a new hop on next iteration.
+				// And change previous values to "forward" in code below
+				fee_yuv: hop.value_contribution_yuv.map(|v| FeeHopValue::FinalTotal(v)),
 			});
 		}
+
+		if is_yuv_enabled {
+			let hops_len = hops.len();
+			for hop in hops.iter_mut().take(hops_len - 1) {
+				// TODO(yuv/fees): add possible fees in future.
+				hop.fee_yuv = Some(FeeHopValue::ForwardFee(0));
+			}
+		}
+		
 		let mut final_cltv_delta = final_cltv_expiry_delta;
 		let blinded_tail = payment_path.hops.last().and_then(|(h, _)| {
 			if let Some(blinded_path) = h.candidate.blinded_path() {
@@ -3339,7 +3477,7 @@ where L::Target: Logger {
 			core::mem::replace(&mut hop.cltv_expiry_delta, prev_cltv_expiry_delta)
 		});
 
-		paths.push(Path { hops, blinded_tail, chroma: payment_path.chroma, });
+		paths.push(Path { hops, blinded_tail, chroma: payment_path.chroma });
 	}
 	// Make sure we would never create a route with more paths than we allow.
 	debug_assert!(paths.len() <= payment_params.max_path_count.into());
@@ -3362,6 +3500,77 @@ where L::Target: Logger {
 
 	log_info!(logger, "Got route: {}", log_route!(route));
 	Ok(route)
+}
+
+/// For overpaid_value = already_collected - final_value, remove 
+fn reduce_overpaid_from_route(
+	selected_route: &mut Vec<PaymentPath<'_>>,
+	final_value_yuv: u128,
+	final_value_msat: u64,
+	mut already_collected_value_msat: u64,
+	mut paths_left: usize,
+) {
+	let already_collected_value_yuv = selected_route
+		.iter()
+		.map(|v| v.get_value_yuv().unwrap())
+		.sum::<u128>();
+	
+    // Remove pathes that got us in overpaying. That are pathes thats contribution is less
+    // then overpaid value, and thats why could easily be removed.
+    let mut overpaid_value_yuv = already_collected_value_yuv - final_value_yuv;
+
+    if overpaid_value_yuv == 0 {
+    	return;
+	}
+
+    // Sort by yuv contribution in ascending order:
+    selected_route.sort_unstable_by(|a, b| {
+		a.get_value_yuv()
+			.zip(b.get_value_yuv())
+			.map(|(a_contribution, b_contribution)| a_contribution.cmp(&b_contribution))
+			.expect("This check is under `is_yuv_selected`, so should never panic")
+    });
+
+    // Remove paths that are less than overpaid value, so they are litteraly redundant:
+    selected_route.retain(|path| {
+	    if paths_left == 1 {
+		    return true
+	    }
+
+	    let path_value_yuv = path.get_value_yuv().unwrap();
+	    if path_value_yuv <= overpaid_value_yuv {
+		    let path_value_msat = path.get_value_msat();
+
+		    // Keep this path to keep enough liquidity of sats
+		    if (already_collected_value_msat - path_value_msat) < final_value_msat {
+		    	return true;
+		    }
+
+		    already_collected_value_msat -= path_value_msat;
+		    overpaid_value_yuv -= path_value_yuv;
+		    paths_left -= 1;
+		    return false;
+	    }
+	    true		
+    });
+
+    if overpaid_value_yuv == 0 {
+    	return;
+    }
+
+    // remove left overpaid value from path with largest contribution (the last one,
+    // as we sorted it before in ascending order). 
+    // NOTE: unwrap is okay here, as we check that at least one path left above:
+    let last_larget_contribution_path = selected_route.last_mut().unwrap();
+
+    // the cumulative contribution is in the last hop
+	let Some((last_hop, _)) = last_larget_contribution_path.hops.last_mut() else {
+		debug_assert!(false, "Path without hops should not be at this step");
+		return;
+	};
+
+	let last_hop_value_contribution_yuv = last_hop.value_contribution_yuv.as_mut().unwrap();
+	*last_hop_value_contribution_yuv -= overpaid_value_yuv;
 }
 
 fn check_chroma<L: Deref>(final_pixel_yuv: Option<&Pixel>, candidate: &CandidateRouteHop, chroma: Option<Chroma>, logger: &L) -> bool
@@ -3548,11 +3757,9 @@ mod tests {
 	use crate::blinded_path::{BlindedHop, BlindedPath, IntroductionNode};
 	use crate::routing::gossip::{NetworkGraph, P2PGossipSync, NodeId, EffectiveCapacity};
 	use crate::routing::utxo::{UtxoEntry, UtxoResult};
-	use crate::routing::router::{get_route, build_route_from_hops_internal, add_random_cltv_offset, default_node_features,
-		BlindedTail, InFlightHtlcs, Path, PaymentParameters, Route, RouteHint, RouteHintHop, RouteHop, RoutingFees,
-		DEFAULT_MAX_TOTAL_CLTV_EXPIRY_DELTA, MAX_PATH_LENGTH_ESTIMATE, RouteParameters, CandidateRouteHop, PublicHopCandidate};
+	use crate::routing::router::{add_random_cltv_offset, build_route_from_hops_internal, default_node_features, get_route, BlindedTail, CandidateRouteHop, InFlightHtlcs, Path, Payee, PaymentParameters, PublicHopCandidate, Route, RouteHint, RouteHintHop, RouteHop, RouteParameters, RoutingFees, DEFAULT_MAX_TOTAL_CLTV_EXPIRY_DELTA, MAX_PATH_LENGTH_ESTIMATE};
 	use crate::routing::scoring::{ChannelUsage, FixedPenaltyScorer, ScoreLookUp, ProbabilisticScorer, ProbabilisticScoringFeeParameters, ProbabilisticScoringDecayParameters};
-	use crate::routing::test_utils::{add_channel, add_or_update_node, build_graph, build_graph_with_yuv, build_line_graph, get_nodes, id_to_feature_flags, update_channel};
+	use crate::routing::test_utils::{add_channel, add_channel_internal, add_or_update_node, build_graph, build_graph_with_yuv, build_line_graph, get_nodes, id_to_feature_flags, setup_long_yuv_mpp_test, setup_simple_yuv_mpp_test, setup_simple_yuv_routing_test, update_channel, SetupYuvRoutingTestResult};
 	use crate::chain::transaction::OutPoint;
 	use crate::sign::EntropySource;
 	use crate::ln::types::ChannelId;
@@ -3579,7 +3786,7 @@ mod tests {
 	use bitcoin::hashes::hex::FromHex;
 	use bitcoin::secp256k1::{PublicKey,SecretKey};
 	use bitcoin::secp256k1::Secp256k1;
-	use yuv_pixels::Chroma;
+	use yuv_pixels::{Chroma, Pixel};
 
 	use crate::io::Cursor;
 	use crate::prelude::*;
@@ -5499,6 +5706,26 @@ mod tests {
 	}
 
 	#[test]
+	fn simple_yuv_mpp_route_test() {
+		let chroma = XOnlyPublicKey::from_str(PAYMENT_CHROMA)
+			.expect("Should be valid chroma")
+			.into();
+
+		let (secp_ctx, _, _, _, _) = build_graph_with_yuv(chroma, true);
+		let (_, _, _, nodes) = get_nodes(&secp_ctx);
+
+		let config = UserConfig {
+			support_yuv_payments: true,
+			..Default::default()
+		};
+		let clear_payment_params = PaymentParameters::from_node_id(nodes[2], 42)
+			.with_bolt11_features(channelmanager::provided_bolt11_invoice_features(&config))
+			.unwrap();
+
+		do_simple_yuv_mpp_route_test(clear_payment_params);
+	}
+
+	#[test]
 	fn simple_mpp_route_test() {
 		let (secp_ctx, _, _, _, _) = build_graph();
 		let (_, _, _, nodes) = get_nodes(&secp_ctx);
@@ -5554,9 +5781,22 @@ mod tests {
 		do_simple_mpp_route_test(two_hop_blinded_payment_params);
 	}
 
-
 	fn do_simple_mpp_route_test(payment_params: PaymentParameters) {
-		let (secp_ctx, network_graph, gossip_sync, _, logger) = build_graph();
+		do_simple_mpp_route_test_internal(payment_params, None);
+	}
+
+	fn do_simple_yuv_mpp_route_test(payment_params: PaymentParameters) {
+		let pixel = new_test_pixel(None, None, &Secp256k1::new());
+
+		do_simple_mpp_route_test_internal(payment_params, Some(pixel.chroma));
+	}
+
+	fn do_simple_mpp_route_test_internal(payment_params: PaymentParameters, chroma: Option<Chroma>) {
+		let (secp_ctx, network_graph, gossip_sync, _, logger) =
+			chroma
+				.map(|c| build_graph_with_yuv(c, true))
+				.unwrap_or_else(|| build_graph());
+		
 		let (our_privkey, our_id, privkeys, nodes) = get_nodes(&secp_ctx);
 		let scorer = ln_test_utils::TestScorer::new();
 		let keys_manager = ln_test_utils::TestKeysInterface::new(&[0u8; 32], Network::Testnet);
@@ -5571,6 +5811,8 @@ mod tests {
 		// Their aggregate capacity will be 50 + 60 + 180 = 290 sats.
 
 		// Path via node0 is channels {1, 3}. Limit them to 100 and 50 sats (total limit 50).
+		//
+		// NOTE: we do the same for YUV
 		update_channel(&gossip_sync, &secp_ctx, &our_privkey, UnsignedChannelUpdate {
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 1,
@@ -5582,7 +5824,7 @@ mod tests {
 			fee_base_msat: 0,
 			fee_proportional_millionths: 0,
 			excess_data: Vec::new(),
-			htlc_maximum_yuv: None,
+			htlc_maximum_yuv: chroma.map(|_v| 100_000),
 		});
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[0], UnsignedChannelUpdate {
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
@@ -5595,7 +5837,7 @@ mod tests {
 			fee_base_msat: 0,
 			fee_proportional_millionths: 0,
 			excess_data: Vec::new(),
-			htlc_maximum_yuv: None,
+			htlc_maximum_yuv: chroma.map(|_v| 50_000),
 		});
 
 		// Path via node7 is channels {12, 13}. Limit them to 60 and 60 sats
@@ -5611,7 +5853,7 @@ mod tests {
 			fee_base_msat: 0,
 			fee_proportional_millionths: 0,
 			excess_data: Vec::new(),
-			htlc_maximum_yuv: None,
+			htlc_maximum_yuv: chroma.map(|_v| 60_000),
 		});
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[7], UnsignedChannelUpdate {
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
@@ -5624,7 +5866,7 @@ mod tests {
 			fee_base_msat: 0,
 			fee_proportional_millionths: 0,
 			excess_data: Vec::new(),
-			htlc_maximum_yuv: None,
+			htlc_maximum_yuv: chroma.map(|_v| 60_000),
 		});
 
 		// Path via node1 is channels {2, 4}. Limit them to 200 and 180 sats
@@ -5640,7 +5882,7 @@ mod tests {
 			fee_base_msat: 0,
 			fee_proportional_millionths: 0,
 			excess_data: Vec::new(),
-			htlc_maximum_yuv: None,
+			htlc_maximum_yuv: chroma.map(|_v| 200_000),
 		});
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[1], UnsignedChannelUpdate {
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
@@ -5653,13 +5895,18 @@ mod tests {
 			fee_base_msat: 0,
 			fee_proportional_millionths: 0,
 			excess_data: Vec::new(),
-			htlc_maximum_yuv: None,
+			htlc_maximum_yuv: chroma.map(|_v| 180_000),
 		});
 
 		{
 			// Attempt to route more than available results in a failure.
-			let route_params = RouteParameters::from_payment_params_and_value(
+			let mut route_params = RouteParameters::from_payment_params_and_value(
 				payment_params.clone(), 300_000);
+
+			if let Some(chroma) = chroma {
+				route_params = route_params.with_yuv(Pixel::new(300_000, chroma));
+			}
+			
 			if let Err(LightningError{err, action: ErrorAction::IgnoreError}) = get_route(
 				&our_id, &route_params, &network_graph.read_only(), None,
 				Arc::clone(&logger), &scorer, &Default::default(), &random_seed_bytes) {
@@ -5670,8 +5917,13 @@ mod tests {
 		{
 			// Attempt to route while setting max_path_count to 0 results in a failure.
 			let zero_payment_params = payment_params.clone().with_max_path_count(0);
-			let route_params = RouteParameters::from_payment_params_and_value(
+			let mut route_params = RouteParameters::from_payment_params_and_value(
 				zero_payment_params, 100);
+
+			if let Some(chroma) = chroma {
+				route_params = route_params.with_yuv(Pixel::new(100, chroma));
+			}
+
 			if let Err(LightningError{err, action: ErrorAction::IgnoreError}) = get_route(
 				&our_id, &route_params, &network_graph.read_only(), None,
 				Arc::clone(&logger), &scorer, &Default::default(), &random_seed_bytes) {
@@ -5684,8 +5936,13 @@ mod tests {
 			// This is the case because the minimal_value_contribution_msat would require each path
 			// to account for 1/3 of the total value, which is violated by 2 out of 3 paths.
 			let fail_payment_params = payment_params.clone().with_max_path_count(3);
-			let route_params = RouteParameters::from_payment_params_and_value(
+			let mut route_params = RouteParameters::from_payment_params_and_value(
 				fail_payment_params, 250_000);
+
+			if let Some(chroma) = chroma {
+				route_params = route_params.with_yuv(Pixel::new(250_000, chroma));
+			}
+
 			if let Err(LightningError{err, action: ErrorAction::IgnoreError}) = get_route(
 				&our_id, &route_params, &network_graph.read_only(), None,
 				Arc::clone(&logger), &scorer, &Default::default(), &random_seed_bytes) {
@@ -5696,12 +5953,18 @@ mod tests {
 		{
 			// Now, attempt to route 250 sats (just a bit below the capacity).
 			// Our algorithm should provide us with these 3 paths.
-			let route_params = RouteParameters::from_payment_params_and_value(
+			let mut route_params = RouteParameters::from_payment_params_and_value(
 				payment_params.clone(), 250_000);
+
+			if let Some(chroma) = chroma {
+				route_params = route_params.with_yuv(Pixel::new(250_000, chroma));
+			}
+
 			let route = get_route(&our_id, &route_params, &network_graph.read_only(), None,
 				Arc::clone(&logger), &scorer, &Default::default(), &random_seed_bytes).unwrap();
 			assert_eq!(route.paths.len(), 3);
 			let mut total_amount_paid_msat = 0;
+			let mut total_amount_paid_yuv = 0;
 			for path in &route.paths {
 				if let Some(bt) = &path.blinded_tail {
 					assert_eq!(path.hops.len() + if bt.hops.len() == 1 { 0 } else { 1 }, 2);
@@ -5710,18 +5973,28 @@ mod tests {
 					assert_eq!(path.hops.last().unwrap().pubkey, nodes[2]);
 				}
 				total_amount_paid_msat += path.final_value_msat();
+				total_amount_paid_yuv += path.final_pixel_yuv().map_or(0, |p| p.luma.amount);
 			}
 			assert_eq!(total_amount_paid_msat, 250_000);
+			if chroma.is_some() {
+				assert_eq!(total_amount_paid_yuv, 250_000);
+			}
 		}
 
 		{
 			// Attempt to route an exact amount is also fine
-			let route_params = RouteParameters::from_payment_params_and_value(
+			let mut route_params = RouteParameters::from_payment_params_and_value(
 				payment_params.clone(), 290_000);
+
+			if let Some(chroma) = chroma {
+				route_params = route_params.with_yuv(Pixel::new(290_000, chroma));
+			}
+
 			let route = get_route(&our_id, &route_params, &network_graph.read_only(), None,
 				Arc::clone(&logger), &scorer, &Default::default(), &random_seed_bytes).unwrap();
 			assert_eq!(route.paths.len(), 3);
 			let mut total_amount_paid_msat = 0;
+			let mut total_amount_paid_yuv = 0;
 			for path in &route.paths {
 				if payment_params.payee.blinded_route_hints().len() != 0 {
 					assert!(path.blinded_tail.is_some()) } else { assert!(path.blinded_tail.is_none()) }
@@ -5745,14 +6018,33 @@ mod tests {
 					assert_eq!(path.hops.last().unwrap().pubkey, nodes[2]);
 				}
 				total_amount_paid_msat += path.final_value_msat();
+				total_amount_paid_yuv += path.final_pixel_yuv().map_or(0, |p| p.luma.amount);
 			}
 			assert_eq!(total_amount_paid_msat, 290_000);
+
+			if chroma.is_some() {
+				// The smae here as above, no fee no problems.
+				assert_eq!(total_amount_paid_yuv, 290_000);
+			}
 		}
 	}
 
 	#[test]
+	fn long_yuv_mpp_route_test() {
+		let pixel = new_test_pixel(None, None, &Secp256k1::new());
+
+		do_long_mpp_route_test(Some(pixel.chroma));
+	}
+
+	#[test]
 	fn long_mpp_route_test() {
-		let (secp_ctx, network_graph, gossip_sync, _, logger) = build_graph();
+		do_long_mpp_route_test(None);
+	}
+
+	fn do_long_mpp_route_test(chroma: Option<Chroma>) {
+		let (secp_ctx, network_graph, gossip_sync, chain_mon, logger) = chroma
+			.map(|c| build_graph_with_yuv(c, true))
+			.unwrap_or_else(|| build_graph());
 		let (our_privkey, our_id, privkeys, nodes) = get_nodes(&secp_ctx);
 		let scorer = ln_test_utils::TestScorer::new();
 		let keys_manager = ln_test_utils::TestKeysInterface::new(&[0u8; 32], Network::Testnet);
@@ -5781,7 +6073,7 @@ mod tests {
 			fee_base_msat: 0,
 			fee_proportional_millionths: 0,
 			excess_data: Vec::new(),
-			htlc_maximum_yuv: None,
+			htlc_maximum_yuv: chroma.map(|_| 100_000),
 		});
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[2], UnsignedChannelUpdate {
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
@@ -5794,7 +6086,7 @@ mod tests {
 			fee_base_msat: 0,
 			fee_proportional_millionths: 0,
 			excess_data: Vec::new(),
-			htlc_maximum_yuv: None,
+			htlc_maximum_yuv: chroma.map(|_| 100_000),
 		});
 
 		// Path via {node0, node2} is channels {1, 3, 5}.
@@ -5809,7 +6101,7 @@ mod tests {
 			fee_base_msat: 0,
 			fee_proportional_millionths: 0,
 			excess_data: Vec::new(),
-			htlc_maximum_yuv: None,
+			htlc_maximum_yuv: chroma.map(|_| 100_000),
 		});
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[0], UnsignedChannelUpdate {
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
@@ -5822,11 +6114,14 @@ mod tests {
 			fee_base_msat: 0,
 			fee_proportional_millionths: 0,
 			excess_data: Vec::new(),
-			htlc_maximum_yuv: None,
+			htlc_maximum_yuv: chroma.map(|_| 100_000),
 		});
 
 		// Capacity of 200 sats because this channel will be used by 3rd path as well.
-		add_channel(&gossip_sync, &secp_ctx, &privkeys[2], &privkeys[3], ChannelFeatures::from_le_bytes(id_to_feature_flags(5)), 5);
+		let channel_5_pixel = chroma.map(|c| Pixel::new(200_000, c));
+		// Add chain source only if used YUV is used
+		let chain_source = chroma.map(|_| chain_mon.clone());
+		add_channel_internal(&gossip_sync, &secp_ctx, &privkeys[2], &privkeys[3], ChannelFeatures::from_le_bytes(id_to_feature_flags(5)),  5,channel_5_pixel, chain_source);
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[2], UnsignedChannelUpdate {
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 5,
@@ -5838,7 +6133,7 @@ mod tests {
 			fee_base_msat: 0,
 			fee_proportional_millionths: 0,
 			excess_data: Vec::new(),
-			htlc_maximum_yuv: None,
+			htlc_maximum_yuv: channel_5_pixel.map(|p| p.luma.amount),
 		});
 
 		// Path via {node7, node2, node4} is channels {12, 13, 6, 11}.
@@ -5855,7 +6150,7 @@ mod tests {
 			fee_base_msat: 0,
 			fee_proportional_millionths: 0,
 			excess_data: Vec::new(),
-			htlc_maximum_yuv: None,
+			htlc_maximum_yuv: chroma.map(|_| 200_000),
 		});
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[7], UnsignedChannelUpdate {
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
@@ -5868,7 +6163,7 @@ mod tests {
 			fee_base_msat: 0,
 			fee_proportional_millionths: 0,
 			excess_data: Vec::new(),
-			htlc_maximum_yuv: None,
+			htlc_maximum_yuv: chroma.map(|_| 200_000),
 		});
 
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[2], UnsignedChannelUpdate {
@@ -5882,7 +6177,7 @@ mod tests {
 			fee_base_msat: 0,
 			fee_proportional_millionths: 0,
 			excess_data: Vec::new(),
-			htlc_maximum_yuv: None,
+			htlc_maximum_yuv: chroma.map(|_| 100_000),
 		});
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[4], UnsignedChannelUpdate {
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
@@ -5895,7 +6190,7 @@ mod tests {
 			fee_base_msat: 0,
 			fee_proportional_millionths: 0,
 			excess_data: Vec::new(),
-			htlc_maximum_yuv: None,
+			htlc_maximum_yuv: chroma.map(|_| 100_000),
 		});
 
 		// Path via {node7, node2} is channels {12, 13, 5}.
@@ -5928,10 +6223,184 @@ mod tests {
 				total_amount_paid_msat += path.final_value_msat();
 			}
 			assert_eq!(total_amount_paid_msat, 300_000);
-		}
-
+		}	
 	}
 
+	macro_rules! assert_path_short_chan_ids {
+		// expect tha given path consists of short chan ids provided in list of
+		// second parameter. For example:
+		//
+		// assert_route_short_chan_ids!(path, [12, 13]);
+		($path:expr, [$($id:expr),*]) => {{
+			let __gathered_path = $path.hops.iter().map(|h| h.short_channel_id).collect::<Vec<_>>();
+			assert_eq!(__gathered_path, vec![$($id),*]);
+		}};
+	}
+
+	macro_rules! assert_total_liquidity {
+		($route:expr, $expected_msat:expr, $expected_yuv:expr, $expected_length:expr) => {{
+			let mut total_msat = 0;
+			let mut total_yuv = 0;
+			for path in $route.paths.iter() {
+				assert_eq!(path.hops.len(), $expected_length);
+				total_msat += path.final_value_msat();
+				total_yuv += path.final_pixel_yuv().map_or(0, |p| p.luma.amount);
+			}
+
+			assert_eq!(total_msat, $expected_msat, "Expected final msat and total from pathes are not equal");
+			assert_eq!(total_yuv, $expected_yuv, "Expected final yuv and total from pathes are not equal");
+		}};
+	}
+
+
+	// Further tests cover the situations when liquidity of YUV and satoshis are
+	// mismatched. Particulalry when:
+	// 
+	// 1. Liquidity of YUV is enough, but there is no path with satoshis.
+	// 2. The same but vice-verse.
+	//
+	// Also, the same situations when pathes are splitted.
+	
+	// Case 1: Send slightly less YUV and not enough msat
+	#[test]
+	fn yuv_routing_simple_gather_sats_test() {
+		let SetupYuvRoutingTestResult { 
+			pixel: test_pixel, network_graph, logger, 
+			our_id, random_seed_bytes, scorer, 
+			payment_params, ..
+		} = setup_simple_yuv_routing_test();
+
+		let route_params = RouteParameters::from_payment_params_and_value(
+			payment_params.clone(), 300_000, // Too much satoshis for first path, but second one should be fine
+		).with_yuv(Pixel::new(1900, test_pixel.chroma)); // But YUVs should be enough
+
+		let route = get_route(&our_id, &route_params, &network_graph.read_only(), None,
+			Arc::clone(&logger), &scorer, &Default::default(), &random_seed_bytes).unwrap();
+
+		// we should collect one valid path node0--(12, 13)-->node2
+		assert_eq!(route.paths.len(), 1);
+
+		assert_path_short_chan_ids!(route.paths[0], [12, 13]);
+
+		assert_total_liquidity!(route, 300_000, 1900, 2);
+	}
+
+	// Case 2: Send a lot YUVs and enought msat for path through node1
+	#[test]
+	fn yuv_routing_simple_gather_yuvs_test() {
+		let SetupYuvRoutingTestResult { 
+			pixel: test_pixel, network_graph, logger, 
+			our_id, random_seed_bytes, scorer, 
+			payment_params, ..
+		} = setup_simple_yuv_routing_test();
+		
+		let route_params = RouteParameters::from_payment_params_and_value(
+			payment_params.clone(), 100_000,
+		).with_yuv(Pixel::new(3000, test_pixel.chroma)); // Too much YUVs for first path
+
+		let route = get_route(&our_id, &route_params, &network_graph.read_only(), None,
+			Arc::clone(&logger), &scorer, &Default::default(), &random_seed_bytes).unwrap();
+
+		// we should collect one valid path node0--(12, 13)-->node2
+		assert_eq!(route.paths.len(), 1);
+		assert_eq!(route.paths[0].hops.len(), 2);
+
+		assert_total_liquidity!(&route, 100_000, 3000, 2);
+		assert_path_short_chan_ids!(route.paths[0], [12, 13]);
+	}
+
+
+	// Case 3: Send payment with 400 sats and 1000 YUVs. But this time path through "node7" won't
+	// have enough value too. So algorigthm, should return two pathes as MPP.
+	#[test]
+	fn yuv_mpp_liquidity_split_sats_test() {		
+		let SetupYuvRoutingTestResult {
+			pixel: test_pixel, network_graph,
+			logger, our_id, random_seed_bytes,
+			scorer, payment_params, ..
+		} = setup_simple_yuv_mpp_test();
+		
+		let route_params = RouteParameters::from_payment_params_and_value(
+			payment_params.clone(), 400_000, // Too much satoshis for first path, but second one should be fine
+		).with_yuv(Pixel::new(1000, test_pixel.chroma)); // But YUVs should be enough
+
+		let route = get_route(&our_id, &route_params, &network_graph.read_only(), None,
+			Arc::clone(&logger), &scorer, &Default::default(), &random_seed_bytes).unwrap();
+
+		// we should collect two valid paths:
+		// our--(12)-->node7--(13)-->node2
+		// our--(1 )-->node0--(3 )-->node2
+		assert_eq!(route.paths.len(), 2);
+
+		assert_total_liquidity!(route, 400_000, 1000, 2);
+	}
+	
+	// Case 4: Send payment with 100 sats and  4000 YUVs, so path will be splitted 
+	// only because of YUVs.
+	#[test]
+	fn yuv_mpp_liquidity_split_yuv_test() {
+		let SetupYuvRoutingTestResult {
+			pixel: test_pixel, network_graph,
+			logger, our_id, random_seed_bytes,
+			scorer, payment_params, ..
+		} = setup_simple_yuv_mpp_test();
+
+		let route_params = RouteParameters::from_payment_params_and_value(
+			payment_params.clone(), 100_000, // Too much satoshis for first path, but second one should be fine
+		).with_yuv(Pixel::new(4000, test_pixel.chroma)); // But YUVs should be enough
+
+		let route = get_route(&our_id, &route_params, &network_graph.read_only(), None,
+			Arc::clone(&logger), &scorer, &Default::default(), &random_seed_bytes).unwrap();
+
+		// we should collect two valid paths:
+		// our--(12)-->node7--(13)-->node2
+		// our--(1 )-->node0--(3 )-->node2
+		assert_eq!(route.paths.len(), 2);
+
+		assert_total_liquidity!(route, 100_000, 4000, 2);
+	}
+
+	#[test]
+	fn yuv_mpp_long_test() {		
+		let SetupYuvRoutingTestResult {
+			pixel: test_pixel, network_graph,
+			logger, our_id, random_seed_bytes,
+			scorer, mut payment_params, nodes, ..
+		} = setup_long_yuv_mpp_test();
+
+		// Replace target node id with node3
+		match &mut payment_params.payee {
+			Payee::Clear { ref mut node_id, .. } => {
+				*node_id = nodes[3];
+			},
+			_ => unreachable!("YUV payments with blinded tails are not supported"),
+		};
+
+		let route_params = RouteParameters {
+			payment_params,
+			final_value_msat: 100_000,
+			yuv_pixel: Some(Pixel::new(6000, test_pixel.chroma)),
+			max_total_routing_fee_msat: None, // as this test is quite expensive, we'll remove the max fee at all.
+		};
+
+		let route = get_route(&our_id, &route_params, &network_graph.read_only(), None,
+			Arc::clone(&logger), &scorer, &Default::default(), &random_seed_bytes).unwrap();
+
+		let mut total_msat = 0;
+		let mut total_yuv = 0;
+
+		assert_eq!(route.paths.len(), 3, "Totaly we should have 3 paths");
+		for path in route.paths {
+			assert!(path.hops.len() == 3 || path.hops.len() == 4);
+			total_msat += path.final_value_msat();
+			total_yuv += path.final_pixel_yuv().map_or(0, |p| p.luma.amount);
+		}
+
+		assert_eq!(total_msat, 100_000);
+		assert_eq!(total_yuv, 6000);
+	}
+	
+	// TODO(yuv/fees): add test for this as well
 	#[test]
 	fn mpp_cheaper_route_test() {
 		let (secp_ctx, network_graph, gossip_sync, _, logger) = build_graph();
@@ -7092,17 +7561,19 @@ mod tests {
 					pubkey: PublicKey::from_slice(&<Vec<u8>>::from_hex("02eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f283686619").unwrap()[..]).unwrap(),
 					channel_features: ChannelFeatures::empty(), node_features: NodeFeatures::empty(),
 					short_channel_id: 0, fee_msat: 100, cltv_expiry_delta: 0, maybe_announced_channel: true,
+					fee_yuv: None,
 				},
 				RouteHop {
 					pubkey: PublicKey::from_slice(&<Vec<u8>>::from_hex("0324653eac434488002cc06bbfb7f10fe18991e35f9fe4302dbea6d2353dc0ab1c").unwrap()[..]).unwrap(),
 					channel_features: ChannelFeatures::empty(), node_features: NodeFeatures::empty(),
 					short_channel_id: 0, fee_msat: 150, cltv_expiry_delta: 0, maybe_announced_channel: true,
+					fee_yuv: None,
 				},
 				RouteHop {
 					pubkey: PublicKey::from_slice(&<Vec<u8>>::from_hex("027f31ebc5462c1fdce1b737ecff52d37d75dea43ce11c74d25aa297165faa2007").unwrap()[..]).unwrap(),
 					channel_features: ChannelFeatures::empty(), node_features: NodeFeatures::empty(),
 					short_channel_id: 0, fee_msat: 225, cltv_expiry_delta: 0, maybe_announced_channel: true,
-
+					fee_yuv: None,
 				},
 			], blinded_tail: None, chroma: None, }],
 			route_params: None,
@@ -7120,22 +7591,26 @@ mod tests {
 					pubkey: PublicKey::from_slice(&<Vec<u8>>::from_hex("02eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f283686619").unwrap()[..]).unwrap(),
 					channel_features: ChannelFeatures::empty(), node_features: NodeFeatures::empty(),
 					short_channel_id: 0, fee_msat: 100, cltv_expiry_delta: 0, maybe_announced_channel: true,
+					fee_yuv: None,
 				},
 				RouteHop {
 					pubkey: PublicKey::from_slice(&<Vec<u8>>::from_hex("0324653eac434488002cc06bbfb7f10fe18991e35f9fe4302dbea6d2353dc0ab1c").unwrap()[..]).unwrap(),
 					channel_features: ChannelFeatures::empty(), node_features: NodeFeatures::empty(),
 					short_channel_id: 0, fee_msat: 150, cltv_expiry_delta: 0, maybe_announced_channel: true,
+					fee_yuv: None,
 				},
 			], blinded_tail: None, chroma: None, }, Path { hops: vec![
 				RouteHop {
 					pubkey: PublicKey::from_slice(&<Vec<u8>>::from_hex("02eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f283686619").unwrap()[..]).unwrap(),
 					channel_features: ChannelFeatures::empty(), node_features: NodeFeatures::empty(),
 					short_channel_id: 0, fee_msat: 100, cltv_expiry_delta: 0, maybe_announced_channel: true,
+					fee_yuv: None,
 				},
 				RouteHop {
 					pubkey: PublicKey::from_slice(&<Vec<u8>>::from_hex("0324653eac434488002cc06bbfb7f10fe18991e35f9fe4302dbea6d2353dc0ab1c").unwrap()[..]).unwrap(),
 					channel_features: ChannelFeatures::empty(), node_features: NodeFeatures::empty(),
 					short_channel_id: 0, fee_msat: 150, cltv_expiry_delta: 0, maybe_announced_channel: true,
+					fee_yuv: None,
 				},
 			], blinded_tail: None, chroma: None, }],
 			route_params: None,
@@ -7760,7 +8235,7 @@ mod tests {
 				fee_msat: 100,
 				cltv_expiry_delta: 0,
 				maybe_announced_channel: true,
-				// yuv_fee: None,
+				fee_yuv: None,
 			}],
 			blinded_tail: Some(BlindedTail {
 				hops: blinded_path_1.blinded_hops,
@@ -7777,7 +8252,7 @@ mod tests {
 				fee_msat: 100,
 				cltv_expiry_delta: 0,
 				maybe_announced_channel: true,
-				// yuv_fee: None,
+				fee_yuv: None,
 			}], blinded_tail: None, chroma: None, }],
 			route_params: None,
 		};
@@ -7819,7 +8294,7 @@ mod tests {
 				fee_msat: 100,
 				cltv_expiry_delta: 0,
 				maybe_announced_channel: false,
-				// yuv_fee: None,
+				fee_yuv: None,
 			},
 			RouteHop {
 				pubkey: ln_test_utils::pubkey(43),
@@ -7829,7 +8304,7 @@ mod tests {
 				fee_msat: 1,
 				cltv_expiry_delta: 0,
 				maybe_announced_channel: false,
-				// yuv_fee: None,
+				fee_yuv: None,
 			}],
 			blinded_tail: Some(BlindedTail {
 				hops: blinded_path.blinded_hops,
@@ -7865,7 +8340,7 @@ mod tests {
 				fee_msat: 100,
 				cltv_expiry_delta: 0,
 				maybe_announced_channel: false,
-				// yuv_fee: None,
+				fee_yuv: None,
 			},
 			RouteHop {
 				pubkey: ln_test_utils::pubkey(43),
@@ -7875,8 +8350,8 @@ mod tests {
 				fee_msat: 1,
 				cltv_expiry_delta: 0,
 				maybe_announced_channel: false,
-			}
-			],
+				fee_yuv: None,
+			}],
 			blinded_tail: Some(BlindedTail {
 				hops: blinded_path.blinded_hops,
 				blinding_point: blinded_path.blinding_point,

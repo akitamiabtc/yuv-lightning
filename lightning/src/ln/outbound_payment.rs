@@ -1354,6 +1354,9 @@ impl OutboundPayments {
 			return Err(PaymentSendFailure::ParameterError(APIError::APIMisuseError{err: "Payment secret is required for multi-path payments".to_owned()}));
 		}
 		let mut total_value = 0;
+		let mut total_value_yuv = route.route_params.as_ref()
+				.and_then(|p| p.yuv_pixel.as_ref())
+				.map(|_| 0_u128);
 		let our_node_id = node_signer.get_node_id(Recipient::Node).unwrap(); // TODO no unwrap
 		let mut path_errs = Vec::with_capacity(route.paths.len());
 		'path_check: for path in route.paths.iter() {
@@ -1377,6 +1380,9 @@ impl OutboundPayments {
 				}
 			}
 			total_value += path.final_value_msat();
+			total_value_yuv.as_mut().zip(path.final_pixel_yuv()).map(|(total, path_pixel)| {
+				*total += path_pixel.luma.amount;
+			});
 			path_errs.push(Ok(()));
 		}
 		if path_errs.iter().any(|e| e.is_err()) {
@@ -1390,15 +1396,10 @@ impl OutboundPayments {
 		let mut results = Vec::new();
 		debug_assert_eq!(route.paths.len(), onion_session_privs.len());
 		for (path, session_priv_bytes) in route.paths.iter().zip(onion_session_privs.into_iter()) {
-			// if RouteParameters are set, try to get the yuv value from it
-			let yuv_value = route.route_params.as_ref()
-				.and_then(|p| p.yuv_pixel.as_ref())
-				.map(|pixel| pixel.luma.amount);
-
 			let mut path_res = send_payment_along_path(SendAlongPathArgs {
 				path: &path, payment_hash: &payment_hash, recipient_onion: recipient_onion.clone(),
 				total_value, cur_height, payment_id, keysend_preimage: &keysend_preimage, session_priv_bytes,
-				yuv_value,
+				yuv_value: total_value_yuv,
 			});
 			match path_res {
 				Ok(_) => {},
@@ -2028,7 +2029,7 @@ mod tests {
 				fee_msat: 0,
 				cltv_expiry_delta: 0,
 				maybe_announced_channel: true,
-				// yuv_fee: None,
+				fee_yuv: None,
 			}], blinded_tail: None, chroma: None, }],
 			route_params: Some(route_params.clone()),
 		};
@@ -2366,6 +2367,7 @@ mod tests {
 								fee_msat: invoice.amount_msats(),
 								cltv_expiry_delta: 0,
 								maybe_announced_channel: true,
+								fee_yuv: None,
 							}
 						],
 						blinded_tail: None,

@@ -1893,6 +1893,7 @@ impl Writeable for YuvPayment {
 		self.counterparty_pixel.write(writer)?;
 		self.funding_pixel.write(writer)?;
 		self.is_funding_yuv_transaction_confirmed.write(writer)?;
+		self.funding_tx_type.write(writer)?;
 		self.funding_pixel_proof.write(writer)?;
 		self.holder_shutdown_inner_key.write(writer)?;
 		self.counterparty_shutdown_inner_key.write(writer)?;
@@ -1907,7 +1908,8 @@ impl Readable for YuvPayment {
 		let counterparty_pixel: Pixel = Readable::read(reader)?;
 		let funding_pixel: Pixel = Readable::read(reader)?;
 		let is_funding_yuv_transaction_confirmed: bool = Readable::read(reader)?;
-		let funding_pixel_proof: Option<YuvTxType> = Readable::read(reader)?;
+		let funding_tx_type: Option<YuvTxType> = Readable::read(reader)?;
+		let funding_pixel_proof: Option<MultisigPixelProof> = Readable::read(reader)?;
 		let holder_inner_key: Option<PublicKey> = Readable::read(reader)?;
 		let counterparty_inner_key: Option<PublicKey> = Readable::read(reader)?;
 
@@ -1917,6 +1919,7 @@ impl Readable for YuvPayment {
 			funding_pixel,
 			is_funding_yuv_transaction_confirmed,
 			funding_pixel_proof,
+			funding_tx_type,
 			holder_shutdown_inner_key: holder_inner_key,
 			counterparty_shutdown_inner_key: counterparty_inner_key,
 		})

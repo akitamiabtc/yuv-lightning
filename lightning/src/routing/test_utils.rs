@@ -7,10 +7,14 @@
 // You may not use this file except in accordance with one or both of these
 // licenses.
 
+use crate::ln::channelmanager;
+use crate::ln::functional_test_utils::new_test_pixel;
 use crate::routing::gossip::{NetworkGraph, NodeAlias, P2PGossipSync};
 use crate::ln::features::{ChannelFeatures, NodeFeatures};
 use crate::ln::msgs::{ChannelAnnouncement, ChannelUpdate, MAX_VALUE_MSAT, NodeAnnouncement, RoutingMessageHandler, SocketAddress, UnsignedChannelAnnouncement, UnsignedChannelUpdate, UnsignedNodeAnnouncement};
-use crate::util::test_utils;
+use crate::sign::EntropySource;
+use crate::util::config::UserConfig;
+use crate::util::test_utils::{self, TestChainSource};
 use crate::util::ser::Writeable;
 
 use bitcoin::blockdata::constants::ChainHash;
@@ -28,6 +32,10 @@ use crate::prelude::*;
 use crate::sync::{self, Arc};
 
 use crate::routing::gossip::NodeId;
+
+use crate::util::test_utils as ln_test_utils;
+
+use super::router::PaymentParameters;
 
 // Using the same keys for LN and BTC ids
 pub(crate) fn add_channel(
@@ -86,7 +94,7 @@ pub(super) fn add_channel_internal(
 	};
 	match gossip_sync.handle_channel_announcement(&valid_announcement) {
 		Ok(res) => assert!(res),
-		_ => panic!()
+		Err(err) => panic!("{:?}", err),
 	};
 }
 
@@ -332,7 +340,7 @@ pub(super) fn build_graph_internal(chroma: Option<Chroma>, use_chain_source: boo
 		fee_base_msat: 0,
 		fee_proportional_millionths: 0,
 		excess_data: Vec::new(),
-		htlc_maximum_yuv: Some(HTLC_MAXIMUM_YUV),
+		htlc_maximum_yuv: chroma.map(|_| HTLC_MAXIMUM_YUV),
 	});
 
 	add_or_update_node(&gossip_sync, &secp_ctx, &privkeys[0], NodeFeatures::from_le_bytes(id_to_feature_flags(1)), 0);
@@ -349,7 +357,7 @@ pub(super) fn build_graph_internal(chroma: Option<Chroma>, use_chain_source: boo
 		fee_base_msat: u32::max_value(),
 		fee_proportional_millionths: u32::max_value(),
 		excess_data: Vec::new(),
-		htlc_maximum_yuv: Some(HTLC_MAXIMUM_YUV),
+		htlc_maximum_yuv: chroma.map(|_| HTLC_MAXIMUM_YUV),
 	});
 	update_channel(&gossip_sync, &secp_ctx, &privkeys[1], UnsignedChannelUpdate {
 		chain_hash: ChainHash::using_genesis_block(Network::Testnet),
@@ -362,7 +370,7 @@ pub(super) fn build_graph_internal(chroma: Option<Chroma>, use_chain_source: boo
 		fee_base_msat: 0,
 		fee_proportional_millionths: 0,
 		excess_data: Vec::new(),
-		htlc_maximum_yuv: Some(HTLC_MAXIMUM_YUV),
+		htlc_maximum_yuv: chroma.map(|_| HTLC_MAXIMUM_YUV),
 	});
 
 	add_or_update_node(&gossip_sync, &secp_ctx, &privkeys[1], NodeFeatures::from_le_bytes(id_to_feature_flags(2)), 0);
@@ -379,7 +387,7 @@ pub(super) fn build_graph_internal(chroma: Option<Chroma>, use_chain_source: boo
 		fee_base_msat: u32::max_value(),
 		fee_proportional_millionths: u32::max_value(),
 		excess_data: Vec::new(),
-		htlc_maximum_yuv: Some(HTLC_MAXIMUM_YUV),
+		htlc_maximum_yuv: chroma.map(|_| HTLC_MAXIMUM_YUV),
 	});
 	update_channel(&gossip_sync, &secp_ctx, &privkeys[7], UnsignedChannelUpdate {
 		chain_hash: ChainHash::using_genesis_block(Network::Testnet),
@@ -392,7 +400,7 @@ pub(super) fn build_graph_internal(chroma: Option<Chroma>, use_chain_source: boo
 		fee_base_msat: 0,
 		fee_proportional_millionths: 0,
 		excess_data: Vec::new(),
-		htlc_maximum_yuv: Some(HTLC_MAXIMUM_YUV),
+		htlc_maximum_yuv: chroma.map(|_| HTLC_MAXIMUM_YUV),
 	});
 
 	add_or_update_node(&gossip_sync, &secp_ctx, &privkeys[7], NodeFeatures::from_le_bytes(id_to_feature_flags(8)), 0);
@@ -409,7 +417,7 @@ pub(super) fn build_graph_internal(chroma: Option<Chroma>, use_chain_source: boo
 		fee_base_msat: 0,
 		fee_proportional_millionths: 0,
 		excess_data: Vec::new(),
-		htlc_maximum_yuv: Some(HTLC_MAXIMUM_YUV),
+		htlc_maximum_yuv: chroma.map(|_| HTLC_MAXIMUM_YUV),
 	});
 	update_channel(&gossip_sync, &secp_ctx, &privkeys[2], UnsignedChannelUpdate {
 		chain_hash: ChainHash::using_genesis_block(Network::Testnet),
@@ -422,7 +430,7 @@ pub(super) fn build_graph_internal(chroma: Option<Chroma>, use_chain_source: boo
 		fee_base_msat: 100,
 		fee_proportional_millionths: 0,
 		excess_data: Vec::new(),
-		htlc_maximum_yuv: Some(HTLC_MAXIMUM_YUV),
+		htlc_maximum_yuv: chroma.map(|_| HTLC_MAXIMUM_YUV),
 	});
 
 	add_channel_internal(&gossip_sync, &secp_ctx, &privkeys[1], &privkeys[2], ChannelFeatures::from_le_bytes(id_to_feature_flags(4)), 4, yuv_pixel, Some(chain_monitor.clone()));
@@ -437,7 +445,7 @@ pub(super) fn build_graph_internal(chroma: Option<Chroma>, use_chain_source: boo
 		fee_base_msat: 0,
 		fee_proportional_millionths: 1000000,
 		excess_data: Vec::new(),
-		htlc_maximum_yuv: Some(HTLC_MAXIMUM_YUV),
+		htlc_maximum_yuv: chroma.map(|_| HTLC_MAXIMUM_YUV),
 	});
 	update_channel(&gossip_sync, &secp_ctx, &privkeys[2], UnsignedChannelUpdate {
 		chain_hash: ChainHash::using_genesis_block(Network::Testnet),
@@ -450,7 +458,7 @@ pub(super) fn build_graph_internal(chroma: Option<Chroma>, use_chain_source: boo
 		fee_base_msat: 0,
 		fee_proportional_millionths: 0,
 		excess_data: Vec::new(),
-		htlc_maximum_yuv: Some(HTLC_MAXIMUM_YUV),
+		htlc_maximum_yuv: chroma.map(|_| HTLC_MAXIMUM_YUV),
 	});
 
 	add_channel_internal(&gossip_sync, &secp_ctx, &privkeys[7], &privkeys[2], ChannelFeatures::from_le_bytes(id_to_feature_flags(13)), 13, yuv_pixel, Some(chain_monitor.clone()));
@@ -465,7 +473,7 @@ pub(super) fn build_graph_internal(chroma: Option<Chroma>, use_chain_source: boo
 		fee_base_msat: 0,
 		fee_proportional_millionths: 2000000,
 		excess_data: Vec::new(),
-		htlc_maximum_yuv: Some(HTLC_MAXIMUM_YUV),
+		htlc_maximum_yuv: chroma.map(|_| HTLC_MAXIMUM_YUV),
 	});
 	update_channel(&gossip_sync, &secp_ctx, &privkeys[2], UnsignedChannelUpdate {
 		chain_hash: ChainHash::using_genesis_block(Network::Testnet),
@@ -478,7 +486,7 @@ pub(super) fn build_graph_internal(chroma: Option<Chroma>, use_chain_source: boo
 		fee_base_msat: 0,
 		fee_proportional_millionths: 0,
 		excess_data: Vec::new(),
-		htlc_maximum_yuv: Some(HTLC_MAXIMUM_YUV),
+		htlc_maximum_yuv: chroma.map(|_| HTLC_MAXIMUM_YUV),
 	});
 
 	add_or_update_node(&gossip_sync, &secp_ctx, &privkeys[2], NodeFeatures::from_le_bytes(id_to_feature_flags(3)), 0);
@@ -495,7 +503,7 @@ pub(super) fn build_graph_internal(chroma: Option<Chroma>, use_chain_source: boo
 		fee_base_msat: 0,
 		fee_proportional_millionths: 0,
 		excess_data: Vec::new(),
-		htlc_maximum_yuv: Some(HTLC_MAXIMUM_YUV),
+		htlc_maximum_yuv: chroma.map(|_| HTLC_MAXIMUM_YUV),
 	});
 	update_channel(&gossip_sync, &secp_ctx, &privkeys[4], UnsignedChannelUpdate {
 		chain_hash: ChainHash::using_genesis_block(Network::Testnet),
@@ -508,7 +516,7 @@ pub(super) fn build_graph_internal(chroma: Option<Chroma>, use_chain_source: boo
 		fee_base_msat: 0,
 		fee_proportional_millionths: 0,
 		excess_data: Vec::new(),
-		htlc_maximum_yuv: Some(HTLC_MAXIMUM_YUV),
+		htlc_maximum_yuv: chroma.map(|_| HTLC_MAXIMUM_YUV),
 	});
 
 	add_channel_internal(&gossip_sync, &secp_ctx, &privkeys[4], &privkeys[3], ChannelFeatures::from_le_bytes(id_to_feature_flags(11)), 11, yuv_pixel, Some(chain_monitor.clone()));
@@ -523,7 +531,7 @@ pub(super) fn build_graph_internal(chroma: Option<Chroma>, use_chain_source: boo
 		fee_base_msat: 0,
 		fee_proportional_millionths: 0,
 		excess_data: Vec::new(),
-		htlc_maximum_yuv: Some(HTLC_MAXIMUM_YUV),
+		htlc_maximum_yuv: chroma.map(|_| HTLC_MAXIMUM_YUV),
 	});
 	update_channel(&gossip_sync, &secp_ctx, &privkeys[3], UnsignedChannelUpdate {
 		chain_hash: ChainHash::using_genesis_block(Network::Testnet),
@@ -536,7 +544,7 @@ pub(super) fn build_graph_internal(chroma: Option<Chroma>, use_chain_source: boo
 		fee_base_msat: 0,
 		fee_proportional_millionths: 0,
 		excess_data: Vec::new(),
-		htlc_maximum_yuv: Some(HTLC_MAXIMUM_YUV),
+		htlc_maximum_yuv: chroma.map(|_| HTLC_MAXIMUM_YUV),
 	});
 
 	add_or_update_node(&gossip_sync, &secp_ctx, &privkeys[4], NodeFeatures::from_le_bytes(id_to_feature_flags(5)), 0);
@@ -555,7 +563,7 @@ pub(super) fn build_graph_internal(chroma: Option<Chroma>, use_chain_source: boo
 		fee_base_msat: 0,
 		fee_proportional_millionths: 1000000,
 		excess_data: Vec::new(),
-		htlc_maximum_yuv: Some(HTLC_MAXIMUM_YUV),
+		htlc_maximum_yuv: chroma.map(|_| HTLC_MAXIMUM_YUV),
 	});
 	update_channel(&gossip_sync, &secp_ctx, &privkeys[5], UnsignedChannelUpdate {
 		chain_hash: ChainHash::using_genesis_block(Network::Testnet),
@@ -568,10 +576,232 @@ pub(super) fn build_graph_internal(chroma: Option<Chroma>, use_chain_source: boo
 		fee_base_msat: 0,
 		fee_proportional_millionths: 0,
 		excess_data: Vec::new(),
-		htlc_maximum_yuv: Some(HTLC_MAXIMUM_YUV),
+		htlc_maximum_yuv: chroma.map(|_| HTLC_MAXIMUM_YUV),
 	});
 
 	add_or_update_node(&gossip_sync, &secp_ctx, &privkeys[5], NodeFeatures::from_le_bytes(id_to_feature_flags(6)), 0);
 
 	(secp_ctx, network_graph, gossip_sync, chain_monitor, logger)
 }
+
+
+pub(super) struct SetupYuvRoutingTestResult {
+	pub(crate) pixel: Pixel,
+	pub(crate) secp_ctx: Secp256k1<bitcoin::secp256k1::All>,
+	pub(crate) network_graph: Arc<NetworkGraph<Arc<ln_test_utils::TestLogger>>>,
+	pub(crate) gossip_sync: P2PGossipSync<Arc<NetworkGraph<Arc<ln_test_utils::TestLogger>>>, Arc<ln_test_utils::TestChainSource>, Arc<ln_test_utils::TestLogger>>,
+	pub(crate) logger: Arc<ln_test_utils::TestLogger>,
+	pub(crate) our_privkey: SecretKey, 
+	pub(crate) our_id: PublicKey, 
+	pub(crate) node_privkeys: Vec<SecretKey>, 
+	pub(crate) random_seed_bytes: [u8; 32],
+	pub(crate) scorer: ln_test_utils::TestScorer,
+	pub(crate) payment_params: PaymentParameters,
+	pub(crate) chain_source: Arc<TestChainSource>,
+	pub(crate) nodes: Vec<PublicKey>,
+}
+
+pub(super) fn setup_simple_yuv_routing_test() -> SetupYuvRoutingTestResult {
+    let test_pixel = new_test_pixel(Some(u128::MAX.into()), None, &Secp256k1::new());
+
+    let (secp_ctx, network_graph, gossip_sync, chain_source, logger) = build_graph_with_yuv(test_pixel.chroma, true);
+    let (our_privkey, our_id, privkeys, nodes) = get_nodes(&secp_ctx);
+    let keys_manager = ln_test_utils::TestKeysInterface::new(&[0u8; 32], Network::Testnet);
+    let random_seed_bytes = keys_manager.get_secure_random_bytes();
+    let scorer = ln_test_utils::TestScorer::new();
+
+    // Disable channels which we are not interested in, particulartl our->node1->node2	
+    update_channel(&gossip_sync, &secp_ctx, &our_privkey, UnsignedChannelUpdate {
+	    chain_hash: ChainHash::using_genesis_block(Network::Testnet),
+	    short_channel_id: 2,
+	    timestamp: 2,
+	    flags: 2, // disable channel flag
+	    cltv_expiry_delta: 0,
+	    htlc_minimum_msat: 0,
+	    htlc_maximum_msat: 0,
+	    fee_base_msat: 0,
+	    fee_proportional_millionths: 0,
+	    excess_data: Vec::new(),
+	    htlc_maximum_yuv: Some(0),
+	});
+    // Update liquidities, setting up path our->node1->noed2
+    // Setting our----(1)-->node0 with 200 sats adn 2000 YUV.
+    // And     node0--(3)-->node2 with 300 sats and 3000 YUV.
+    update_channel(&gossip_sync, &secp_ctx, &our_privkey, UnsignedChannelUpdate {
+	    chain_hash: ChainHash::using_genesis_block(Network::Testnet),
+	    short_channel_id: 1,
+	    timestamp: 2,
+	    flags: 0,
+	    cltv_expiry_delta: 0,
+	    htlc_minimum_msat: 0,
+	    htlc_maximum_msat: 200_000,
+	    fee_base_msat: 0,
+	    fee_proportional_millionths: 0,
+	    excess_data: Vec::new(),
+	    htlc_maximum_yuv: Some(3000),
+    });
+    update_channel(&gossip_sync, &secp_ctx, &privkeys[0], UnsignedChannelUpdate {
+	    chain_hash: ChainHash::using_genesis_block(Network::Testnet),
+	    short_channel_id: 3,
+	    timestamp: 2,
+	    flags: 0,
+	    cltv_expiry_delta: 0,
+	    htlc_minimum_msat: 0,
+	    htlc_maximum_msat: 200_000,
+	    fee_base_msat: 0,
+	    fee_proportional_millionths: 0,
+	    excess_data: Vec::new(),
+	    htlc_maximum_yuv: Some(2000),
+    });
+    // Remove fee from 13 channel
+    update_channel(&gossip_sync, &secp_ctx, &privkeys[7], UnsignedChannelUpdate {
+	    chain_hash: ChainHash::using_genesis_block(Network::Testnet),
+	    short_channel_id: 13,
+	    timestamp: 2,
+	    flags: 0,
+	    cltv_expiry_delta: 0,
+	    htlc_minimum_msat: 0,
+	    htlc_maximum_msat: MAX_VALUE_MSAT,
+	    fee_base_msat: 0,
+	    fee_proportional_millionths: 0,
+	    excess_data: Vec::new(),
+	    htlc_maximum_yuv: Some(u128::MAX),
+    });
+	
+    // Constructring payment parameters to `node2` with YUV payment feature
+    let config = UserConfig {
+			    support_yuv_payments: true,
+			    ..Default::default()
+		    };
+    let payment_params = PaymentParameters::from_node_id(nodes[2], 42)
+			    .with_bolt11_features(channelmanager::provided_bolt11_invoice_features(&config))
+			    .unwrap();
+
+    SetupYuvRoutingTestResult {
+		pixel: test_pixel, secp_ctx, network_graph,
+		gossip_sync, logger, our_privkey, our_id,
+		node_privkeys: privkeys,
+		random_seed_bytes, scorer, payment_params,
+		chain_source, nodes,
+    }
+}
+
+pub(super) fn setup_simple_yuv_mpp_test() -> SetupYuvRoutingTestResult {
+	let res = setup_simple_yuv_routing_test();
+	
+	// Add maximum limits for "node7", so algorithm would split payment through
+	// two pathes using "node0" and "node7".
+	update_channel(&res.gossip_sync, &res.secp_ctx, &res.node_privkeys[7], UnsignedChannelUpdate {
+		chain_hash: ChainHash::using_genesis_block(Network::Testnet),
+		short_channel_id: 13,
+		timestamp: 3,
+		flags: 0,
+		cltv_expiry_delta: 0,
+		htlc_minimum_msat: 0,
+		htlc_maximum_msat: 300_000,
+		fee_base_msat: 0,
+		fee_proportional_millionths: 0,
+		excess_data: Vec::new(),
+		htlc_maximum_yuv: Some(3000),
+	});
+	update_channel(&res.gossip_sync, &res.secp_ctx, &res.our_privkey, UnsignedChannelUpdate {
+		chain_hash: ChainHash::using_genesis_block(Network::Testnet),
+		short_channel_id: 12,
+		timestamp: 3,
+		flags: 0,
+		cltv_expiry_delta: 0,
+		htlc_minimum_msat: 0,
+		htlc_maximum_msat: 300_000,
+		fee_base_msat: 0,
+		fee_proportional_millionths: 0,
+		excess_data: Vec::new(),
+		htlc_maximum_yuv: Some(3000),
+	});
+
+	res
+}
+
+struct UpdateChannelCapacityYuv {
+	node_id: usize,
+	timestamp: u32,
+	short_channel_id: u64,
+	htlc_maximum_msat: u64,
+	htlc_maximum_yuv: u128,
+}
+
+fn update_channel_capacity_with_yuv(res: &SetupYuvRoutingTestResult, req: UpdateChannelCapacityYuv) {
+	update_channel(&res.gossip_sync, &res.secp_ctx, &res.node_privkeys[req.node_id], UnsignedChannelUpdate {
+		chain_hash: ChainHash::using_genesis_block(Network::Testnet),
+		short_channel_id: req.short_channel_id, 
+		timestamp: req.timestamp,
+		flags: 0, // this make it public
+		cltv_expiry_delta: 0, 
+		htlc_minimum_msat: 0,
+		htlc_maximum_msat: req.htlc_maximum_msat,
+		fee_base_msat: 0,
+		fee_proportional_millionths: 0,
+		htlc_maximum_yuv: Some(req.htlc_maximum_yuv), // Add YUV support here
+		excess_data:  Vec::new(),
+	});
+}
+
+/// Make channel 5 public, and make 5,2,4,6,11 channels support
+/// YUV and set node 3 as target this time.
+pub(super) fn setup_long_yuv_mpp_test() -> SetupYuvRoutingTestResult {
+	let res = setup_simple_yuv_mpp_test();
+
+	// Make channel 5 public with YUV, sats and YUV capacity set to 
+	add_channel_internal(&res.gossip_sync, &res.secp_ctx, &res.node_privkeys[2],
+		&res.node_privkeys[3], ChannelFeatures::from_le_bytes(id_to_feature_flags(5)),
+		5, Some(res.pixel), Some(res.chain_source.clone()));
+	update_channel_capacity_with_yuv(&res, UpdateChannelCapacityYuv {
+		node_id: 2,
+		timestamp: 3,
+		short_channel_id: 5,
+		htlc_maximum_msat: 500_000,
+		htlc_maximum_yuv: 5000,
+	});
+
+	// Update channel 2 with limited YUVs capacity
+	update_channel(&res.gossip_sync, &res.secp_ctx, &res.our_privkey, UnsignedChannelUpdate {
+		chain_hash: ChainHash::using_genesis_block(Network::Testnet),
+		short_channel_id: 2, 
+		timestamp: 3,
+		flags: 0, // this make it public
+		cltv_expiry_delta: 0, 
+		htlc_minimum_msat: 0,
+		htlc_maximum_msat: 500_000,
+		fee_base_msat: 0,
+		fee_proportional_millionths: 0,
+		htlc_maximum_yuv: Some(4000), // Add YUV support here
+		excess_data:  Vec::new(),
+	});
+	// Update channel 4 to remove proportional fee:
+	update_channel_capacity_with_yuv(&res, UpdateChannelCapacityYuv {
+		node_id: 1,
+		timestamp: 3,
+		short_channel_id: 4,
+		htlc_maximum_msat: 500_000,
+		htlc_maximum_yuv: 4000,
+	});
+
+	// Update channel 6 with new YUV limits
+	update_channel_capacity_with_yuv(&res, UpdateChannelCapacityYuv {
+		node_id: 2,
+		timestamp: 3,
+		short_channel_id: 6,
+		htlc_maximum_msat: 500_000,
+		htlc_maximum_yuv: 5000,
+	});
+	// The same for 11
+	update_channel_capacity_with_yuv(&res, UpdateChannelCapacityYuv {
+		node_id: 4,
+		timestamp: 3,
+		short_channel_id: 11,
+		htlc_maximum_msat: 500_000,
+		htlc_maximum_yuv: 5000,
+	});
+
+	res
+}
+

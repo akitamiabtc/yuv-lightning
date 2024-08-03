@@ -388,6 +388,40 @@ pub fn create_yuv_invoice_from_channelmanager_and_duration_since_epoch<M: Deref,
 }
 
 #[cfg(feature = "std")]
+/// The same as [`create_yuv_invoice_from_channelmanager_and_duration_since_epoch`], but provides
+/// the ability to add the payment_hash to the invoice.
+pub fn create_yuv_invoice_from_channelmanager_and_duration_since_epoch_with_payment_hash<M: Deref, T: Deref, YT: Deref, ES: Deref, NS: Deref, SP: Deref, F: Deref, R: Deref, L: Deref>(
+	channelmanager: &ChannelManager<M, T, YT, ES, NS, SP, F, R, L>, node_signer: NS, logger: L,
+	network: Currency, amt_msat: Option<u64>, description: String, duration_since_epoch: Duration,
+	invoice_expiry_delta_secs: u32, payment_hash: PaymentHash, min_final_cltv_expiry_delta: Option<u16>,
+	yuv_pixel: Option<Pixel>,
+) -> Result<Bolt11Invoice, SignOrCreationError<()>>
+where
+	M::Target: chain::Watch<<SP::Target as SignerProvider>::EcdsaSigner>,
+	T::Target: BroadcasterInterface,
+	YT::Target: YuvBroadcaster,
+	ES::Target: EntropySource,
+	NS::Target: NodeSigner,
+	SP::Target: SignerProvider,
+	F::Target: FeeEstimator,
+	R::Target: Router,
+	L::Target: Logger,
+{
+	let payment_secret = channelmanager.create_inbound_payment_for_hash(
+		payment_hash, amt_msat, invoice_expiry_delta_secs, min_final_cltv_expiry_delta,
+	).map_err(|()| SignOrCreationError::CreationError(CreationError::InvalidAmount))?;
+
+	_create_invoice_from_channelmanager_and_duration_since_epoch_with_payment_hash(
+		channelmanager, node_signer, logger, network, amt_msat,
+		Bolt11InvoiceDescription::Direct(
+			&Description::new(description).map_err(SignOrCreationError::CreationError)?,
+		),
+		duration_since_epoch, invoice_expiry_delta_secs, payment_hash, payment_secret,
+		min_final_cltv_expiry_delta, yuv_pixel,
+	)
+}
+
+#[cfg(feature = "std")]
 /// Utility to construct an invoice. Generally, unless you want to do something like a custom
 /// cltv_expiry, this is what you should be using to create an invoice. The reason being, this
 /// method stores the invoice's payment secret and preimage in `ChannelManager`, so (a) the user
@@ -589,6 +623,7 @@ fn _create_invoice_from_channelmanager_and_duration_since_epoch_with_payment_has
 		.payee_pub_key(our_node_pubkey)
 		.payment_hash(Hash::from_slice(&payment_hash.0).unwrap())
 		.payment_secret(payment_secret)
+		.basic_mpp()
 		.min_final_cltv_expiry_delta(
 			// Add a buffer of 3 to the delta if present, otherwise use LDK's minimum.
 			min_final_cltv_expiry_delta.map(|x| x.saturating_add(3)).unwrap_or(MIN_FINAL_CLTV_EXPIRY_DELTA).into())
@@ -597,10 +632,9 @@ fn _create_invoice_from_channelmanager_and_duration_since_epoch_with_payment_has
 		invoice = invoice.amount_milli_satoshis(amt);
 	}
 
-	invoice = match yuv_pixel {
-		Some(yuv_pixel) => invoice.yuv_pixel(yuv_pixel),
-		None => invoice.basic_mpp(), // TODO(yuv): YUV doesn't support multi part YUV payments yet :(
-	};
+	if let Some(yuv_pixel) = yuv_pixel {
+		invoice = invoice.yuv_pixel(yuv_pixel);
+	}
 
 	let route_hints = sort_and_filter_channels(channels, amt_msat, &logger);
 	for hint in route_hints {

@@ -75,10 +75,10 @@ pub(super) fn create_fwd_pending_htlc_info(
 	};
 
 	let (
-		short_channel_id, amt_to_forward, outgoing_cltv_value, intro_node_blinding_point
+		short_channel_id, amt_to_forward, outgoing_cltv_value, intro_node_blinding_point, amt_to_forward_yuv
 	) = match hop_data {
-		msgs::InboundOnionPayload::Forward { short_channel_id, amt_to_forward, outgoing_cltv_value } =>
-			(short_channel_id, amt_to_forward, outgoing_cltv_value, None),
+		msgs::InboundOnionPayload::Forward { short_channel_id, amt_to_forward, outgoing_cltv_value, amt_to_forward_yuv } =>
+			(short_channel_id, amt_to_forward, outgoing_cltv_value, None, amt_to_forward_yuv),
 		msgs::InboundOnionPayload::BlindedForward {
 			short_channel_id, payment_relay, payment_constraints, intro_node_blinding_point, features,
 		} => {
@@ -93,7 +93,7 @@ pub(super) fn create_fwd_pending_htlc_info(
 					err_data: vec![0; 32],
 				}
 			})?;
-			(short_channel_id, amt_to_forward, outgoing_cltv_value, intro_node_blinding_point)
+			(short_channel_id, amt_to_forward, outgoing_cltv_value, intro_node_blinding_point, None)
 		},
 		msgs::InboundOnionPayload::Receive { .. } | msgs::InboundOnionPayload::BlindedReceive { .. } =>
 			return Err(InboundHTLCErr {
@@ -121,7 +121,7 @@ pub(super) fn create_fwd_pending_htlc_info(
 		outgoing_amt_msat: amt_to_forward,
 		outgoing_cltv_value,
 		skimmed_fee_msat: None,
-		outgoing_yuv_amount: msg.yuv_amount,
+		outgoing_yuv_amount: amt_to_forward_yuv,
 	})
 }
 
@@ -298,7 +298,7 @@ where
 	Ok(match hop {
 		onion_utils::Hop::Forward { next_hop_data, next_hop_hmac, new_packet_bytes } => {
 			let NextPacketDetails {
-				next_packet_pubkey, outgoing_amt_msat: _, outgoing_scid: _, outgoing_cltv_value
+				next_packet_pubkey, outgoing_amt_msat: _, outgoing_scid: _, outgoing_cltv_value, outgoing_amt_yuv: _,
 			} = match next_packet_details_opt {
 				Some(next_packet_details) => next_packet_details,
 				// Forward should always include the next hop details
@@ -341,6 +341,7 @@ pub(super) struct NextPacketDetails {
 	pub(super) outgoing_scid: u64,
 	pub(super) outgoing_amt_msat: u64,
 	pub(super) outgoing_cltv_value: u32,
+	pub(super) outgoing_amt_yuv: Option<u128>,
 }
 
 pub(super) fn decode_incoming_update_add_htlc_onion<NS: Deref, L: Deref, T: secp256k1::Verification>(
@@ -399,7 +400,7 @@ where
 					return_malformed_err!($msg, INVALID_ONION_BLINDING)
 				}
 
-				log_info!(logger, "Failed to accept/forward incoming HTLC: {}", $msg);
+				log_info!(logger, "Failed to accept/forward incoming HTLC: {} with code: {:x}", $msg, $err_code);
 				return Err(HTLCFailureMsg::Relay(msgs::UpdateFailHTLC {
 					channel_id: msg.channel_id,
 					htlc_id: msg.htlc_id,
@@ -426,14 +427,15 @@ where
 	let next_packet_details = match next_hop {
 		onion_utils::Hop::Forward {
 			next_hop_data: msgs::InboundOnionPayload::Forward {
-				short_channel_id, amt_to_forward, outgoing_cltv_value
+				short_channel_id, amt_to_forward, outgoing_cltv_value, amt_to_forward_yuv,
 			}, ..
 		} => {
 			let next_packet_pubkey = onion_utils::next_hop_pubkey(secp_ctx,
 				msg.onion_routing_packet.public_key.unwrap(), &shared_secret);
 			NextPacketDetails {
 				next_packet_pubkey, outgoing_scid: short_channel_id,
-				outgoing_amt_msat: amt_to_forward, outgoing_cltv_value
+				outgoing_amt_msat: amt_to_forward, outgoing_cltv_value,
+				outgoing_amt_yuv: amt_to_forward_yuv,
 			}
 		},
 		onion_utils::Hop::Forward {
@@ -454,7 +456,7 @@ where
 				msg.onion_routing_packet.public_key.unwrap(), &shared_secret);
 			NextPacketDetails {
 				next_packet_pubkey, outgoing_scid: short_channel_id, outgoing_amt_msat: amt_to_forward,
-				outgoing_cltv_value
+				outgoing_cltv_value, outgoing_amt_yuv: None, // TODO(yuv/blinded): yuv payment with blined paths are not supported.
 			}
 		},
 		onion_utils::Hop::Receive { .. } => return Ok((next_hop, shared_secret, None)),
@@ -645,6 +647,7 @@ mod tests {
 				node_features: NodeFeatures::empty(),
 				channel_features: ChannelFeatures::empty(),
 				maybe_announced_channel: false,
+				fee_yuv: None,
 			},
 			RouteHop {
 				pubkey: recipient_pk,
@@ -654,6 +657,7 @@ mod tests {
 				node_features: NodeFeatures::empty(),
 				channel_features: ChannelFeatures::empty(),
 				maybe_announced_channel: false,
+				fee_yuv: None,
 			}
 		];
 

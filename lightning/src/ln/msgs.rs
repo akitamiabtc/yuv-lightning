@@ -47,7 +47,6 @@ use core::ops::Deref;
 #[cfg(feature = "std")]
 use core::str::FromStr;
 use yuv_pixels::{Luma, Pixel};
-use yuv_types::YuvTxType;
 #[cfg(feature = "std")]
 use std::net::SocketAddr;
 use core::fmt::Display;
@@ -379,9 +378,6 @@ pub struct FundingCreated {
 	#[cfg(taproot)]
 	/// Next nonce the channel acceptor should use to finalize the funding output signature
 	pub next_local_nonce: Option<musig2::types::PublicNonce>,
-	/// The YUV proofs for funding transaction. It can be used to build commitment transactions
-	/// if the YUV payments feature is used for this channel.
-	pub yuv_funding_proofs: Option<YuvTxType>,
 }
 
 /// A [`funding_signed`] message to be sent to or received from a peer.
@@ -1737,6 +1733,7 @@ mod fuzzy_internal_msgs {
 			short_channel_id: u64,
 			/// The value, in msat, of the payment after this hop's fee is deducted.
 			amt_to_forward: u64,
+			amt_to_forward_yuv: Option<u128>,
 			outgoing_cltv_value: u32,
 		},
 		Receive {
@@ -1745,6 +1742,7 @@ mod fuzzy_internal_msgs {
 			keysend_preimage: Option<PaymentPreimage>,
 			custom_tlvs: Vec<(u64, Vec<u8>)>,
 			sender_intended_htlc_amt_msat: u64,
+			sender_intended_htlc_amt_yuv: Option<u128>,
 			cltv_expiry_height: u32,
 		},
 		BlindedForward {
@@ -1772,6 +1770,7 @@ mod fuzzy_internal_msgs {
 			short_channel_id: u64,
 			/// The value, in msat, of the payment after this hop's fee is deducted.
 			amt_to_forward: u64,
+			amt_to_forward_yuv: Option<u128>,
 			outgoing_cltv_value: u32,
 		},
 		#[allow(unused)]
@@ -1787,6 +1786,7 @@ mod fuzzy_internal_msgs {
 			keysend_preimage: Option<PaymentPreimage>,
 			custom_tlvs: Vec<(u64, Vec<u8>)>,
 			sender_intended_htlc_amt_msat: u64,
+			sender_intended_htlc_amt_yuv: Option<u128>,
 			cltv_expiry_height: u32,
 		},
 		BlindedForward {
@@ -2243,9 +2243,7 @@ impl_writeable_msg!(FundingCreated, {
 	funding_txid,
 	funding_output_index,
 	signature
-}, {
-	(200, yuv_funding_proofs, option)
-});
+}, {});
 #[cfg(taproot)]
 impl_writeable_msg!(FundingCreated, {
 	temporary_channel_id,
@@ -2630,11 +2628,12 @@ impl Readable for FinalOnionHopData {
 impl Writeable for OutboundOnionPayload {
 	fn write<W: Writer>(&self, w: &mut W) -> Result<(), io::Error> {
 		match self {
-			Self::Forward { short_channel_id, amt_to_forward, outgoing_cltv_value } => {
+			Self::Forward { short_channel_id, amt_to_forward, outgoing_cltv_value, amt_to_forward_yuv } => {
 				_encode_varint_length_prefixed_tlv!(w, {
 					(2, HighZeroBytesDroppedBigSize(*amt_to_forward), required),
 					(4, HighZeroBytesDroppedBigSize(*outgoing_cltv_value), required),
-					(6, short_channel_id, required)
+					(6, short_channel_id, required),
+					(200, amt_to_forward_yuv, option)
 				});
 			},
 			Self::TrampolineEntrypoint {
@@ -2650,7 +2649,7 @@ impl Writeable for OutboundOnionPayload {
 			},
 			Self::Receive {
 				ref payment_data, ref payment_metadata, ref keysend_preimage, sender_intended_htlc_amt_msat,
-				cltv_expiry_height, ref custom_tlvs,
+				cltv_expiry_height, ref custom_tlvs, sender_intended_htlc_amt_yuv,
 			} => {
 				// We need to update [`ln::outbound_payment::RecipientOnionFields::with_custom_tlvs`]
 				// to reject any reserved types in the experimental range if new ones are ever
@@ -2662,7 +2661,8 @@ impl Writeable for OutboundOnionPayload {
 					(2, HighZeroBytesDroppedBigSize(*sender_intended_htlc_amt_msat), required),
 					(4, HighZeroBytesDroppedBigSize(*cltv_expiry_height), required),
 					(8, payment_data, option),
-					(16, payment_metadata.as_ref().map(|m| WithoutLength(m)), option)
+					(16, payment_metadata.as_ref().map(|m| WithoutLength(m)), option),
+					(200, sender_intended_htlc_amt_yuv, option)
 				}, custom_tlvs.iter());
 			},
 			Self::BlindedForward { encrypted_tlvs, intro_node_blinding_point } => {
@@ -2715,6 +2715,7 @@ impl<NS: Deref> ReadableArgs<(Option<PublicKey>, &NS)> for InboundOnionPayload w
 		let (update_add_blinding_point, node_signer) = args;
 
 		let mut amt = None;
+		let mut amt_yuv: Option<u128> = None;
 		let mut cltv_value = None;
 		let mut short_id: Option<u64> = None;
 		let mut payment_data: Option<FinalOnionHopData> = None;
@@ -2736,6 +2737,7 @@ impl<NS: Deref> ReadableArgs<(Option<PublicKey>, &NS)> for InboundOnionPayload w
 			(12, intro_node_blinding_point, option),
 			(16, payment_metadata, option),
 			(18, total_msat, (option, encoding: (u64, HighZeroBytesDroppedBigSize))),
+			(200, amt_yuv, option),
 			// See https://github.com/lightning/blips/blob/master/blip-0003.md
 			(5482373484, keysend_preimage, option)
 		}, |msg_type: u64, msg_reader: &mut FixedLengthReader<_>| -> Result<bool, DecodeError> {
@@ -2802,6 +2804,7 @@ impl<NS: Deref> ReadableArgs<(Option<PublicKey>, &NS)> for InboundOnionPayload w
 			Ok(Self::Forward {
 				short_channel_id,
 				amt_to_forward: amt.ok_or(DecodeError::InvalidValue)?,
+				amt_to_forward_yuv: amt_yuv,
 				outgoing_cltv_value: cltv_value.ok_or(DecodeError::InvalidValue)?,
 			})
 		} else {
@@ -2818,6 +2821,7 @@ impl<NS: Deref> ReadableArgs<(Option<PublicKey>, &NS)> for InboundOnionPayload w
 				payment_metadata: payment_metadata.map(|w| w.0),
 				keysend_preimage,
 				sender_intended_htlc_amt_msat: amt.ok_or(DecodeError::InvalidValue)?,
+				sender_intended_htlc_amt_yuv: amt_yuv,
 				cltv_expiry_height: cltv_value.ok_or(DecodeError::InvalidValue)?,
 				custom_tlvs,
 			})
@@ -3943,7 +3947,6 @@ mod tests {
 			partial_signature_with_nonce: None,
 			#[cfg(taproot)]
 			next_local_nonce: None,
-			yuv_funding_proofs: None,
 		};
 		let encoded_value = funding_created.encode();
 		let target_value = <Vec<u8>>::from_hex("02020202020202020202020202020202020202020202020202020202020202026e96fe9f8b0ddcd729ba03cfafa5a27b050b39d354dd980814268dfa9a44d4c200ffd977cb9b53d93a6ff64bb5f1e158b4094b66e798fb12911168a3ccdf80a83096340a6a95da0ae8d9f776528eecdbb747eb6b545495a4319ed5378e35b21e073a").unwrap();
@@ -4488,6 +4491,7 @@ mod tests {
 			short_channel_id: 0xdeadbeef1bad1dea,
 			amt_to_forward: 0x0badf00d01020304,
 			outgoing_cltv_value: 0xffffffff,
+			amt_to_forward_yuv: None,
 		};
 		let encoded_value = outbound_msg.encode();
 		let target_value = <Vec<u8>>::from_hex("1a02080badf00d010203040404ffffffff0608deadbeef1bad1dea").unwrap();
@@ -4496,7 +4500,7 @@ mod tests {
 		let node_signer = test_utils::TestKeysInterface::new(&[42; 32], Network::Testnet);
 		let inbound_msg = ReadableArgs::read(&mut Cursor::new(&target_value[..]), (None, &&node_signer)).unwrap();
 		if let msgs::InboundOnionPayload::Forward {
-			short_channel_id, amt_to_forward, outgoing_cltv_value
+			short_channel_id, amt_to_forward, outgoing_cltv_value, ..
 		} = inbound_msg {
 			assert_eq!(short_channel_id, 0xdeadbeef1bad1dea);
 			assert_eq!(amt_to_forward, 0x0badf00d01020304);
@@ -4511,6 +4515,7 @@ mod tests {
 			payment_metadata: None,
 			keysend_preimage: None,
 			sender_intended_htlc_amt_msat: 0x0badf00d01020304,
+			sender_intended_htlc_amt_yuv: None,
 			cltv_expiry_height: 0xffffffff,
 			custom_tlvs: vec![],
 		};
@@ -4539,6 +4544,7 @@ mod tests {
 			payment_metadata: None,
 			keysend_preimage: None,
 			sender_intended_htlc_amt_msat: 0x0badf00d01020304,
+			sender_intended_htlc_amt_yuv: None,
 			cltv_expiry_height: 0xffffffff,
 			custom_tlvs: vec![],
 		};
@@ -4556,7 +4562,7 @@ mod tests {
 			sender_intended_htlc_amt_msat, cltv_expiry_height,
 			payment_metadata: None,
 			keysend_preimage: None,
-			custom_tlvs,
+			custom_tlvs, ..
 		} = inbound_msg  {
 			assert_eq!(payment_secret, expected_payment_secret);
 			assert_eq!(sender_intended_htlc_amt_msat, 0x0badf00d01020304);
@@ -4579,6 +4585,7 @@ mod tests {
 			keysend_preimage: None,
 			custom_tlvs: bad_type_range_tlvs,
 			sender_intended_htlc_amt_msat: 0x0badf00d01020304,
+			sender_intended_htlc_amt_yuv: None,
 			cltv_expiry_height: 0xffffffff,
 		};
 		let encoded_value = msg.encode();
@@ -4611,6 +4618,7 @@ mod tests {
 			keysend_preimage: None,
 			custom_tlvs: expected_custom_tlvs.clone(),
 			sender_intended_htlc_amt_msat: 0x0badf00d01020304,
+			sender_intended_htlc_amt_yuv: None,
 			cltv_expiry_height: 0xffffffff,
 		};
 		let encoded_value = msg.encode();
@@ -4882,15 +4890,17 @@ mod tests {
 			short_channel_id: 0xdeadbeef1bad1dea,
 			amt_to_forward: 1000,
 			outgoing_cltv_value: 0xffffffff,
+			amt_to_forward_yuv: None,
 		};
 		let mut encoded_payload = Vec::new();
 		let test_bytes = vec![42u8; 1000];
-		if let msgs::OutboundOnionPayload::Forward { short_channel_id, amt_to_forward, outgoing_cltv_value } = payload {
+		if let msgs::OutboundOnionPayload::Forward { short_channel_id, amt_to_forward, outgoing_cltv_value, amt_to_forward_yuv } = payload {
 			_encode_varint_length_prefixed_tlv!(&mut encoded_payload, {
 				(1, test_bytes, required_vec),
 				(2, HighZeroBytesDroppedBigSize(amt_to_forward), required),
 				(4, HighZeroBytesDroppedBigSize(outgoing_cltv_value), required),
-				(6, short_channel_id, required)
+				(6, short_channel_id, required),
+				(200, amt_to_forward_yuv, option)
 			});
 		}
 		Ok(encoded_payload)

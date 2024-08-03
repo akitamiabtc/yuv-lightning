@@ -52,6 +52,9 @@ pub enum UtxoLookupError {
 
 	/// Timeout for waiting for the pixel to be attached to the YUV graph.
 	AttachTimeout,
+
+	/// The transaction's status is attached, but the YUV node somewhy didn't send the transaction.
+	AttachedButNoTx
  }
 
 impl From<UtxoLookupYuvError> for UtxoLookupError {
@@ -588,6 +591,12 @@ impl PendingChecks {
 					Err(LightningError {
 						err: "Channel announced without Pixel, but it should be".to_owned(),
 						action: ErrorAction::IgnoreError
+					})
+				},
+				Err(UtxoLookupError::Yuv(UtxoLookupYuvError::AttachedButNoTx)) => {
+					Err(LightningError {
+						err: "YUV node didn't send the transaction but it's attached".to_owned(),
+						action: ErrorAction::IgnoreAndLog(Level::Error)
 					})
 				},
 			}

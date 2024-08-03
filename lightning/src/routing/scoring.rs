@@ -2310,7 +2310,7 @@ mod tests {
 			fee_msat,
 			cltv_expiry_delta: 18,
 			maybe_announced_channel: true,
-			// yuv_fee: None,
+			fee_yuv: None,
 		}
 	}
 

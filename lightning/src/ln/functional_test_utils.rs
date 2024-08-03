@@ -2206,12 +2206,25 @@ macro_rules! get_route_and_payment_hash {
 			.with_bolt11_features($recv_node.node.bolt11_invoice_features()).unwrap();
 		$crate::get_route_and_payment_hash!($send_node, $recv_node, payment_params, $recv_value)
 	}};
+	($send_node: expr, $recv_node: expr, $recv_value: expr, pixel: $pixel:expr) => {{
+		let payment_params = $crate::routing::router::PaymentParameters::from_node_id($recv_node.node.get_our_node_id(), TEST_FINAL_CLTV)
+			.with_bolt11_features($recv_node.node.bolt11_invoice_features()).unwrap();
+		$crate::get_route_and_payment_hash!($send_node, $recv_node, payment_params, $recv_value, None, Some($pixel))
+	}};
 	($send_node: expr, $recv_node: expr, $payment_params: expr, $recv_value: expr) => {{
-		$crate::get_route_and_payment_hash!($send_node, $recv_node, $payment_params, $recv_value, None)
+		$crate::get_route_and_payment_hash!($send_node, $recv_node, $payment_params, $recv_value, None, None)
 	}};
 	($send_node: expr, $recv_node: expr, $payment_params: expr, $recv_value: expr, $max_total_routing_fee_msat: expr) => {{
+		$crate::get_route_and_payment_hash!($send_node, $recv_node, $payment_params, $recv_value, $max_total_routing_fee_msat, None)
+	}};
+	($send_node: expr, $recv_node: expr, $payment_params: expr, $recv_value: expr, $max_total_routing_fee_msat: expr, $pixel_opt: expr) => {{
 		let mut route_params = $crate::routing::router::RouteParameters::from_payment_params_and_value($payment_params, $recv_value);
 		route_params.max_total_routing_fee_msat = $max_total_routing_fee_msat;
+
+		if let Some(pixel) = $pixel_opt {
+			route_params = route_params.with_yuv(pixel);
+		}
+
 		let (payment_preimage, payment_hash, payment_secret) =
 			$crate::ln::functional_test_utils::get_payment_preimage_hash(&$recv_node, Some($recv_value), None);
 		let route = $crate::ln::functional_test_utils::get_route(&$send_node, &route_params);
@@ -2600,12 +2613,40 @@ pub fn expect_payment_failed_conditions<'a, 'b, 'c, 'd, 'e>(
 	expect_payment_failed_conditions_event(events, expected_payment_hash, expected_payment_failed_permanently, conditions);
 }
 
+
 pub fn send_along_route_with_secret<'a, 'b, 'c>(origin_node: &Node<'a, 'b, 'c>, route: Route, expected_paths: &[&[&Node<'a, 'b, 'c>]], recv_value: u64, our_payment_hash: PaymentHash, our_payment_secret: PaymentSecret) -> PaymentId {
+	send_along_route_with_secret_internal(origin_node, route, expected_paths, recv_value, our_payment_hash, our_payment_secret, None)
+}
+
+pub fn send_along_route_with_secret_with_yuv<'a, 'b, 'c>(
+	origin_node: &Node<'a, 'b, 'c>,
+	route: Route,
+	expected_paths: &[&[&Node<'a, 'b, 'c>]],
+	recv_value: u64,
+	our_payment_hash: PaymentHash,
+	our_payment_secret: PaymentSecret,
+	recv_value_yuv: u128,
+) -> PaymentId {
+	send_along_route_with_secret_internal(
+		origin_node, route, expected_paths, recv_value,
+		our_payment_hash, our_payment_secret, Some(recv_value_yuv),
+	)
+}
+
+fn send_along_route_with_secret_internal<'a, 'b, 'c>(
+	origin_node: &Node<'a, 'b, 'c>,
+	route: Route,
+	expected_paths: &[&[&Node<'a, 'b, 'c>]],
+	recv_value: u64,
+	our_payment_hash: PaymentHash,
+	our_payment_secret: PaymentSecret,
+	recv_value_yuv: Option<u128>,
+) -> PaymentId {
 	let payment_id = PaymentId(origin_node.keys_manager.backing.get_secure_random_bytes());
 	origin_node.node.send_payment_with_route(&route, our_payment_hash,
 		RecipientOnionFields::secret_only(our_payment_secret), payment_id).unwrap();
 	check_added_monitors!(origin_node, expected_paths.len());
-	pass_along_route(origin_node, expected_paths, recv_value, our_payment_hash, our_payment_secret);
+	pass_along_route_internal(origin_node, expected_paths, recv_value, our_payment_hash, our_payment_secret, recv_value_yuv);
 	payment_id
 }
 
@@ -2628,6 +2669,7 @@ pub struct PassAlongPathArgs<'a, 'b, 'c, 'd> {
 	pub origin_node: &'a Node<'b, 'c, 'd>,
 	pub expected_path: &'a [&'a Node<'b, 'c, 'd>],
 	pub recv_value: u64,
+	pub recv_value_yuv: Option<u128>,
 	pub payment_hash: PaymentHash,
 	pub payment_secret: Option<PaymentSecret>,
 	pub event: MessageSendEvent,
@@ -2646,7 +2688,7 @@ impl<'a, 'b, 'c, 'd> PassAlongPathArgs<'a, 'b, 'c, 'd> {
 		Self {
 			origin_node, expected_path, recv_value, payment_hash, payment_secret: None, event,
 			payment_claimable_expected: true, clear_recipient_events: true, expected_preimage: None,
-			is_probe: false, custom_tlvs: Vec::new(),
+			is_probe: false, custom_tlvs: Vec::new(), recv_value_yuv: None,
 		}
 	}
 	pub fn without_clearing_recipient_events(mut self) -> Self {
@@ -2674,13 +2716,18 @@ impl<'a, 'b, 'c, 'd> PassAlongPathArgs<'a, 'b, 'c, 'd> {
 		self.custom_tlvs = custom_tlvs;
 		self
 	}
+	pub fn with_recv_value_yuv(mut self, recv_value: u128) -> Self {
+		self.recv_value_yuv = Some(recv_value);
+		self
+	}
 }
 
 pub fn do_pass_along_path<'a, 'b, 'c>(args: PassAlongPathArgs) -> Option<Event> {
 	let PassAlongPathArgs {
 		origin_node, expected_path, recv_value, payment_hash: our_payment_hash,
 		payment_secret: our_payment_secret, event: ev, payment_claimable_expected,
-		clear_recipient_events, expected_preimage, is_probe, custom_tlvs
+		clear_recipient_events, expected_preimage, is_probe, custom_tlvs,
+		recv_value_yuv
 	} = args;
 
 	let mut payment_event = SendEvent::from_event(ev);
@@ -2708,7 +2755,7 @@ pub fn do_pass_along_path<'a, 'b, 'c>(args: PassAlongPathArgs) -> Option<Event> 
 				match &events_2[0] {
 					Event::PaymentClaimable { ref payment_hash, ref purpose, amount_msat,
 						receiver_node_id, ref via_channel_id, ref via_user_channel_id,
-						claim_deadline, onion_fields, ..
+						claim_deadline, onion_fields, yuv_amount, ..
 					} => {
 						assert_eq!(our_payment_hash, *payment_hash);
 						assert_eq!(node.node.get_our_node_id(), receiver_node_id.unwrap());
@@ -2736,6 +2783,7 @@ pub fn do_pass_along_path<'a, 'b, 'c>(args: PassAlongPathArgs) -> Option<Event> 
 							},
 						}
 						assert_eq!(*amount_msat, recv_value);
+						assert_eq!(*yuv_amount, recv_value_yuv);
 						assert!(node.node.list_channels().iter().any(|details| details.channel_id == via_channel_id.unwrap()));
 						assert!(node.node.list_channels().iter().any(|details| details.user_channel_id == via_user_channel_id.unwrap()));
 						assert!(claim_deadline.unwrap() > node.best_block_info().1);
@@ -2760,6 +2808,16 @@ pub fn do_pass_along_path<'a, 'b, 'c>(args: PassAlongPathArgs) -> Option<Event> 
 }
 
 pub fn pass_along_path<'a, 'b, 'c>(origin_node: &Node<'a, 'b, 'c>, expected_path: &[&Node<'a, 'b, 'c>], recv_value: u64, our_payment_hash: PaymentHash, our_payment_secret: Option<PaymentSecret>, ev: MessageSendEvent, payment_claimable_expected: bool, expected_preimage: Option<PaymentPreimage>) -> Option<Event> {
+	pass_along_path_internal(origin_node, expected_path, recv_value, our_payment_hash, our_payment_secret, ev, payment_claimable_expected, expected_preimage, None)
+}
+
+fn pass_along_path_internal<'a, 'b, 'c>(
+	origin_node: &Node<'a, 'b, 'c>, expected_path: &[&Node<'a, 'b, 'c>],
+	recv_value: u64, our_payment_hash: PaymentHash,
+	our_payment_secret: Option<PaymentSecret>, ev: MessageSendEvent,
+	payment_claimable_expected: bool, expected_preimage: Option<PaymentPreimage>,
+	recv_value_yuv: Option<u128>,
+) -> Option<Event> {
 	let mut args = PassAlongPathArgs::new(origin_node, expected_path, recv_value, our_payment_hash, ev);
 	if !payment_claimable_expected {
 		args = args.without_claimable_event();
@@ -2769,6 +2827,9 @@ pub fn pass_along_path<'a, 'b, 'c>(origin_node: &Node<'a, 'b, 'c>, expected_path
 	}
 	if let Some(payment_preimage) = expected_preimage {
 		args = args.with_payment_preimage(payment_preimage);
+	}
+	if let Some(recv_value_yuv) = recv_value_yuv {
+		args = args.with_recv_value_yuv(recv_value_yuv);
 	}
 	do_pass_along_path(args)
 }
@@ -2793,6 +2854,14 @@ pub fn send_probe_along_route<'a, 'b, 'c>(origin_node: &Node<'a, 'b, 'c>, expect
 }
 
 pub fn pass_along_route<'a, 'b, 'c>(origin_node: &Node<'a, 'b, 'c>, expected_route: &[&[&Node<'a, 'b, 'c>]], recv_value: u64, our_payment_hash: PaymentHash, our_payment_secret: PaymentSecret) {
+	pass_along_route_internal(origin_node, expected_route, recv_value, our_payment_hash, our_payment_secret, None)
+}
+
+fn pass_along_route_internal<'a, 'b, 'c>(
+	origin_node: &Node<'a, 'b, 'c>, expected_route: &[&[&Node<'a, 'b, 'c>]], 
+	recv_value: u64, our_payment_hash: PaymentHash, our_payment_secret: PaymentSecret,
+	recv_value_yuv: Option<u128>,
+) {
 	let mut events = origin_node.node.get_and_clear_pending_msg_events();
 	assert_eq!(events.len(), expected_route.len());
 
@@ -2801,13 +2870,31 @@ pub fn pass_along_route<'a, 'b, 'c>(origin_node: &Node<'a, 'b, 'c>, expected_rou
 		// Once we've gotten through all the HTLCs, the last one should result in a
 		// PaymentClaimable (but each previous one should not!).
 		let expect_payment = path_idx == expected_route.len() - 1;
-		pass_along_path(origin_node, expected_path, recv_value, our_payment_hash.clone(), Some(our_payment_secret), ev, expect_payment, None);
+		pass_along_path_internal(origin_node, expected_path, recv_value, our_payment_hash.clone(), Some(our_payment_secret), ev, expect_payment, None, recv_value_yuv);
 	}
 }
 
 pub fn send_along_route<'a, 'b, 'c>(origin_node: &Node<'a, 'b, 'c>, route: Route, expected_route: &[&Node<'a, 'b, 'c>], recv_value: u64) -> (PaymentPreimage, PaymentHash, PaymentSecret, PaymentId) {
+	send_along_route_internal(origin_node, route, expected_route, recv_value, None)
+}
+
+pub fn send_along_route_with_yuv<'a, 'b, 'c>(
+	origin_node: &Node<'a, 'b, 'c>,
+	route: Route,
+	expected_route: &[&Node<'a, 'b, 'c>],
+	recv_value: u64,
+	recv_value_yuv: u128,
+) -> (PaymentPreimage, PaymentHash, PaymentSecret, PaymentId) {
+	send_along_route_internal(origin_node, route, expected_route, recv_value, Some(recv_value_yuv))
+}
+
+fn send_along_route_internal<'a, 'b, 'c>(
+	origin_node: &Node<'a, 'b, 'c>, route: Route,
+	expected_route: &[&Node<'a, 'b, 'c>],
+	recv_value: u64, recv_value_yuv: Option<u128>,
+) -> (PaymentPreimage, PaymentHash, PaymentSecret, PaymentId) {
 	let (our_payment_preimage, our_payment_hash, our_payment_secret) = get_payment_preimage_hash!(expected_route.last().unwrap());
-	let payment_id = send_along_route_with_secret(origin_node, route, &[expected_route], recv_value, our_payment_hash, our_payment_secret);
+	let payment_id = send_along_route_with_secret_internal(origin_node, route, &[expected_route], recv_value, our_payment_hash, our_payment_secret, recv_value_yuv);
 	(our_payment_preimage, our_payment_hash, our_payment_secret, payment_id)
 }
 
@@ -3093,7 +3180,7 @@ fn _route_payment<'a, 'b, 'c>(origin_node: &Node<'a, 'b, 'c>, expected_route: &[
 		assert_eq!(hop.pubkey, node.node.get_our_node_id());
 	}
 
-	let res = send_along_route(origin_node, route, expected_route, recv_value);
+	let res = send_along_route_internal(origin_node, route, expected_route, recv_value, yuv_amount);
 	(res.0, res.1, res.2, res.3)
 }
 

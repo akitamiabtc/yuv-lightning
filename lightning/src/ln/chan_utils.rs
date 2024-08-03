@@ -44,7 +44,7 @@ use crate::util::transaction_utils::sort_outputs;
 use crate::ln::channel::{INITIAL_COMMITMENT_NUMBER, ANCHOR_OUTPUT_VALUE_SATOSHI};
 use core::ops::Deref;
 use alloc::collections::BTreeMap;
-use yuv_pixels::{Chroma, HtlcScriptKind, LightningCommitmentProof, LightningHtlcData, Luma, Pixel, PixelProof, Tweakable};
+use yuv_pixels::{Chroma, HtlcScriptKind, LightningCommitmentProof, LightningHtlcData, Luma, MultisigPixelProof, Pixel, PixelProof, Tweakable};
 use yuv_types::YuvTxType;
 use crate::chain;
 use crate::ln::features::ChannelTypeFeatures;
@@ -191,7 +191,7 @@ pub fn build_commitment_secret(commitment_seed: &[u8; 32], idx: u64) -> [u8; 32]
 
 /// Build a closing transaction
 pub fn build_closing_transaction(to_holder_value_sat: u64, to_counterparty_value_sat: u64, to_holder_script: ScriptBuf, to_counterparty_script: ScriptBuf, funding_outpoint: OutPoint,
-								 funding_yuv_proofs: Option<&YuvTxType>, to_holder_pixel: Option<&Pixel>, to_counterparty_pixel: Option<&Pixel>, holder_inner_key: Option<PublicKey>,
+								 funding_yuv_proof: Option<MultisigPixelProof>, to_holder_pixel: Option<Pixel>, to_counterparty_pixel: Option<Pixel>, holder_inner_key: Option<PublicKey>,
 								 counterparty_inner_key: Option<PublicKey>) -> (Transaction, Option<YuvTxType>) {
 	let txins = {
 		let mut ins: Vec<TxIn> = Vec::new();
@@ -210,7 +210,7 @@ pub fn build_closing_transaction(to_holder_value_sat: u64, to_counterparty_value
 		let mut yuv_proof_opt = None;
 		if to_counterparty_pixel.is_some() {
 			(yuv_proof_opt, _) = get_sig_yuv_proof(
-				to_counterparty_pixel.cloned(),
+				to_counterparty_pixel,
 				counterparty_inner_key.expect("must be presented if pixel is presented"),
 			);
 		}
@@ -225,7 +225,7 @@ pub fn build_closing_transaction(to_holder_value_sat: u64, to_counterparty_value
 		let mut yuv_proof_opt = None;
 		if to_holder_pixel.is_some() {
 			(yuv_proof_opt, _) = get_sig_yuv_proof(
-				to_holder_pixel.cloned(),
+				to_holder_pixel,
 				holder_inner_key.expect("must be presented if pixel is presented"),
 			);
 		}
@@ -233,7 +233,7 @@ pub fn build_closing_transaction(to_holder_value_sat: u64, to_counterparty_value
 		txouts.push((TxOut {
 			script_pubkey: to_holder_script,
 			value: to_holder_value_sat
-		}, (yuv_proof_opt)));
+		}, yuv_proof_opt));
 	}
 
 	transaction_utils::sort_outputs(&mut txouts, |_, _| { cmp::Ordering::Equal }); // Ordering doesnt matter if they used our pubkey...
@@ -248,17 +248,9 @@ pub fn build_closing_transaction(to_holder_value_sat: u64, to_counterparty_value
 		outputs.push(out);
 	}
 
-	let yuv_transaction_proofs = funding_yuv_proofs
+	let yuv_transaction_proofs = funding_yuv_proof
 		.map(|pixel_proof| {
-			let mut input_proofs = BTreeMap::new();
-			input_proofs.insert(
-				0,
-				pixel_proof.output_proofs()
-					.unwrap()
-					.get(&funding_outpoint.vout)
-					.unwrap()
-					.clone(),
-			);
+			let input_proofs = BTreeMap::from([(0, pixel_proof.into())]);
 
 			YuvTxType::Transfer {
 				input_proofs,
@@ -1296,9 +1288,9 @@ impl ClosingTransaction {
 		to_holder_script: ScriptBuf,
 		to_counterparty_script: ScriptBuf,
 		funding_outpoint: OutPoint,
-		funding_yuv_proofs: Option<&YuvTxType>,
-		to_holder_pixel: Option<&Pixel>,
-		to_counterparty_pixel: Option<&Pixel>,
+		funding_yuv_proof: Option<MultisigPixelProof>,
+		to_holder_pixel: Option<Pixel>,
+		to_counterparty_pixel: Option<Pixel>,
 		holder_inner_key: Option<PublicKey>,
 		counterparty_inner_key: Option<PublicKey>,
 	) -> Self {
@@ -1308,7 +1300,7 @@ impl ClosingTransaction {
 			to_holder_script.clone(),
 			to_counterparty_script.clone(),
 			funding_outpoint,
-			funding_yuv_proofs,
+			funding_yuv_proof,
 			to_holder_pixel,
 			to_counterparty_pixel,
 			holder_inner_key,
@@ -1566,7 +1558,7 @@ impl CommitmentTransaction {
 		channel_parameters: &DirectedChannelTransactionParameters,
 		to_broadcaster_yuv_pixel: Option<Pixel>,
 		to_countersignatory_yuv_pixel: Option<Pixel>,
-		funding_yuv_pixel_proofs: Option<&YuvTxType>,
+		funding_yuv_pixel_proof: Option<MultisigPixelProof>,
 	) -> Self {
 		// Sort outputs and populate output indices while keeping track of the auxiliary data
 		let build_outputs_result = Self::internal_build_outputs(
@@ -1579,17 +1571,9 @@ impl CommitmentTransaction {
 		let transaction = Self::make_transaction(obscured_commitment_transaction_number, txins, build_outputs_result.outputs.clone());
 		let txid = transaction.txid();
 
-		let yuv_proofs = funding_yuv_pixel_proofs
+		let yuv_proofs = funding_yuv_pixel_proof
 			.map(|pixel_proof| {
-				let mut input_proofs = BTreeMap::new();
-				input_proofs.insert(
-					0,
-					pixel_proof.output_proofs()
-						.unwrap()
-						.get(&channel_parameters.funding_outpoint().vout)
-						.unwrap()
-						.clone(),
-				);
+				let input_proofs = BTreeMap::from([(0, pixel_proof.into())]);
 
 				YuvTxType::Transfer {
 					input_proofs,

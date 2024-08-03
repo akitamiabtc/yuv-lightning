@@ -52,7 +52,7 @@ use crate::ln::features::Bolt11InvoiceFeatures;
 use crate::routing::router::{BlindedTail, InFlightHtlcs, Path, Payee, PaymentParameters, Route, RouteParameters, Router};
 use crate::ln::onion_payment::{check_incoming_htlc_cltv, create_recv_pending_htlc_info, create_fwd_pending_htlc_info, decode_incoming_update_add_htlc_onion, InboundHTLCErr, NextPacketDetails};
 use crate::ln::msgs;
-use crate::ln::onion_utils;
+use crate::ln::onion_utils::{self, HtlcOnionData};
 use crate::ln::onion_utils::{HTLCFailReason, INVALID_ONION_BLINDING};
 use crate::ln::msgs::{ChannelMessageHandler, DecodeError, LightningError};
 #[cfg(test)]
@@ -3911,7 +3911,7 @@ where
 			let chan_update_opt = self.get_channel_update_for_onion(next_packet.outgoing_scid, chan).ok();
 			return Err(("HTLC amount was below the htlc_minimum_msat", 0x1000 | 11, chan_update_opt));
 		}
-		if let Err((err, code)) = chan.htlc_satisfies_config(msg, next_packet.outgoing_amt_msat, next_packet.outgoing_cltv_value) {
+		if let Err((err, code)) = chan.htlc_satisfies_config(msg, next_packet.outgoing_amt_msat, next_packet.outgoing_cltv_value, next_packet.outgoing_amt_yuv) {
 			let chan_update_opt = self.get_channel_update_for_onion(next_packet.outgoing_scid, chan).ok();
 			return Err((err, code, chan_update_opt));
 		}
@@ -4220,9 +4220,9 @@ where
 		let prng_seed = self.entropy_source.get_secure_random_bytes();
 		let session_priv = SecretKey::from_slice(&session_priv_bytes[..]).expect("RNG is busted");
 
-		let (onion_packet, htlc_msat, htlc_cltv) = onion_utils::create_payment_onion(
+		let (onion_packet, HtlcOnionData { htlc_msat, htlc_cltv, htlc_yuv }) = onion_utils::create_payment_onion_internal(
 			&self.secp_ctx, &path, &session_priv, total_value, recipient_onion, cur_height,
-			payment_hash, keysend_preimage, prng_seed
+			payment_hash, keysend_preimage, prng_seed, yuv_value
 		).map_err(|e| {
 			let logger = WithContext::from(&self.logger, Some(path.hops.first().unwrap().pubkey), None);
 			log_error!(logger, "Failed to build an onion for path for payment hash {}", payment_hash);
@@ -4257,7 +4257,7 @@ where
 						}
 						let funding_txo = chan.context.get_funding_txo().unwrap();
 						let logger = WithChannelContext::from(&self.logger, &chan.context);
-						let send_res = chan.send_htlc_and_commit(htlc_msat, yuv_value, payment_hash.clone(),
+						let send_res = chan.send_htlc_and_commit(htlc_msat, htlc_yuv, payment_hash.clone(),
 							htlc_cltv, HTLCSource::OutboundRoute {
 								path: path.clone(),
 								session_priv: session_priv.clone(),
@@ -6992,7 +6992,7 @@ where
 		}
 
 		if let Some(tx) = funding_broadcastable {
-			if let Some(yuv_tx_proofs) = channel.context.get_funding_tx_yuv_proof() {
+			if let Some(yuv_tx_proofs) = channel.context.get_funding_yuv_tx_type() {
 				self.publish_yuv_transaction(channel.context.channel_id(), tx.clone(), yuv_tx_proofs);
 			}
 			log_info!(logger, "Broadcasting funding transaction with txid {}", tx.txid());
@@ -14085,6 +14085,7 @@ mod tests {
 		let extra_fee_msat = 10;
 		let hop_data = msgs::InboundOnionPayload::Receive {
 			sender_intended_htlc_amt_msat: 100,
+			sender_intended_htlc_amt_yuv: None,
 			cltv_expiry_height: 42,
 			payment_metadata: None,
 			keysend_preimage: None,
@@ -14107,6 +14108,7 @@ mod tests {
 		// If amt_received + extra_fee is equal to the sender intended amount, we're fine.
 		let hop_data = msgs::InboundOnionPayload::Receive { // This is the same payload as above, InboundOnionPayload doesn't implement Clone
 			sender_intended_htlc_amt_msat: 100,
+			sender_intended_htlc_amt_yuv: None,
 			cltv_expiry_height: 42,
 			payment_metadata: None,
 			keysend_preimage: None,
@@ -14131,6 +14133,7 @@ mod tests {
 		let current_height: u32 = node[0].node.best_block.read().unwrap().height;
 		let result = create_recv_pending_htlc_info(msgs::InboundOnionPayload::Receive {
 			sender_intended_htlc_amt_msat: 100,
+			sender_intended_htlc_amt_yuv: None,
 			cltv_expiry_height: 22,
 			payment_metadata: None,
 			keysend_preimage: None,

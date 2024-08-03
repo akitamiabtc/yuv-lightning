@@ -14,7 +14,7 @@ use bitcoin::hashes::Hash;
 
 use lightning::ln::types::PaymentHash;
 use lightning::ln::channelmanager::RecipientOnionFields;
-use lightning::routing::router::{DEFAULT_YUV_MAX_PATH_COUNT, PaymentParameters, RouteParameters};
+use lightning::routing::router::{PaymentParameters, RouteParameters};
 
 /// Builds the necessary parameters to pay or pre-flight probe the given zero-amount
 /// [`Bolt11Invoice`] using [`ChannelManager::send_payment`] or
@@ -75,14 +75,13 @@ fn params_from_invoice(invoice: &Bolt11Invoice, amount_msat: u64)
 	if let Some(features) = invoice.features() {
 		payment_params = payment_params.with_bolt11_features(features.clone()).unwrap();
 	}
-	let route_params = match invoice.yuv_pixel() {
-		Some(yuv_pixel) => {
-			payment_params = payment_params.with_max_path_count(DEFAULT_YUV_MAX_PATH_COUNT);
-			RouteParameters::from_payment_params_and_value(payment_params, amount_msat)
-				.with_yuv(yuv_pixel)
-		}
-		None => RouteParameters::from_payment_params_and_value(payment_params, amount_msat)
-	};
+
+	let mut route_params = RouteParameters::from_payment_params_and_value(payment_params, amount_msat);
+
+	if let Some(pixel) = invoice.yuv_pixel() {
+		route_params = route_params.with_yuv(pixel);
+	}
+
 	(payment_hash, recipient_onion, route_params)
 }
 

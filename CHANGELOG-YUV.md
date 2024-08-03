@@ -1,4 +1,12 @@
-# 0.3.0+lightning-0.0.123 - Jul 09, 2024
+# 0.3.1+lightning-0.0.123 - Aug 03, 2024
+
+## Changes
+
+* Remove the `yuv_pixel_proofs` TLV field from the `FundingCreated` lightning 
+  message.
+* Add MPP support.
+
+# 0.3.0+lightning-0.0.123 - Jul 02, 2024
 
 ## API Updates
 

@@ -174,12 +174,25 @@ pub(super) fn construct_onion_keys<T: secp256k1::Signing>(
 }
 
 /// returns the hop data, as well as the first-hop value_msat and CLTV value we should send.
+#[cfg(test)] // fron now used ony in tests, but for back compatability it's still here.
 pub(super) fn build_onion_payloads(
-	path: &Path, total_msat: u64, mut recipient_onion: RecipientOnionFields,
+	path: &Path, total_msat: u64, recipient_onion: RecipientOnionFields,
 	starting_htlc_offset: u32, keysend_preimage: &Option<PaymentPreimage>,
 ) -> Result<(Vec<msgs::OutboundOnionPayload>, u64, u32), APIError> {
+	build_onion_payloads_internal(path, total_msat, recipient_onion, starting_htlc_offset, keysend_preimage, None)
+		.map(|(packet, data)| (packet, data.htlc_msat, data.htlc_cltv))
+}
+
+/// the same as [`build_onion_payloads`] but with optional yuv_amount
+pub(super) fn build_onion_payloads_internal(
+	path: &Path, total_msat: u64, mut recipient_onion: RecipientOnionFields,
+	starting_htlc_offset: u32, keysend_preimage: &Option<PaymentPreimage>,
+	total_yuv: Option<u128>,
+) -> Result<(Vec<msgs::OutboundOnionPayload>, HtlcOnionData), APIError> {
 	let mut cur_value_msat = 0u64;
 	let mut cur_cltv = starting_htlc_offset;
+	let mut cur_value_yuv = total_yuv.map(|_| 0_u128);
+
 	let mut last_short_channel_id = 0;
 	let mut res: Vec<msgs::OutboundOnionPayload> = Vec::with_capacity(
 		path.hops.len() + path.blinded_tail.as_ref().map_or(0, |t| t.hops.len()),
@@ -190,6 +203,7 @@ pub(super) fn build_onion_payloads(
 		// exactly as it should be (and the next hop isn't trying to probe to find out if we're
 		// the intended recipient).
 		let value_msat = if cur_value_msat == 0 { hop.fee_msat } else { cur_value_msat };
+		let value_yuv = if idx == 0 { hop.fee_yuv.map(|v| v.value()) } else { cur_value_yuv };
 		let cltv = if cur_cltv == starting_htlc_offset {
 			hop.cltv_expiry_delta + starting_htlc_offset
 		} else {
@@ -235,6 +249,7 @@ pub(super) fn build_onion_payloads(
 					keysend_preimage: *keysend_preimage,
 					custom_tlvs: recipient_onion.custom_tlvs.clone(),
 					sender_intended_htlc_amt_msat: value_msat,
+					sender_intended_htlc_amt_yuv: value_yuv,
 					cltv_expiry_height: cltv,
 				});
 			}
@@ -242,11 +257,16 @@ pub(super) fn build_onion_payloads(
 			let payload = msgs::OutboundOnionPayload::Forward {
 				short_channel_id: last_short_channel_id,
 				amt_to_forward: value_msat,
+				amt_to_forward_yuv: value_yuv,
 				outgoing_cltv_value: cltv,
 			};
 			res.insert(0, payload);
 		}
 		cur_value_msat += hop.fee_msat;
+		if let Some((cur_yuv, hop_fee_value)) =cur_value_yuv.as_mut().zip(hop.fee_yuv) {
+			*cur_yuv += hop_fee_value.value();
+		}
+
 		if cur_value_msat >= 21000000 * 100000000 * 1000 {
 			return Err(APIError::InvalidRoute { err: "Channel fees overflowed?".to_owned() });
 		}
@@ -256,7 +276,8 @@ pub(super) fn build_onion_payloads(
 		}
 		last_short_channel_id = hop.short_channel_id;
 	}
-	Ok((res, cur_value_msat, cur_cltv))
+
+	Ok((res, HtlcOnionData { htlc_msat: cur_value_msat, htlc_cltv: cur_cltv, htlc_yuv: cur_value_yuv }))
 }
 
 /// Length of the onion data packet. Before TLV-based onions this was 20 65-byte hops, though now
@@ -1127,21 +1148,39 @@ pub fn create_payment_onion<T: secp256k1::Signing>(
 	recipient_onion: RecipientOnionFields, cur_block_height: u32, payment_hash: &PaymentHash,
 	keysend_preimage: &Option<PaymentPreimage>, prng_seed: [u8; 32],
 ) -> Result<(msgs::OnionPacket, u64, u32), APIError> {
+	create_payment_onion_internal(secp_ctx, path, session_priv, total_msat,
+		recipient_onion, cur_block_height, payment_hash, keysend_preimage,
+		prng_seed, None,
+	).map(|(packet, data)| (packet, data.htlc_msat, data.htlc_cltv))
+}
+
+pub struct HtlcOnionData {
+	pub htlc_msat: u64,
+	pub htlc_cltv: u32,
+	pub htlc_yuv: Option<u128>,
+}
+
+pub fn create_payment_onion_internal<T: secp256k1::Signing>(
+	secp_ctx: &Secp256k1<T>, path: &Path, session_priv: &SecretKey, total_msat: u64,
+	recipient_onion: RecipientOnionFields, cur_block_height: u32, payment_hash: &PaymentHash,
+	keysend_preimage: &Option<PaymentPreimage>, prng_seed: [u8; 32], total_yuv: Option<u128>,
+) -> Result<(msgs::OnionPacket, HtlcOnionData), APIError> {
 	let onion_keys = construct_onion_keys(&secp_ctx, &path, &session_priv).map_err(|_| {
 		APIError::InvalidRoute { err: "Pubkey along hop was maliciously selected".to_owned() }
 	})?;
-	let (onion_payloads, htlc_msat, htlc_cltv) = build_onion_payloads(
+	let (onion_payloads, htlc_data) = build_onion_payloads_internal(
 		&path,
 		total_msat,
 		recipient_onion,
 		cur_block_height,
 		keysend_preimage,
+		total_yuv,
 	)?;
 	let onion_packet = construct_onion_packet(onion_payloads, onion_keys, prng_seed, payment_hash)
 		.map_err(|_| APIError::InvalidRoute {
 			err: "Route size too large considering onion data".to_owned(),
 		})?;
-	Ok((onion_packet, htlc_msat, htlc_cltv))
+	Ok((onion_packet, htlc_data))
 }
 
 pub(crate) fn decode_next_untagged_hop<T, R: ReadableArgs<T>, N: NextPacketBytes>(
@@ -1268,26 +1307,31 @@ mod tests {
 						pubkey: PublicKey::from_slice(&<Vec<u8>>::from_hex("02eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f283686619").unwrap()[..]).unwrap(),
 						channel_features: ChannelFeatures::empty(), node_features: NodeFeatures::empty(),
 						short_channel_id: 0, fee_msat: 0, cltv_expiry_delta: 0, maybe_announced_channel: true, // We fill in the payloads manually instead of generating them from RouteHops.
+						fee_yuv: None,
 					},
 					RouteHop {
 						pubkey: PublicKey::from_slice(&<Vec<u8>>::from_hex("0324653eac434488002cc06bbfb7f10fe18991e35f9fe4302dbea6d2353dc0ab1c").unwrap()[..]).unwrap(),
 						channel_features: ChannelFeatures::empty(), node_features: NodeFeatures::empty(),
 						short_channel_id: 0, fee_msat: 0, cltv_expiry_delta: 0, maybe_announced_channel: true, // We fill in the payloads manually instead of generating them from RouteHops.
+						fee_yuv: None,
 					},
 					RouteHop {
 						pubkey: PublicKey::from_slice(&<Vec<u8>>::from_hex("027f31ebc5462c1fdce1b737ecff52d37d75dea43ce11c74d25aa297165faa2007").unwrap()[..]).unwrap(),
 						channel_features: ChannelFeatures::empty(), node_features: NodeFeatures::empty(),
 						short_channel_id: 0, fee_msat: 0, cltv_expiry_delta: 0, maybe_announced_channel: true, // We fill in the payloads manually instead of generating them from RouteHops.
+						fee_yuv: None,
 					},
 					RouteHop {
 						pubkey: PublicKey::from_slice(&<Vec<u8>>::from_hex("032c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991").unwrap()[..]).unwrap(),
 						channel_features: ChannelFeatures::empty(), node_features: NodeFeatures::empty(),
 						short_channel_id: 0, fee_msat: 0, cltv_expiry_delta: 0, maybe_announced_channel: true, // We fill in the payloads manually instead of generating them from RouteHops.
+						fee_yuv: None,
 					},
 					RouteHop {
 						pubkey: PublicKey::from_slice(&<Vec<u8>>::from_hex("02edabbd16b41c8371b92ef2f04c1185b4f03b6dcd52ba9b78d9d7c89c8f221145").unwrap()[..]).unwrap(),
 						channel_features: ChannelFeatures::empty(), node_features: NodeFeatures::empty(),
 						short_channel_id: 0, fee_msat: 0, cltv_expiry_delta: 0, maybe_announced_channel: true, // We fill in the payloads manually instead of generating them from RouteHops.
+						fee_yuv: None,
 					},
 			], blinded_tail: None, chroma: None, }],
 			route_params: None,
@@ -1421,6 +1465,7 @@ mod tests {
 				short_channel_id: 1,
 				amt_to_forward: 15000,
 				outgoing_cltv_value: 1500,
+				amt_to_forward_yuv: None,
 			}),
 			/*
 			The second payload is represented by raw hex as it contains custom type data. Content:
@@ -1444,11 +1489,13 @@ mod tests {
 				short_channel_id: 3,
 				amt_to_forward: 12500,
 				outgoing_cltv_value: 1250,
+				amt_to_forward_yuv: None,
 			}),
 			RawOnionHopData::new(msgs::OutboundOnionPayload::Forward {
 				short_channel_id: 4,
 				amt_to_forward: 10000,
 				outgoing_cltv_value: 1000,
+				amt_to_forward_yuv: None,
 			}),
 			/*
 			The fifth payload is represented by raw hex as it contains custom type data. Content:
